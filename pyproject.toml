@@ -1,0 +1,29 @@
+[project]
+name = "hermes-core"
+version = "0.0.1"
+description = "Scaffolding condiviso della toolbox multi-agente difensiva Hermes: orchestratore, server MCP (registry tool + risk tier + vault), logging JSONL."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "gabriele1701" }]
+
+dependencies = [
+    "mcp>=1.2.0",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mcp_server", "agents"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
