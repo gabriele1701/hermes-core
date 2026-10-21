@@ -1,0 +1,32 @@
+# --- Runtime / dati locali (mai versionare) ---
+# I log d'audit possono contenere target, nomi tool, esiti: restano locali.
+logs/
+*.jsonl
+
+# Config locali: solo i *.example.* sono versionati; le copie reali no.
+config/*.local.*
+config/*.yaml
+!config/*.example.yaml
+
+# Segreti: nessun file di credenziali deve finire nel repo.
+*.env
+.env
+.env.*
+secrets/
+*.key
+*.pem
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
