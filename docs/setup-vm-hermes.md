@@ -291,10 +291,10 @@ hermes mcp test hermes_core
 Poi `/reload-mcp` in una sessione. I tool compaiono col prefisso del server:
 
 ```
-mcp_hermes_core_list_available_tools
-mcp_hermes_core_describe_tool
-mcp_hermes_core_invoke_tool
-mcp_hermes_core_raise_tool_tier
+mcp__hermes_core__list_available_tools
+mcp__hermes_core__describe_tool
+mcp__hermes_core__invoke_tool
+mcp__hermes_core__raise_tool_tier
 ```
 
 La prova finale è invocare `echo.ping`: deve restituire `status: "ok"` e, in

@@ -233,23 +233,28 @@ tool abilitati sono registrati in config sotto
 
 ### Come si chiamano i tool dentro Hermes
 
-Hermes espone i tool di un server MCP con un prefisso:
-`mcp_<nome-server>_<nome-tool>`. Registrando il server come `hermes-core`, le
-quattro funzioni compaiono quindi come:
+Hermes espone i tool di un server MCP con un prefisso a **doppio
+underscore**: `mcp__<nome-server>__<nome-tool>`. Registrando il server come
+`hermes_core`, le quattro funzioni compaiono quindi come:
 
 ```
-mcp_hermes-core_list_available_tools
-mcp_hermes-core_describe_tool
-mcp_hermes-core_invoke_tool
-mcp_hermes-core_raise_tool_tier
+mcp__hermes_core__list_available_tools
+mcp__hermes_core__describe_tool
+mcp__hermes_core__invoke_tool
+mcp__hermes_core__raise_tool_tier
 ```
 
 Vale la pena saperlo prima: cercando `invoke_tool` senza prefisso si
 concluderebbe che la registrazione è fallita proprio mentre funziona.
 
-Dato che il nome del server finisce dentro un identificatore, un nome senza
-trattini — `hermes_core` — produce tool dal nome più pulito. È una preferenza,
-non un requisito.
+**Hermes aggiunge quattro accessori del protocollo** a ogni server MCP —
+`get_prompt`, `list_prompts`, `list_resources`, `read_resource` — quindi
+`/tools` conta **8** voci per questo server, non 4. Le quattro aggiunte
+risponderanno vuoto, perché `hermes-core` non espone né prompt né risorse.
+Non è un difetto e non va corretto: è il conteggio che include il protocollo.
+
+Dato che il nome del server finisce dentro un identificatore, conviene un
+nome senza trattini — `hermes_core` e non `hermes-core`.
 
 ---
 
@@ -333,7 +338,7 @@ pannello: una voce può essere *installata ma disabilitata*. In config, i tool
 abilitati stanno sotto `mcp_servers.<nome>.tools.include`.
 
 **I tool non si trovano col nome che ti aspetti.** Hermes li espone come
-`mcp_<nome-server>_<nome-tool>`: cercare `invoke_tool` senza prefisso non dà
+`mcp__<nome-server>__<nome-tool>`: cercare `invoke_tool` senza prefisso non dà
 risultati anche quando tutto funziona.
 
 **Il server parte e muore subito.** L'avvio fallisce apposta se un tool non è
