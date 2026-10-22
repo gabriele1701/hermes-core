@@ -76,29 +76,63 @@ Provalo a mano prima di configurare Hermes — deve restare in attesa senza
 stampare nulla, ed è il comportamento corretto: sta aspettando il protocollo
 sullo stdin. Si esce con `Ctrl-C`.
 
-### Se Hermes vuole comando e argomenti separati
+### Registrazione: usare la CLI, non scrivere la config a mano
 
-| Campo | Valore |
-|---|---|
-| comando | `/percorso/del/repo/.venv/bin/python` |
-| argomenti | `-m`, `mcp_server.server`, `/percorso/del/repo/config/hermes.toml` |
-| directory di lavoro | `/percorso/del/repo` (facoltativa: il server non dipende dalla cwd) |
+Hermes tiene le registrazioni MCP in un file **YAML** sotto la chiave di primo
+livello `mcp_servers`. Il percorso di quel file però non è univoco nelle
+fonti: la documentazione ufficiale parla di un `config.yaml` citando la
+directory d'installazione `~/.hermes/hermes-agent`, mentre una guida di terze
+parti indica `~/.hermes/config.yaml`.
 
-### Se Hermes usa un file JSON in stile `mcpServers`
+Conviene quindi **non indovinare il percorso** e lasciare che sia la CLI a
+scriverlo dove quella installazione lo tiene:
 
-Molti host MCP adottano questa forma. **Da confermare sulla documentazione di
-Hermes**, non è detto che sia la sua:
+```sh
+hermes mcp add hermes-core \
+    --command /percorso/assoluto/del/repo/bin/hermes-core-server
 
-```json
-{
-  "mcpServers": {
-    "hermes-core": {
-      "command": "/percorso/del/repo/bin/hermes-core-server",
-      "args": []
-    }
-  }
-}
+hermes mcp list                 # conferma che sia registrato
+hermes mcp test hermes-core     # si connette, elenca i tool, esce con un codice
 ```
+
+`hermes mcp test` esce `0` se la connessione riesce, `1` se fallisce, `3` se
+il server non è in configurazione.
+
+Accoppiato al preflight, questo dà una diagnosi a due lati: **il doctor dice
+se il nostro server funziona, `hermes mcp test` se Hermes riesce a parlarci.**
+Se il primo è verde e il secondo no, il problema è nella registrazione.
+
+Dopo la registrazione vale la pena aprire il file che la CLI ha scritto: è
+quello il percorso reale su questa macchina, e conoscerlo serve per le
+modifiche successive.
+
+### Forma YAML, se la scrivi a mano
+
+```yaml
+mcp_servers:
+  hermes-core:
+    command: /percorso/assoluto/del/repo/bin/hermes-core-server
+    args: []
+```
+
+Campi disponibili secondo la documentazione: `command`, `args`, `env` per i
+server stdio; `url` e `headers` per quelli HTTP; `enabled: false` per
+disattivare senza cancellare; `tools` per filtrare ciò che viene esposto.
+
+Il nostro server non richiede `env`: il wrapper ricava l'interprete dalla
+propria posizione, quindi non dipende da variabili d'ambiente. E non richiede
+`cwd`, perché i percorsi nella sua configurazione sono risolti rispetto al
+file di configurazione e non alla directory corrente.
+
+Per applicare una modifica fatta a mano: `/reload-mcp` dentro una sessione, o
+aprirne una nuova.
+
+### Nota sulla versione desktop
+
+Le fonti consultate sono orientate alla CLI e **non confermano** che l'app
+desktop legga la stessa configurazione. Se la registrazione via CLI non si
+riflette nel desktop, è lì che va cercata la differenza — non nel server, che
+il preflight ha già verificato.
 
 ---
 
@@ -161,6 +195,14 @@ assoluto e che il wrapper abbia il bit di esecuzione (`ls -l bin/`).
 **Hermes vede il server ma non i tool.** Il preflight elenca i tool
 registrati: se li vede lui e non Hermes, il problema è nella registrazione
 lato host. Se non li vede nemmeno lui, è la config.
+
+**`hermes mcp test` esce con 1.** Connessione fallita: Hermes trova la
+registrazione ma non riesce a dialogare. Il comando è sbagliato o non
+eseguibile — provarlo a mano, esattamente come scritto nella config.
+
+**`hermes mcp test` esce con 3.** Il server non è in configurazione: la
+registrazione non è andata a buon fine, o la CLI e il processo che stai
+interrogando leggono due file diversi.
 
 **Il server parte e muore subito.** L'avvio fallisce apposta se un tool non è
 conforme o se il backend del vault è sconosciuto: partire con un registro
