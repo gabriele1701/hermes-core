@@ -266,8 +266,15 @@ class ToolRegistry:
         tier: RiskTier,
         *,
         correlation_id: uuid.UUID | None = None,
+        agent: OwnerAgent | None = None,
     ) -> RiskTier:
         """Innalza il tier di un tool. Rifiuta ogni declassamento.
+
+        ``agent`` è l'istanza che ha chiesto la modifica, e va passato: un
+        innalzamento di tier è una modifica ai controlli di sicurezza, quindi
+        è precisamente l'evento di cui l'audit deve sapere la provenienza.
+        Senza, la riga di log dice che il tier è cambiato ma non per mano di
+        chi.
 
         Un tier uguale a quello effettivo è accettato ed è idempotente. Uno
         inferiore viene rifiutato e registrato come evento di sicurezza:
@@ -282,6 +289,7 @@ class ToolRegistry:
             self._log(
                 LogAction.OVERRIDE_REJECTED,
                 CallOutcome.DENIED,
+                agent=agent,
                 tool_id=tool_id,
                 tier_effective=corrente,
                 detail=(
@@ -300,6 +308,7 @@ class ToolRegistry:
         self._log(
             LogAction.OVERRIDE_SET,
             CallOutcome.OK,
+            agent=agent,
             tool_id=tool_id,
             tier_effective=risultante,
             detail=(

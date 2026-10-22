@@ -322,7 +322,10 @@ class HermesServer:
 
         try:
             risultante = self._registry.set_override(
-                tool_id, richiesto, correlation_id=correlation_id
+                tool_id,
+                richiesto,
+                correlation_id=correlation_id,
+                agent=self._config.agent,
             )
         except OverrideRefused as err:
             return {"ok": False, "error": str(err)}

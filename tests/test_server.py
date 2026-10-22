@@ -430,6 +430,24 @@ def test_innalzamento_tier(server: HermesServer):
     assert server.registry.effective_tier("echo.ping") is RiskTier.ROSSO
 
 
+def test_innalzamento_attribuito_all_istanza(server: HermesServer):
+    """Il server passa la propria identità: l'audit dice chi ha alzato il tier."""
+    server._raise_tool_tier("echo.ping", "rosso")
+    riga = [
+        r for r in server.audit.read_all() if r.action is LogAction.OVERRIDE_SET
+    ][0]
+    assert riga.agent is OwnerAgent.ECHO_DUMMY
+
+
+def test_declassamento_rifiutato_attribuito(server: HermesServer):
+    server._raise_tool_tier("echo.ping", "rosso")
+    server._raise_tool_tier("echo.ping", "verde")
+    riga = [
+        r for r in server.audit.read_all() if r.action is LogAction.OVERRIDE_REJECTED
+    ][0]
+    assert riga.agent is OwnerAgent.ECHO_DUMMY
+
+
 def test_innalzamento_rende_il_tool_non_eseguibile(server: HermesServer):
     server._raise_tool_tier("echo.ping", "rosso")
     assert server._invoke_tool("echo.ping")["result"]["status"] == "needs_confirmation"
