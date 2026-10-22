@@ -5,7 +5,9 @@ logs/
 
 # Config locali: solo i *.example.* sono versionati; le copie reali no.
 config/*.local.*
+config/*.toml
 config/*.yaml
+!config/*.example.toml
 !config/*.example.yaml
 
 # Segreti: nessun file di credenziali deve finire nel repo.

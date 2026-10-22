@@ -72,6 +72,29 @@ argomenti**, cioè all'ingresso dei primi tool reali in Milestone 1.
 
 ---
 
+## MEDIA — il flusso di conferma non è collegato
+
+**Dove:** `mcp_server/server.py`.
+
+`invoke_tool` non accetta un parametro `confirmed`, e giustamente: un booleano
+fornito dal chiamante sarebbe un'autorizzazione che il client concede a se
+stesso, e la cadenza di conferma diventerebbe ornamentale.
+
+La conseguenza è che oggi **un tool che richiede conferma non è eseguibile**
+attraverso il server: l'invocazione ritorna `needs_confirmation` con la
+chiamata in `pending`, e lì si ferma. È fail-closed, quindi il difetto è di
+funzionalità e non di sicurezza — ma va chiuso perché altrimenti tutto ciò che
+non è Verde resta inutilizzabile.
+
+**Condizione di chiusura:** collegare il meccanismo di *elicitation* di MCP,
+con cui il server chiede all'host di interpellare l'utente e riceve la
+risposta lungo il protocollo. L'autorizzazione arriva così dall'host, non dal
+chiamante, e resta `authorized_by=USER` con una provenienza verificabile.
+Da affrontare insieme allo store dei consensi per scope, con cui condivide il
+modello.
+
+---
+
 ## MEDIA — il consenso per scope non è modellato
 
 **Dove:** `mcp_server/tiers.py` (`ConfirmationPolicy.unattended_safe`).
