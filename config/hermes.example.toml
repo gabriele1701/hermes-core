@@ -1,0 +1,58 @@
+#
+# Configurazione d'esempio di un'istanza del server MCP di hermes-core.
+#
+# Un'istanza appartiene a UN agente: l'identità è fissata qui e non è un
+# parametro che il client può fornire. Per più agenti si lanciano più
+# processi, ciascuno con la propria configurazione.
+#
+# Copiare in config/hermes.toml (ignorato da git) e adattare.
+#
+
+[server]
+# Agente proprietario di questa istanza.
+# Ammessi: orchestrator, echo_dummy, vuln_assessment, pentest_kali
+agent = "echo_dummy"
+
+# Radice entro cui gli script dei tool devono restare. I percorsi relativi
+# sono risolti rispetto alla directory di questo file.
+repo_root = ".."
+
+# Log d'audit JSONL. Se omesso: <repo_root>/logs/hermes-audit.jsonl
+# Da proteggere con `sudo chattr +a` quando si passa a un uso continuativo.
+log_path = "../logs/hermes-audit.jsonl"
+
+# Disponibilità del runtime isolato. A false, i tool che dichiarano
+# requires_container vengono NEGATI, non eseguiti sull'host.
+container_available = false
+
+[vault]
+# In questa milestone è disponibile solo "stub", che non contiene
+# credenziali reali. Un backend sconosciuto fa fallire l'avvio.
+backend = "stub"
+
+# Solo NOMI di segreti da seminare nello stub: nessun valore va in config.
+# Nel vault reale entrano unicamente le credenziali delle proprie VM di
+# laboratorio.
+stub_secrets = ["ssh/lab-kali"]
+
+# --------------------------------------------------------------------------- #
+# Tool registrati.
+#
+# default_tier è obbligatorio: la sua assenza fa fallire la registrazione,
+# non ricade su un default permissivo. Il tier non è modificabile dopo la
+# registrazione; un override può solo innalzarlo.
+#
+# exec_sha256 deve corrispondere allo SHA-256 effettivo dello script: viene
+# verificato prima di OGNI esecuzione. Per calcolarlo:
+#     sha256sum agents/echo_agent/run.py
+# --------------------------------------------------------------------------- #
+
+[[tool]]
+tool_id = "echo.ping"
+owner_agent = "echo_dummy"
+default_tier = "verde"
+personal_data = false
+requires_container = false
+exec_path = "agents/echo_agent/run.py"
+exec_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+description = "Agente dummy: restituisce un risultato conforme al contratto."
