@@ -184,6 +184,94 @@ def test_permessi_restrittivi(log: AuditLog):
     assert stat.S_IMODE(log.path.parent.stat().st_mode) == 0o700
 
 
+def test_chmod_rifiutata_non_impedisce_la_scrittura(tmp_path, monkeypatch):
+    """Indurire il log non deve metterlo fuori uso.
+
+    Difetto trovato sul campo: `chattr +a` sul log d'audit fa rifiutare la
+    chmod con EPERM anche al proprietario, e il writer la eseguiva a ogni
+    costruzione. Risultato: la misura di protezione impediva di scrivere ciò
+    che proteggeva, e il server non partiva più.
+    """
+    import os as _os
+
+    percorso = tmp_path / "audit.jsonl"
+    percorso.write_text("", encoding="utf-8")
+    _os.chmod(percorso, 0o666)  # permessi diversi: forza il tentativo di chmod
+
+    def chmod_negata(*args, **kwargs):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(_os, "chmod", chmod_negata)
+
+    log = AuditLog(percorso)  # non deve sollevare
+    log.log(correlation_id=_cid(), action=LogAction.TOOL_CALL, outcome=CallOutcome.OK)
+    assert len(log.read_all()) == 1
+
+
+def test_chmod_non_tentata_se_i_permessi_sono_giusti(tmp_path, monkeypatch):
+    """Sul caso normale la chmod non viene nemmeno chiamata.
+
+    È ciò che rende il writer compatibile con un log append-only: se il file
+    ha già i permessi giusti, non c'è niente da imporre.
+    """
+    import os as _os
+
+    percorso = tmp_path / "audit.jsonl"
+    AuditLog(percorso)  # prima costruzione: crea e imposta i permessi
+
+    chiamate: list[str] = []
+    originale = _os.chmod
+
+    def spia(path, mode, *args, **kwargs):
+        chiamate.append(str(path))
+        return originale(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(_os, "chmod", spia)
+    AuditLog(percorso)  # seconda costruzione: nulla da cambiare
+    assert chiamate == []
+
+
+def test_log_append_only_reale(tmp_path):
+    """Con `chattr +a` applicato davvero, la scrittura deve funzionare.
+
+    Salta dove `chattr` non è disponibile o il filesystem non lo supporta —
+    nella CI capita. Dove gira, è la verifica che conta: il writer continua a
+    scrivere su un log che nessuno può più troncare.
+    """
+    import os as _os
+    import subprocess
+
+    percorso = tmp_path / "audit.jsonl"
+    AuditLog(percorso).log(
+        correlation_id=_cid(), action=LogAction.AGENT_INVOKED, outcome=CallOutcome.OK
+    )
+
+    try:
+        esito = subprocess.run(
+            ["chattr", "+a", str(percorso)], capture_output=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        pytest.skip("chattr non disponibile")
+    if esito.returncode != 0:
+        pytest.skip("chattr +a non supportato su questo filesystem o privilegi")
+
+    try:
+        log = AuditLog(percorso)  # il punto che si rompeva
+        log.log(
+            correlation_id=_cid(),
+            action=LogAction.TOOL_CALL,
+            outcome=CallOutcome.OK,
+            detail="scritto su log append-only",
+        )
+        righe = log.read_all()
+        assert len(righe) == 2
+        assert righe[-1].detail == "scritto su log append-only"
+    finally:
+        # Senza togliere l'attributo, tmp_path non è cancellabile.
+        subprocess.run(["chattr", "-a", str(percorso)], capture_output=True, timeout=10)
+        _os.chmod(percorso, 0o600)
+
+
 def test_crea_directory_mancante(tmp_path):
     destinazione = tmp_path / "a" / "b" / "audit.jsonl"
     AuditLog(destinazione).log(
