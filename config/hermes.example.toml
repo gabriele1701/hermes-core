@@ -54,5 +54,5 @@ default_tier = "verde"
 personal_data = false
 requires_container = false
 exec_path = "agents/echo_agent/run.py"
-exec_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+exec_sha256 = "34b7aa6afc7f96e5c88ecfd8f4305a0739743bc5a1f7aa27ee2b63546518d3a8"
 description = "Agente dummy: restituisce un risultato conforme al contratto."

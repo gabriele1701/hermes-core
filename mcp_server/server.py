@@ -236,14 +236,26 @@ class HermesServer:
         return self._riassunto(tool_id, dettagliato=True)
 
     def _invoke_tool(
-        self, tool_id: str, target: str | None = None
+        self,
+        tool_id: str,
+        target: str | None = None,
+        correlation_id: str | None = None,
     ) -> dict[str, Any]:
         """Esegue un tool applicando il gate, e restituisce un AgentResult.
 
         Nessun parametro di conferma e nessun parametro di identità: vedere la
         docstring del modulo.
+
+        ``correlation_id`` invece **è** un parametro, e la differenza è che non
+        è una credenziale: è un identificativo di tracciamento. Il server non
+        concede nulla in base al suo valore, serve solo a far ricadere sotto
+        un'unica catena le righe scritte dall'orchestratore e quelle scritte
+        qui — che sono processi distinti sullo stesso log. Se assente o
+        malformato ne viene generato uno nuovo, perché un identificativo
+        illeggibile non deve impedire l'esecuzione né, peggio, far perdere la
+        traccia.
         """
-        correlation_id = uuid.uuid4()
+        correlation_id = _correlation_id(correlation_id)
         self._audit.log(
             correlation_id=correlation_id,
             action=LogAction.AGENT_INVOKED,
@@ -286,10 +298,12 @@ class HermesServer:
         )
         self._log_risultato(risultato)
         return {
-            **risultato.model_dump(mode="json"),
-            "stdout": esito.stdout,
-            "stderr": esito.stderr,
-            "returncode": esito.returncode,
+            "result": risultato.model_dump(mode="json"),
+            "output": {
+                "stdout": esito.stdout,
+                "stderr": esito.stderr,
+                "returncode": esito.returncode,
+            },
         }
 
     def _raise_tool_tier(self, tool_id: str, tier: str) -> dict[str, Any]:
@@ -388,7 +402,7 @@ class HermesServer:
             ],
         )
         self._log_risultato(risultato)
-        return risultato.model_dump(mode="json")
+        return {"result": risultato.model_dump(mode="json"), "output": None}
 
     def _risultato_negato(
         self, correlation_id: uuid.UUID, tool_id: str, target: str | None, motivo: str
@@ -410,7 +424,7 @@ class HermesServer:
             ],
         )
         self._log_risultato(risultato)
-        return risultato.model_dump(mode="json")
+        return {"result": risultato.model_dump(mode="json"), "output": None}
 
     def _risultato_errore(self, correlation_id: uuid.UUID, motivo: str) -> dict[str, Any]:
         risultato = AgentResult(
@@ -420,7 +434,23 @@ class HermesServer:
             summary=motivo,
         )
         self._log_risultato(risultato)
-        return risultato.model_dump(mode="json")
+        return {"result": risultato.model_dump(mode="json"), "output": None}
+
+
+def _correlation_id(valore: str | None) -> uuid.UUID:
+    """Converte un correlation_id ricevuto, o ne genera uno nuovo.
+
+    Un valore assente o malformato non è un errore da propagare: è un
+    identificativo di tracciamento, e rifiutare l'invocazione per un UUID
+    scritto male significherebbe far dipendere l'esecuzione da un campo che
+    non autorizza nulla.
+    """
+    if valore:
+        try:
+            return uuid.UUID(str(valore))
+        except (ValueError, AttributeError, TypeError):
+            pass
+    return uuid.uuid4()
 
 
 def _costruisci_backend(config: ServerConfig) -> VaultBackend:

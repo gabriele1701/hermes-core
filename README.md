@@ -66,9 +66,39 @@ pip install -e ".[dev]"
 pytest
 ```
 
+I test marcati `slow` avviano processi veri e dialogano in MCP su stdio
+(~1,5 s l'uno). Durante l'iterazione:
+
+```sh
+pytest -m "not slow"
+```
+
+## Provare la catena
+
+```sh
+cp config/hermes.example.toml config/hermes.toml
+# se lo script cambia, ricalcolare l'hash dichiarato:
+#   sha256sum agents/echo_agent/run.py
+python -m mcp_server.server config/hermes.toml    # resta in attesa su stdio
+```
+
+Il server non è pensato per essere usato a mano: parla il protocollo MCP sul
+proprio stdin/stdout, e si aspetta un client. L'orchestratore in
+`agents/orchestrator/` è il client minimo che lo avvia, lo interroga e ne
+valida il risultato.
+
 ## Stato
 
-Milestone 0 — scaffolding in corso. Nessun tool di sicurezza reale è ancora integrato.
+**Milestone 0 completa**, salvo l'integrazione con Hermes desktop.
+
+Funziona la catena orchestratore → agente → gate di esecuzione → script →
+log d'audit, con un unico `correlation_id` dall'invocazione alla riga finale.
+L'unico tool registrato è un dummy: **nessun tool di sicurezza reale è ancora
+integrato**.
+
+Le lacune di sicurezza note e consapevolmente non ancora chiuse sono elencate
+in [docs/debito-sicurezza.md](docs/debito-sicurezza.md), ciascuna con la
+propria condizione di chiusura.
 
 ## Licenza
 
