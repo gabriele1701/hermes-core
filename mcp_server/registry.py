@@ -49,6 +49,45 @@ Ogni tool dichiara il proprio ``owner_agent``, e il registro è l'unico
 componente che lo sa. :meth:`ToolRegistry.assert_can_invoke` fa valere quel
 confine: senza, il campo sarebbe decorativo e l'agente di pentest potrebbe
 invocare i tool dell'agente di vulnerability assessment e viceversa.
+
+Aliasing: perché si rileva ma non si blocca
+-------------------------------------------
+
+Rifiutare il ``tool_id`` duplicato chiude la via più comoda al declassamento,
+non tutte. Resta quella di registrare un **secondo tool_id sullo stesso
+script** dichiarandolo a tier più basso: stessa capacità, conferme più lasche,
+regola sull'override aggirata.
+
+Un rifiuto secco su ``exec_path`` ripetuto sarebbe però sbagliato, perché lo
+stesso pattern descrive un caso legittimo: uno script con più sottocomandi,
+dove ``nmap.ping_sweep`` è davvero Verde e ``nmap.aggressive`` è davvero
+Rosso. I due casi oggi sono **indistinguibili**, perché :class:`ToolSpec` non
+ha un campo argomenti: ``exec_path`` è l'intera identità di ciò che viene
+eseguito, e il contratto non ha l'informazione per dire se due tool facciano
+la stessa cosa o cose diverse.
+
+Finché quell'informazione manca, il registro **rileva e registra** invece di
+bloccare: una registrazione che condivide ``exec_path`` con un tool a tier
+superiore emette un evento ``tool_alias_detected``, che in review salta
+all'occhio senza rompere il pattern legittimo. Viene segnalata anche la
+dichiarazione di integrità incoerente — stesso ``exec_path``, ``exec_sha256``
+diversi — che non ha alcun caso d'uso valido: lo stesso file non può avere
+due hash, quindi una delle due spec è sbagliata.
+
+La chiusura definitiva richiede ``exec_args`` nel contratto, così che
+l'identità di un tool diventi ``(path, sha, args)`` e l'aliasing genuino
+diventi rifiutabile senza falsi positivi. È registrata come voce ad **alta
+rilevanza** in ``docs/debito-sicurezza.md``.
+
+Limite di fiducia
+-----------------
+
+Nessun controllo in questo modulo protegge da una configurazione malevola: il
+registro **si fida del proprio input per costruzione**. Il confine di fiducia
+vero è chi può scrivere la configurazione, cioè chi può scrivere nel repo. Ciò
+che il registro può fare, e fa, è rendere ogni registrazione, rifiuto e
+anomalia un evento tracciato, così che configurazione e log raccontino la
+stessa storia e una discrepanza si veda.
 """
 
 from __future__ import annotations
@@ -183,6 +222,7 @@ class ToolRegistry:
                 f"conferma tecnica={policy.technical}, dedicata={policy.personal}"
             ),
         )
+        self._segnala_anomalie_di_alias(spec)
         return spec
 
     def register_payload(self, payload: Mapping[str, object]) -> ToolSpec:
@@ -274,6 +314,81 @@ class ToolRegistry:
         """Policy di conferma calcolata sul tier **effettivo**."""
         spec = self.spec(tool_id)
         return derive_policy_for(spec, effective_tier=self.effective_tier(tool_id))
+
+    # -- aliasing ------------------------------------------------------------ #
+
+    def tools_sharing_exec(self, tool_id: str) -> tuple[str, ...]:
+        """Altri ``tool_id`` registrati sullo stesso ``exec_path``.
+
+        Serve in review: è la domanda da fare quando si vuole sapere quante
+        porte d'accesso esistono verso lo stesso script.
+        """
+        spec = self.spec(tool_id)
+        return tuple(
+            sorted(
+                altro.tool_id
+                for altro in self._specs.values()
+                if altro.tool_id != tool_id and altro.exec_path == spec.exec_path
+            )
+        )
+
+    def _segnala_anomalie_di_alias(self, spec: ToolSpec) -> None:
+        """Registra gli alias sospetti sullo stesso script.
+
+        Non blocca: il pattern legittimo (uno script, più sottocomandi a
+        rischio diverso) e quello abusivo (stesso script a tier più basso)
+        sono indistinguibili finché il contratto non ha ``exec_args``.
+        """
+        fratelli = [
+            altro
+            for altro in self._specs.values()
+            if altro.tool_id != spec.tool_id and altro.exec_path == spec.exec_path
+        ]
+        if not fratelli:
+            return
+
+        # (a) Alias a tier inferiore: possibile declassamento mascherato.
+        superiori = [
+            altro
+            for altro in fratelli
+            if self.effective_tier(altro.tool_id).rank > spec.default_tier.rank
+        ]
+        if superiori:
+            elenco = ", ".join(
+                f"{a.tool_id}={self.effective_tier(a.tool_id)}" for a in sorted(
+                    superiori, key=lambda s: s.tool_id
+                )
+            )
+            self._log(
+                LogAction.TOOL_ALIAS_DETECTED,
+                CallOutcome.OK,
+                agent=spec.owner_agent,
+                tool_id=spec.tool_id,
+                tier_effective=spec.default_tier,
+                detail=(
+                    f"registrato a tier '{spec.default_tier}' su exec_path "
+                    f"'{spec.exec_path}' già usato a tier superiore da: {elenco}. "
+                    f"Verificare che non sia un declassamento mascherato."
+                ),
+            )
+
+        # (b) Integrità incoerente: lo stesso file non può avere due hash.
+        discordi = sorted(
+            {a.tool_id for a in fratelli if a.exec_sha256 != spec.exec_sha256}
+        )
+        if discordi:
+            self._log(
+                LogAction.TOOL_ALIAS_DETECTED,
+                CallOutcome.DENIED,
+                agent=spec.owner_agent,
+                tool_id=spec.tool_id,
+                tier_effective=spec.default_tier,
+                detail=(
+                    f"dichiarazione di integrità incoerente su exec_path "
+                    f"'{spec.exec_path}': exec_sha256 diverso da {', '.join(discordi)}. "
+                    f"Almeno una delle spec è errata."
+                ),
+            )
 
     # -- isolamento fra agenti ---------------------------------------------- #
 

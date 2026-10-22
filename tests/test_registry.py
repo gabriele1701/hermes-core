@@ -304,6 +304,123 @@ def test_policy_propaga_i_dati_personali(reg: ToolRegistry):
 
 
 # --------------------------------------------------------------------------- #
+# Aliasing sullo stesso script
+# --------------------------------------------------------------------------- #
+
+
+def _alias(audit: AuditLog):
+    return [r for r in audit.read_all() if r.action is LogAction.TOOL_ALIAS_DETECTED]
+
+
+def test_alias_a_tier_inferiore_segnalato(reg: ToolRegistry, audit: AuditLog):
+    """Secondo tool_id sullo stesso script a tier più basso: declassamento mascherato."""
+    reg.register(_spec(tool_id="nmap.aggressive", default_tier=RiskTier.ROSSO,
+                       exec_path="tools/nmap.py"))
+    reg.register(_spec(tool_id="nmap.sneaky", default_tier=RiskTier.VERDE,
+                       exec_path="tools/nmap.py"))
+
+    righe = _alias(audit)
+    assert len(righe) == 1
+    assert righe[0].tool_id == "nmap.sneaky"
+    assert "nmap.aggressive=rosso" in righe[0].detail
+    assert "declassamento mascherato" in righe[0].detail
+
+
+def test_alias_segnalato_ma_non_bloccante(reg: ToolRegistry):
+    """Rilevamento, non rifiuto: il pattern legittimo non deve rompersi."""
+    reg.register(_spec(tool_id="nmap.aggressive", default_tier=RiskTier.ROSSO,
+                       exec_path="tools/nmap.py"))
+    reg.register(_spec(tool_id="nmap.sneaky", default_tier=RiskTier.VERDE,
+                       exec_path="tools/nmap.py"))
+    assert len(reg) == 2
+    assert reg.effective_tier("nmap.sneaky") is RiskTier.VERDE
+
+
+def test_sottocomandi_a_rischio_crescente_non_segnalati(reg: ToolRegistry, audit: AuditLog):
+    """Il caso legittimo: stesso script, tier crescente. Nessun falso positivo."""
+    reg.register(_spec(tool_id="nmap.ping-sweep", default_tier=RiskTier.VERDE,
+                       exec_path="tools/nmap.py"))
+    reg.register(_spec(tool_id="nmap.aggressive", default_tier=RiskTier.ROSSO,
+                       exec_path="tools/nmap.py"))
+    assert _alias(audit) == []
+
+
+def test_stesso_tier_sullo_stesso_script_non_segnalato(reg: ToolRegistry, audit: AuditLog):
+    reg.register(_spec(tool_id="nmap.uno", default_tier=RiskTier.GIALLO,
+                       exec_path="tools/nmap.py"))
+    reg.register(_spec(tool_id="nmap.due", default_tier=RiskTier.GIALLO,
+                       exec_path="tools/nmap.py"))
+    assert _alias(audit) == []
+
+
+def test_script_diversi_non_segnalati(reg: ToolRegistry, audit: AuditLog):
+    reg.register(_spec(tool_id="tool.uno", default_tier=RiskTier.ROSSO,
+                       exec_path="tools/uno.py"))
+    reg.register(_spec(tool_id="tool.due", default_tier=RiskTier.VERDE,
+                       exec_path="tools/due.py"))
+    assert _alias(audit) == []
+
+
+def test_alias_confrontato_col_tier_effettivo_non_col_dichiarato(
+    reg: ToolRegistry, audit: AuditLog
+):
+    """Un override alzato su un fratello rende sospetto un alias basso successivo."""
+    reg.register(_spec(tool_id="nmap.uno", default_tier=RiskTier.VERDE,
+                       exec_path="tools/nmap.py"))
+    reg.set_override("nmap.uno", RiskTier.ROSSO)
+    reg.register(_spec(tool_id="nmap.due", default_tier=RiskTier.VERDE,
+                       exec_path="tools/nmap.py"))
+
+    righe = _alias(audit)
+    assert len(righe) == 1
+    assert "nmap.uno=rosso" in righe[0].detail
+
+
+def test_sha_incoerente_sullo_stesso_path_segnalato(reg: ToolRegistry, audit: AuditLog):
+    """Lo stesso file non può avere due hash: una delle due spec è sbagliata."""
+    reg.register(_spec(tool_id="nmap.uno", exec_path="tools/nmap.py", exec_sha256="a" * 64))
+    reg.register(_spec(tool_id="nmap.due", exec_path="tools/nmap.py", exec_sha256="b" * 64))
+
+    righe = _alias(audit)
+    assert len(righe) == 1
+    assert righe[0].outcome is CallOutcome.DENIED
+    assert "integrità incoerente" in righe[0].detail
+    assert "nmap.uno" in righe[0].detail
+
+
+def test_sha_coerente_non_segnalato(reg: ToolRegistry, audit: AuditLog):
+    reg.register(_spec(tool_id="nmap.uno", exec_path="tools/nmap.py"))
+    reg.register(_spec(tool_id="nmap.due", exec_path="tools/nmap.py"))
+    assert _alias(audit) == []
+
+
+def test_alias_e_sha_incoerente_insieme(reg: ToolRegistry, audit: AuditLog):
+    """Due anomalie distinte sullo stesso evento producono due righe."""
+    reg.register(_spec(tool_id="nmap.uno", default_tier=RiskTier.ROSSO,
+                       exec_path="tools/nmap.py", exec_sha256="a" * 64))
+    reg.register(_spec(tool_id="nmap.due", default_tier=RiskTier.VERDE,
+                       exec_path="tools/nmap.py", exec_sha256="b" * 64))
+
+    righe = _alias(audit)
+    assert len(righe) == 2
+    assert {r.outcome for r in righe} == {CallOutcome.OK, CallOutcome.DENIED}
+
+
+def test_tools_sharing_exec(reg: ToolRegistry):
+    reg.register(_spec(tool_id="nmap.uno", exec_path="tools/nmap.py"))
+    reg.register(_spec(tool_id="nmap.due", exec_path="tools/nmap.py"))
+    reg.register(_spec(tool_id="altro.tool", exec_path="tools/altro.py"))
+
+    assert reg.tools_sharing_exec("nmap.uno") == ("nmap.due",)
+    assert reg.tools_sharing_exec("altro.tool") == ()
+
+
+def test_tools_sharing_exec_su_sconosciuto_solleva(reg: ToolRegistry):
+    with pytest.raises(ToolNotRegistered):
+        reg.tools_sharing_exec("mai.registrato")
+
+
+# --------------------------------------------------------------------------- #
 # Isolamento fra agenti
 # --------------------------------------------------------------------------- #
 
