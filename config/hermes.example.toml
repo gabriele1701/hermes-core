@@ -17,8 +17,24 @@ agent = "echo_dummy"
 # sono risolti rispetto alla directory di questo file.
 repo_root = ".."
 
-# Log d'audit JSONL. Se omesso: <repo_root>/logs/hermes-audit.jsonl
-# Da proteggere con `sudo chattr +a` quando si passa a un uso continuativo.
+# Log d'audit JSONL.
+#
+# ATTENZIONE AL PERCORSO. Un valore RELATIVO è risolto rispetto alla directory
+# di QUESTO file, quindi "var/log/hermes/audit.jsonl" finisce dentro il repo,
+# mentre "/var/log/hermes/audit.jsonl" è assoluto. Uno slash di differenza.
+#
+# Il valore qui sotto tiene il log dentro il repo, e va bene SOLO per lo
+# sviluppo in locale. In un dispiegamento reale il repo è in sola lettura per
+# l'utente che esegue il server — è la mitigazione del TOCTOU fra verifica
+# dello SHA ed esecuzione — e quindi il log NON può starci dentro: il server
+# non riuscirebbe a crearlo e non partirebbe.
+#
+# Per il dispiegamento su VM dedicata (vedi docs/setup-vm-hermes.md) usare un
+# percorso assoluto fuori dal repo, su una directory del servizio:
+#
+#     log_path = "/var/log/hermes/audit.jsonl"
+#
+# Da proteggere poi con `sudo chattr +a`, dopo il primo avvio.
 log_path = "../logs/hermes-audit.jsonl"
 
 # Disponibilità del runtime isolato. A false, i tool che dichiarano
