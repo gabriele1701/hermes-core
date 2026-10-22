@@ -77,15 +77,22 @@ pytest -m "not slow"
 
 ```sh
 cp config/hermes.example.toml config/hermes.toml
-# se lo script cambia, ricalcolare l'hash dichiarato:
-#   sha256sum agents/echo_agent/run.py
-python -m mcp_server.server config/hermes.toml    # resta in attesa su stdio
+python -m mcp_server.doctor config/hermes.toml     # preflight
+bin/hermes-core-server                             # resta in attesa su stdio
 ```
 
+Il **preflight** verifica configurazione, percorsi, permessi del log,
+integrità degli script e handshake MCP reale, e dice cosa fare per ogni
+problema che trova. Vale la pena eseguirlo prima di cercare un guasto
+altrove.
+
 Il server non è pensato per essere usato a mano: parla il protocollo MCP sul
-proprio stdin/stdout, e si aspetta un client. L'orchestratore in
+proprio stdin/stdout e si aspetta un client. L'orchestratore in
 `agents/orchestrator/` è il client minimo che lo avvia, lo interroga e ne
 valida il risultato.
+
+Per registrarlo in Hermes desktop:
+[docs/integrazione-hermes.md](docs/integrazione-hermes.md).
 
 ## Stato
 

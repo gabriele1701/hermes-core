@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Avvia il server MCP di hermes-core sul trasporto stdio.
+#
+#   hermes-core-server [percorso/config.toml]
+#
+# Esiste per un motivo pratico: un host MCP lancia un comando, e quel comando
+# deve usare il Python del virtualenv del progetto, non quello di sistema. Qui
+# il percorso dell'interprete è derivato dalla posizione di questo script, così
+# il comando funziona da qualunque directory e senza che l'host debba
+# conoscere il layout del progetto.
+#
+# Niente di questo script scrive su stdout: su stdio, stdout appartiene al
+# protocollo MCP, e una singola riga di rumore lo corrompe. Gli errori vanno
+# su stderr.
+#
+set -eu
+
+# Directory del progetto, risolta dai symlink.
+SCRIPT_PATH=$(readlink -f "$0" 2>/dev/null || echo "$0")
+PROGETTO=$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)
+
+PYTHON="$PROGETTO/.venv/bin/python"
+CONFIG="${1:-$PROGETTO/config/hermes.toml}"
+
+if [ ! -x "$PYTHON" ]; then
+    echo "hermes-core: virtualenv assente in $PROGETTO/.venv" >&2
+    echo "  rimedio: python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2
+    exit 1
+fi
+
+if [ ! -f "$CONFIG" ]; then
+    echo "hermes-core: configurazione assente: $CONFIG" >&2
+    echo "  rimedio: cp config/hermes.example.toml config/hermes.toml" >&2
+    exit 1
+fi
+
+# exec: il server prende il posto della shell, così i segnali dell'host
+# arrivano direttamente al processo Python e non restano orfani.
+exec "$PYTHON" -m mcp_server.server "$CONFIG"
