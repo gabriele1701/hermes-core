@@ -7,6 +7,18 @@ come sottoprocesso dall'host e dialoga sul proprio stdin/stdout. All'host
 servono quindi solo due cose: **un comando da eseguire** e la cartella da cui
 eseguirlo.
 
+> **Architettura di riferimento: Hermes e il server stanno su macchine
+> diverse.** Hermes desktop gira sulla postazione, il server su una VM
+> dedicata, e il comando che Hermes lancia è `ssh`. Il motivo è che la
+> toolbox non deve abitare sulle macchine che analizza: l'orchestratore
+> custodisce il log d'audit, il vault e i controlli di scope, e un log che
+> risiede sul bersaglio vale meno di uno che risiede altrove.
+>
+> La preparazione della VM — utenti, permessi, chiave SSH vincolata a un
+> comando unico — è in **[setup-vm-hermes.md](setup-vm-hermes.md)**. Questo
+> documento copre la registrazione in Hermes e la diagnostica, e vale sia per
+> il caso remoto sia per un server sulla stessa macchina.
+
 ---
 
 ## 1. Preparare la macchina
@@ -56,6 +68,28 @@ serve per non cercare nel posto sbagliato.
 
 ## 3. Il comando da dare a Hermes
 
+### Server su VM dedicata (architettura di riferimento)
+
+```
+ssh -T -q hermes@<IP-VM>
+```
+
+SSH trasporta stdin e stdout in modo trasparente, quindi il protocollo
+attraversa la connessione senza accorgersene: per Hermes è un normale server
+stdio. Non serve indicare lo script, perché la chiave sulla VM è vincolata a
+un comando unico (vedi [setup-vm-hermes.md](setup-vm-hermes.md)) e qualunque
+cosa chieda il client, parte solo quel server.
+
+`-T` è necessario, non opzionale: un pseudo-terminale farebbe eco e
+traduzione dei caratteri, corrompendo il JSON-RPC. `-q` zittisce banner e
+avvisi, che normalmente vanno su stderr ma su stdio non vale la pena
+rischiare.
+
+L'autenticazione **deve** essere a chiave: non c'è nessuno a digitare una
+password, e con `no-pty` non ci sarebbe nemmeno dove chiederla.
+
+### Server sulla stessa macchina di Hermes
+
 ```
 /percorso/assoluto/del/repo/bin/hermes-core-server
 ```
@@ -75,6 +109,30 @@ passare la sua config:
 Provalo a mano prima di configurare Hermes — deve restare in attesa senza
 stampare nulla, ed è il comportamento corretto: sta aspettando il protocollo
 sullo stdin. Si esce con `Ctrl-C`.
+
+> Il server **non è portabile su Windows** così com'è, e non conviene renderlo
+> tale: `executor.py` lancia gli script con `python3`, il wrapper è uno script
+> `sh`, e soprattutto `chmod 0600` sul log è di fatto inefficace su Windows
+> mentre `chattr +a` non ha equivalente — si perderebbero due proprietà di
+> sicurezza, non due comodità. Il posto del server è Linux, dove staranno
+> comunque i tool che dovrà eseguire.
+
+### Diagnostica specifica del caso remoto
+
+Con il server su un'altra macchina si aggiungono due modi di fallire, nessuno
+dei due dentro il nostro codice.
+
+**La VM deve essere accesa** quando Hermes avvia il server. Un server stdio
+viene lanciato su richiesta, non è un servizio sempre attivo: se la VM è
+spenta, `ssh` fallisce e Hermes riporta un errore di connessione.
+
+**L'indirizzo deve essere stabile.** La configurazione di Hermes contiene
+l'indirizzo: con il DHCP la registrazione si rompe al primo rinnovo. IP
+statico o riserva DHCP.
+
+Se `ssh -T -q hermes@<IP-VM>` funziona dal terminale di Windows ma Hermes no,
+il problema è nella registrazione. Se non funziona nemmeno dal terminale, è
+rete, chiave o `authorized_keys`.
 
 ### Registrazione: usare la CLI, non scrivere la config a mano
 
@@ -118,9 +176,9 @@ modifiche successive.
 
 ```yaml
 mcp_servers:
-  hermes-core:
-    command: /percorso/assoluto/del/repo/bin/hermes-core-server
-    args: []
+  hermes_core:
+    command: ssh
+    args: ["-T", "-q", "hermes@<IP-VM>"]
 ```
 
 Campi disponibili secondo la documentazione: `command`, `args`, `env` per i
