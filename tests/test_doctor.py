@@ -243,6 +243,83 @@ def test_exit_code_uno_se_errori(tmp_path: Path, radice: Path, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# Diagnosi dallo stderr del server
+# --------------------------------------------------------------------------- #
+
+
+def test_errore_da_stderr_salta_la_riga_traceback():
+    """La prima riga di un traceback non informa di nulla: serve l'ultima.
+
+    Difetto trovato sul campo: il preflight riportava «Traceback (most recent
+    call last):» come causa, che è esattamente l'unica riga inutile.
+    """
+    from mcp_server.doctor import _errore_da_stderr
+
+    stderr = (
+        "Traceback (most recent call last):\n"
+        '  File "/opt/hermes-core/mcp_server/audit.py", line 240, in _prepara\n'
+        "    self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)\n"
+        "PermissionError: [Errno 13] Permission denied: "
+        "'/opt/hermes-core/config/var'\n"
+    )
+    causa = _errore_da_stderr(stderr)
+    assert causa.startswith("PermissionError")
+    assert "/opt/hermes-core/config/var" in causa
+    assert "Traceback" not in causa
+
+
+def test_errore_da_stderr_scarta_i_marcatori_di_posizione():
+    """Le righe '~~~^^^' di Python 3.11+ sono rumore, non contesto."""
+    from mcp_server.doctor import _errore_da_stderr
+
+    stderr = (
+        "Traceback (most recent call last):\n"
+        '  File "x.py", line 1, in <module>\n'
+        "    qualcosa.di_sbagliato()\n"
+        "    ~~~~~~~~^^^^^^^^^^^^^^\n"
+        "ValueError: messaggio utile\n"
+    )
+    causa = _errore_da_stderr(stderr)
+    assert "ValueError: messaggio utile" in causa
+    assert "^" not in causa
+    assert "~" not in causa
+
+
+def test_errore_da_stderr_riga_singola():
+    from mcp_server.doctor import _errore_da_stderr
+
+    assert _errore_da_stderr("errore secco\n") == "errore secco"
+
+
+def test_errore_da_stderr_vuoto():
+    from mcp_server.doctor import _errore_da_stderr
+
+    assert _errore_da_stderr("") == ""
+    assert _errore_da_stderr("   \n\n") == ""
+
+
+def test_log_path_relativo_spiegato_nel_rimedio(tmp_path: Path, radice: Path):
+    """Il caso che si è presentato davvero: slash iniziale dimenticato.
+
+    Un log_path relativo viene risolto rispetto alla cartella della config,
+    quindi finisce dentro il repo — che in produzione è in sola lettura.
+    """
+    percorso = scrivi_config(tmp_path, radice)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        f'log_path = "{tmp_path}/audit.jsonl"', 'log_path = "var/log/hermes/audit.jsonl"'
+    )
+    percorso.write_text(testo, encoding="utf-8")
+    # Rende impossibile creare la directory: 'var' esiste come file.
+    (tmp_path / "var").touch()
+
+    referto = esegui(percorso)
+    c = _controllo(referto, "log d'audit")
+    assert c.esito is Esito.ERRORE
+    assert "relativo" in c.rimedio
+    assert "Percorso risolto" in c.rimedio
+
+
+# --------------------------------------------------------------------------- #
 # Wrapper di avvio
 # --------------------------------------------------------------------------- #
 
