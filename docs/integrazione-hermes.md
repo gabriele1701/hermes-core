@@ -79,13 +79,21 @@ sullo stdin. Si esce con `Ctrl-C`.
 ### Registrazione: usare la CLI, non scrivere la config a mano
 
 Hermes tiene le registrazioni MCP in un file **YAML** sotto la chiave di primo
-livello `mcp_servers`. Il percorso di quel file però non è univoco nelle
-fonti: la documentazione ufficiale parla di un `config.yaml` citando la
-directory d'installazione `~/.hermes/hermes-agent`, mentre una guida di terze
-parti indica `~/.hermes/config.yaml`.
+livello `mcp_servers`, indicato in `~/.hermes/config.yaml`. Le credenziali
+stanno a parte, in `~/.hermes/.env`.
 
-Conviene quindi **non indovinare il percorso** e lasciare che sia la CLI a
-scriverlo dove quella installazione lo tiene:
+**Desktop e CLI condividono lo stesso file:** non esiste una configurazione
+MCP separata per l'app desktop, il cui pannello *Impostazioni → MCP Servers*
+modifica la medesima config. Una registrazione fatta dalla CLI compare quindi
+nel desktop e viceversa.
+
+> Il percorso e la condivisione desktop/CLI vengono da guide di terze parti
+> concordi fra loro; la documentazione ufficiale è orientata alla CLI e non
+> tratta il desktop. Vanno quindi considerati un'ipotesi solida ma da
+> confermare sul file vero, cosa che il comando qui sotto permette di fare.
+
+Conviene **non scrivere la config a mano** e lasciare che sia la CLI a
+metterla dove quella installazione la tiene davvero:
 
 ```sh
 hermes mcp add hermes-core \
@@ -124,21 +132,46 @@ propria posizione, quindi non dipende da variabili d'ambiente. E non richiede
 `cwd`, perché i percorsi nella sua configurazione sono risolti rispetto al
 file di configurazione e non alla directory corrente.
 
-Per applicare una modifica fatta a mano: `/reload-mcp` dentro una sessione, o
-aprirne una nuova.
+Per applicare una modifica fatta a mano: `/reload-mcp` dentro una sessione —
+funziona anche nella chat del desktop — oppure aprirne una nuova.
 
-### Nota sulla versione desktop
+### Dal pannello del desktop
 
-Le fonti consultate sono orientate alla CLI e **non confermano** che l'app
-desktop legga la stessa configurazione. Se la registrazione via CLI non si
-riflette nel desktop, è lì che va cercata la differenza — non nel server, che
-il preflight ha già verificato.
+In alternativa alla CLI: *Impostazioni → MCP Servers → aggiungi server
+personalizzato*, indicando lo stesso comando assoluto. Il pannello scrive
+nella stessa config, quindi le due vie sono interscambiabili.
+
+Dopo l'aggiunta, verificare lo stato mostrato accanto al server: una voce può
+risultare *installata ma disabilitata*, e in quel caso non espone nulla. I
+tool abilitati sono registrati in config sotto
+`mcp_servers.<nome>.tools.include`.
+
+### Come si chiamano i tool dentro Hermes
+
+Hermes espone i tool di un server MCP con un prefisso:
+`mcp_<nome-server>_<nome-tool>`. Registrando il server come `hermes-core`, le
+quattro funzioni compaiono quindi come:
+
+```
+mcp_hermes-core_list_available_tools
+mcp_hermes-core_describe_tool
+mcp_hermes-core_invoke_tool
+mcp_hermes-core_raise_tool_tier
+```
+
+Vale la pena saperlo prima: cercando `invoke_tool` senza prefisso si
+concluderebbe che la registrazione è fallita proprio mentre funziona.
+
+Dato che il nome del server finisce dentro un identificatore, un nome senza
+trattini — `hermes_core` — produce tool dal nome più pulito. È una preferenza,
+non un requisito.
 
 ---
 
 ## 4. Verificare dentro Hermes
 
-A registrazione avvenuta, Hermes dovrebbe mostrare quattro funzioni:
+A registrazione avvenuta, Hermes dovrebbe mostrare quattro funzioni — col
+prefisso `mcp_<nome-server>_` descritto sopra:
 
 | Funzione | Cosa fa |
 |---|---|
@@ -203,6 +236,20 @@ eseguibile — provarlo a mano, esattamente come scritto nella config.
 **`hermes mcp test` esce con 3.** Il server non è in configurazione: la
 registrazione non è andata a buon fine, o la CLI e il processo che stai
 interrogando leggono due file diversi.
+
+**La CLI vede il server, il desktop no.** Dovrebbero condividere la stessa
+config, quindi prima di tutto `/reload-mcp` nella chat del desktop, o una
+sessione nuova. Se non basta, confrontare il file che la CLI ha scritto con
+quello che il pannello mostra: è il punto in cui l'ipotesi della config
+condivisa andrebbe smentita.
+
+**Il server risulta registrato ma non espone tool.** Controllare lo stato nel
+pannello: una voce può essere *installata ma disabilitata*. In config, i tool
+abilitati stanno sotto `mcp_servers.<nome>.tools.include`.
+
+**I tool non si trovano col nome che ti aspetti.** Hermes li espone come
+`mcp_<nome-server>_<nome-tool>`: cercare `invoke_tool` senza prefisso non dà
+risultati anche quando tutto funziona.
 
 **Il server parte e muore subito.** L'avvio fallisce apposta se un tool non è
 conforme o se il backend del vault è sconosciuto: partire con un registro
