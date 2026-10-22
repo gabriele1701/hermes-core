@@ -105,12 +105,21 @@ vale meno di uno che risiede altrove.
 
 ## Stato
 
-**Milestone 0 completa**, salvo l'integrazione con Hermes desktop.
+**Milestone 0 completa e verificata end-to-end**, integrazione con Hermes
+desktop compresa.
 
 Funziona la catena orchestratore → agente → gate di esecuzione → script →
 log d'audit, con un unico `correlation_id` dall'invocazione alla riga finale.
 L'unico tool registrato è un dummy: **nessun tool di sicurezza reale è ancora
 integrato**.
+
+Verificato su dispiegamento reale — Hermes desktop su Windows, server su VM
+Ubuntu dedicata raggiunta via SSH con chiave vincolata a un comando unico — su
+tre percorsi distinti: l'esecuzione di un tool Verde (`authorized_by: policy`,
+nessuna interazione), l'innalzamento di tier con il tier dichiarato che resta
+tracciato, e la **sospensione** dello stesso tool dopo l'innalzamento
+(`needs_confirmation`, `pending`, script non eseguito). I dettagli e le
+condizioni in [docs/integrazione-hermes.md](docs/integrazione-hermes.md).
 
 Le lacune di sicurezza note e consapevolmente non ancora chiuse sono elencate
 in [docs/debito-sicurezza.md](docs/debito-sicurezza.md), ciascuna con la

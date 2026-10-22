@@ -309,6 +309,50 @@ la propria configurazione e il proprio comando.
 
 ---
 
+## Stato verificato
+
+L'integrazione è stata provata su un dispiegamento reale: Hermes desktop
+v0.21.3 su Windows, server su VM Ubuntu Server dedicata, raggiunta via SSH con
+chiave vincolata a un comando unico.
+
+Tre percorsi distinti, tutti confermati dal log d'audit:
+
+| Prova | Esito |
+|---|---|
+| `echo.ping` a tier Verde | `status: ok`, `authorized_by: policy`, nessuna interazione |
+| `raise_tool_tier` a `rosso` | `effective_tier: rosso`, `declared_tier: verde` conservato |
+| `echo.ping` dopo l'innalzamento | `needs_confirmation`, `pending`, **script non eseguito** |
+
+La terza è quella che conta: lo stesso tool, con lo stesso comando, prima
+esegue e poi viene sospeso, perché nel frattempo è cambiato il suo tier
+effettivo.
+
+Un dettaglio che conferma l'isolamento dei tool: l'output dell'agente dummy
+riportava una versione di Python diversa da quella del virtualenv del server.
+Lo script viene eseguito con il `python3` di sistema, **fuori** dall'ambiente
+del server — il vincolo descritto in `agents/echo_agent/run.py`, e lo stesso
+confine che permetterà di spostarlo in un container.
+
+### Rumore di avvio nel log
+
+Hermes avvia un processo server **nuovo a ogni connessione**, quindi il log
+accumula una riga `tool_registered` per avvio, ciascuna con un proprio
+`correlation_id`. In una sessione di prova sono risultate dieci righe di avvio
+per tre righe di catena effettiva.
+
+Non è un difetto — sono eventi reali di registrazione e vanno tracciati — ma
+rende il log meno leggibile a occhio. Si filtra per azione:
+
+```sh
+# le catene di invocazione, senza gli avvii
+grep -v '"action":"tool_registered"' /var/log/hermes/audit.jsonl
+
+# una catena intera, dato un correlation_id
+grep '"correlation_id":"<id>"' /var/log/hermes/audit.jsonl
+```
+
+---
+
 ## Diagnostica
 
 **Hermes non vede il server.** Eseguire il comando a mano in un terminale: se
