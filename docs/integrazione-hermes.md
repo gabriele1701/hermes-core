@@ -137,21 +137,28 @@ rete, chiave o `authorized_keys`.
 ### Registrazione: usare la CLI, non scrivere la config a mano
 
 Hermes tiene le registrazioni MCP in un file **YAML** sotto la chiave di primo
-livello `mcp_servers`, indicato in `~/.hermes/config.yaml`. Le credenziali
-stanno a parte, in `~/.hermes/.env`.
+livello `mcp_servers`.
+
+**Il percorso dipende dalla piattaforma, e non è quello che si trova scritto
+in giro.** Verificato su Windows:
+
+```
+%LOCALAPPDATA%\hermes\config.yaml
+```
+
+che la CLI riporta come `~/AppData/Local/hermes/config.yaml`. Le guide
+consultate indicavano `~/.hermes/config.yaml`, che sarà la posizione su Linux
+o macOS ma **non è quella su Windows**.
+
+È il motivo per cui conviene **non scrivere la config a mano**: si lascia
+scrivere alla CLI, che poi dice dove l'ha messa. Indovinare il percorso
+avrebbe prodotto una configurazione in un file che nessuno legge, e un guasto
+senza sintomi utili.
 
 **Desktop e CLI condividono lo stesso file:** non esiste una configurazione
 MCP separata per l'app desktop, il cui pannello *Impostazioni → MCP Servers*
 modifica la medesima config. Una registrazione fatta dalla CLI compare quindi
 nel desktop e viceversa.
-
-> Il percorso e la condivisione desktop/CLI vengono da guide di terze parti
-> concordi fra loro; la documentazione ufficiale è orientata alla CLI e non
-> tratta il desktop. Vanno quindi considerati un'ipotesi solida ma da
-> confermare sul file vero, cosa che il comando qui sotto permette di fare.
-
-Conviene **non scrivere la config a mano** e lasciare che sia la CLI a
-metterla dove quella installazione la tiene davvero:
 
 ```sh
 hermes mcp add hermes-core \
@@ -161,8 +168,24 @@ hermes mcp list                 # conferma che sia registrato
 hermes mcp test hermes-core     # si connette, elenca i tool, esce con un codice
 ```
 
+All'aggiunta, la CLI si connette, scopre i tool e **chiede di abilitarli**:
+rispondere `Y` lascia `4/4 tools enabled`. Un server registrato ma con i tool
+non abilitati esiste e non espone nulla, che è una delle modalità di
+fallimento più difficili da leggere.
+
 `hermes mcp test` esce `0` se la connessione riesce, `1` se fallisce, `3` se
-il server non è in configurazione.
+il server non è in configurazione. Nel caso remoto riporta `Transport: stdio
+→ ssh` e `Auth: none`: quest'ultima è corretta e attesa — l'autenticazione
+sta al livello SSH, non al livello MCP, ed è la chiave vincolata a decidere
+cosa quel canale può fare.
+
+Esito atteso di una registrazione riuscita:
+
+```
+✓ Connected (1969ms)
+✓ Tools discovered: 4
+    list_available_tools    describe_tool    invoke_tool    raise_tool_tier
+```
 
 Accoppiato al preflight, questo dà una diagnosi a due lati: **il doctor dice
 se il nostro server funziona, `hermes mcp test` se Hermes riesce a parlarci.**
@@ -170,7 +193,11 @@ Se il primo è verde e il secondo no, il problema è nella registrazione.
 
 Dopo la registrazione vale la pena aprire il file che la CLI ha scritto: è
 quello il percorso reale su questa macchina, e conoscerlo serve per le
-modifiche successive.
+modifiche successive. Su Windows:
+
+```powershell
+notepad $env:LOCALAPPDATA\hermes\config.yaml
+```
 
 ### Forma YAML, se la scrivi a mano
 
