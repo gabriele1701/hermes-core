@@ -1,0 +1,123 @@
+# Debito di sicurezza aperto
+
+Registro delle lacune di sicurezza **note e consapevolmente non ancora chiuse**.
+Una lacuna discussa e non scritta sparisce: dopo qualche settimana il codice
+sembra più robusto di quanto sia, e la decisione di rimandare diventa
+indistinguibile da una svista.
+
+Ogni voce dice cosa manca, perché è stata rimandata e qual è la condizione di
+chiusura. Una voce si rimuove solo quando la chiusura è in `main` e testata.
+
+Priorità: **ALTA** = da chiudere prima che il componente interessato esegua
+qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
+**ACCETTATA** = valutata e deliberatamente non chiusa, con mitigazione.
+
+---
+
+## ALTA — `exec_sha256` dichiarato ma mai verificato
+
+**Dove:** `mcp_server/contracts.py` (campo), `mcp_server/registry.py` (registrazione).
+
+Il contratto di registrazione pinna la versione dello script con uno SHA-256,
+ma **nessuno verifica che il file all'`exec_path` abbia davvero quell'hash**.
+Finché non si verifica, il pinning è un commento: uno script sostituito dopo
+la registrazione verrebbe eseguito senza che nulla se ne accorga.
+
+Rimandata perché in Milestone 0 nulla viene ancora eseguito.
+
+**Condizione di chiusura:** il server calcola lo SHA-256 del file e lo
+confronta con `exec_sha256` **prima di ogni esecuzione**, non solo alla
+registrazione — un controllo all'avvio lascerebbe aperta la finestra fra
+avvio ed esecuzione. Discordanza → esecuzione negata e riga di audit.
+Da chiudere **nel passo 6** (wiring del server MCP), che è il primo punto in
+cui un'esecuzione diventa possibile.
+
+---
+
+## ALTA — l'aliasing di un tool non è rifiutabile: manca `exec_args`
+
+**Dove:** `mcp_server/contracts.py` (`ToolSpec`), `mcp_server/registry.py`.
+
+Il rifiuto del `tool_id` duplicato chiude la via più comoda al declassamento,
+non tutte. Resta quella di registrare un **secondo `tool_id` sullo stesso
+script** a tier più basso: stessa capacità, conferme più lasche, regola
+sull'override aggirata.
+
+Non è rifiutabile oggi perché il caso abusivo e quello legittimo — uno script
+con più sottocomandi a rischio diverso, es. `nmap.ping_sweep` Verde e
+`nmap.aggressive` Rosso — sono **indistinguibili**: `ToolSpec` non ha un campo
+argomenti, quindi `exec_path` è l'intera identità di ciò che viene eseguito.
+
+**Mitigazione in essere:** il registro *rileva e registra* l'anomalia
+(`tool_alias_detected`) senza bloccarla, sia per l'alias a tier inferiore sia
+per l'incoerenza di `exec_sha256` sullo stesso path. Visibile in review, non
+bloccante.
+
+**Condizione di chiusura:** aggiungere `exec_args` a `ToolSpec`, così che
+l'identità di un tool diventi `(exec_path, exec_sha256, exec_args)`. A quel
+punto due `tool_id` con identità identica e tier diverso sono aliasing
+genuino, e il registro può **rifiutare** quello a tier inferiore invece di
+limitarsi a segnalarlo. Da affrontare **quando i tool avranno bisogno di
+argomenti**, cioè all'ingresso dei primi tool reali in Milestone 1.
+
+---
+
+## MEDIA — il consenso per scope non è modellato
+
+**Dove:** `mcp_server/tiers.py` (`ConfirmationPolicy.unattended_safe`).
+
+La cadenza `una_tantum_per_scope` presuppone un registro dei consensi già
+dati, che non esiste. `tiers.py` *risponde* se un tool sia eseguibile non
+presidiato, ma non può verificare se il consenso per quello scope sia a
+registro, perché è deliberatamente senza stato.
+
+**Condizione di chiusura:** il gestore delle routine introduce lo store dei
+consensi per scope e, insieme, il campo `authorization_ref` su `ToolCall` per
+distinguere in audit un consenso dato in diretta da uno pre-autorizzato.
+Aggiunta additiva, non rompe il contratto esistente.
+
+---
+
+## ACCETTATA — il log d'audit non è tamper-evident
+
+**Dove:** `mcp_server/audit.py`.
+
+Il log è append-only a livello di API, ma chi ha accesso in scrittura al file
+può riscriverlo a posteriori.
+
+**Decisione:** l'hash-chaining dei record è stato valutato ed escluso.
+Imporrebbe di serializzare le scritture, perdendo il writer stateless e
+concorrente; e senza un ancoraggio esterno dell'hash di coda non sposta il
+modello di minaccia, perché chi controlla file e codice ricalcola l'intera
+catena.
+
+**Mitigazione:** `chattr +a` sul file di log (root per metterlo o toglierlo,
+quindi efficace contro un processo non privilegiato) e spedizione a un
+collector esterno, dove una copia già uscita dall'host non è raggiungibile da
+una manomissione locale.
+
+**Da rivalutare se:** il log dovrà reggere da solo come prova davanti a
+terzi. In quel caso la strada è un digest periodico firmato con chiave
+esterna, che non tocca il percorso di scrittura.
+
+---
+
+## ACCETTATA — il registro si fida della propria configurazione
+
+**Dove:** `mcp_server/registry.py`.
+
+Nessun controllo nel registro protegge da una configurazione malevola: chi
+può scrivere la config può registrare qualunque tool con qualunque tier.
+
+**Decisione:** il confine di fiducia è chi può scrivere nel repo. La config è
+versionata e le modifiche passano da una pull request; autenticare le
+registrazioni con una firma aggiungerebbe cerimonia senza aggiungere
+sicurezza, in un contesto a utente singolo dove la firma che conta è già
+quella di git.
+
+**Mitigazione:** ogni registrazione, rifiuto e anomalia è un evento tracciato,
+così che configurazione e log raccontino la stessa storia e una discrepanza
+sia visibile.
+
+**Da rivalutare se:** il registro verrà popolato da una fonte non versionata,
+o da più di una persona.

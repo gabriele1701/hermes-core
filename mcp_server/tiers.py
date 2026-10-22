@@ -29,6 +29,31 @@ richiede comunque la conferma dedicata sui dati personali. Collassare i due
 assi in un unico valore perderebbe questa informazione, e con essa la ragione
 per cui all'utente viene chiesto qualcosa. :class:`ConfirmationPolicy` espone
 quindi le due cadenze separatamente, e offre la sintesi solo come comodità.
+
+Esecuzione non presidiata (routine pianificate)
+-----------------------------------------------
+
+Una routine pianificata gira senza nessuno davanti allo schermo, quindi non
+c'è chi dia una conferma. La regola è a tre livelli:
+
+* **Verde senza dati personali** — gira, nessun prerequisito.
+* **Giallo**, e ogni tool con flag dati personali — gira *soltanto se* il
+  consenso per quello scope è già stato registrato. Il consenso resta
+  ``authorized_by=USER``: l'utente l'ha dato davvero, in un altro momento.
+* **Rosso** — non gira mai non presidiato. La sua cadenza è puntuale per
+  definizione; pianificarla la convertirebbe di fatto in una una-tantum, che è
+  il declassamento che il modello dei tier esiste per impedire.
+
+Una routine che incontra un Rosso **non viene rifiutata**: esegue i passi che
+può, e per il Rosso restituisce ``needs_confirmation`` con la chiamata
+``pending``, mettendo la richiesta in coda. Così il lavoro parziale è
+preservato e la conferma mancata si legge nel log come ``pending``, non come
+successo.
+
+Questo modulo **risponde** alla domanda (:attr:`ConfirmationPolicy.unattended_safe`
+e le due cadenze), non la impone: l'applicazione è compito del gestore delle
+routine, che è l'unico a sapere se un consenso per scope sia già a registro.
+Qui non c'è stato, deliberatamente.
 """
 
 from __future__ import annotations

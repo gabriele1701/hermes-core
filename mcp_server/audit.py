@@ -88,6 +88,7 @@ class LogAction(StrEnum):
     AGENT_RESULT = "agent_result"
     TOOL_REGISTERED = "tool_registered"
     TOOL_REGISTRATION_REJECTED = "tool_registration_rejected"
+    TOOL_ALIAS_DETECTED = "tool_alias_detected"
     OVERRIDE_SET = "override_set"
     OVERRIDE_REJECTED = "override_rejected"
     TOOL_CALL = "tool_call"
