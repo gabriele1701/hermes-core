@@ -319,15 +319,15 @@ def test_descrizione_tool_di_altro_agente_come_inesistente(repo: Path):
 
 def test_invocazione_riuscita(server: HermesServer):
     r = server._invoke_tool("echo.ping")
-    assert r["status"] == "ok"
-    assert r["returncode"] == 0
-    assert len(r["tool_calls"]) == 1
-    assert r["tool_calls"][0]["authorized_by"] == "policy"
+    assert r["result"]["status"] == "ok"
+    assert r["output"]["returncode"] == 0
+    assert len(r["result"]["tool_calls"]) == 1
+    assert r["result"]["tool_calls"][0]["authorized_by"] == "policy"
 
 
 def test_invocazione_tracciata_sotto_un_correlation_id(server: HermesServer):
     r = server._invoke_tool("echo.ping", target="lab-kali")
-    cid = r["correlation_id"]
+    cid = r["result"]["correlation_id"]
     righe = [x for x in server.audit.read_all() if str(x.correlation_id) == cid]
     azioni = [x.action for x in righe]
     assert LogAction.AGENT_INVOKED in azioni
@@ -338,7 +338,7 @@ def test_invocazione_tracciata_sotto_un_correlation_id(server: HermesServer):
 def test_tool_call_non_duplicata_nel_log(server: HermesServer):
     """Riscrivere le righe già scritte dal gate renderebbe il log ambiguo."""
     r = server._invoke_tool("echo.ping")
-    cid = r["correlation_id"]
+    cid = r["result"]["correlation_id"]
     chiamate = [
         x
         for x in server.audit.read_all()
@@ -352,36 +352,36 @@ def test_tool_che_richiede_conferma_non_viene_eseguito(repo: Path, tier: str):
     """Fail-closed: sospeso, non eseguito, e il client non può autorizzarsi."""
     srv = crea_server(scrivi_config(repo, tier=tier))
     r = srv._invoke_tool("echo.ping")
-    assert r["status"] == "needs_confirmation"
-    assert r["tool_calls"][0]["outcome"] == "pending"
-    assert r["tool_calls"][0]["authorized_by"] == "none"
-    assert "stdout" not in r
+    assert r["result"]["status"] == "needs_confirmation"
+    assert r["result"]["tool_calls"][0]["outcome"] == "pending"
+    assert r["result"]["tool_calls"][0]["authorized_by"] == "none"
+    assert r["output"] is None
 
 
 def test_dati_personali_sospendono_anche_su_verde(repo: Path):
     srv = crea_server(scrivi_config(repo, personal_data=True))
-    assert srv._invoke_tool("echo.ping")["status"] == "needs_confirmation"
+    assert srv._invoke_tool("echo.ping")["result"]["status"] == "needs_confirmation"
 
 
 def test_integrita_fallita_nega(repo: Path):
     srv = crea_server(scrivi_config(repo, sha=SHA_FINTO))
     r = srv._invoke_tool("echo.ping")
-    assert r["status"] == "error"
-    assert r["tool_calls"][0]["outcome"] == "denied"
+    assert r["result"]["status"] == "error"
+    assert r["result"]["tool_calls"][0]["outcome"] == "denied"
 
 
 def test_container_assente_nega(repo: Path):
     srv = crea_server(scrivi_config(repo, requires_container=True))
     r = srv._invoke_tool("echo.ping")
-    assert r["status"] == "error"
-    assert r["tool_calls"][0]["outcome"] == "denied"
-    assert "container" in r["summary"]
+    assert r["result"]["status"] == "error"
+    assert r["result"]["tool_calls"][0]["outcome"] == "denied"
+    assert "container" in r["result"]["summary"]
 
 
 def test_tool_inesistente_errore_strutturato(server: HermesServer):
     r = server._invoke_tool("mai.registrato")
-    assert r["status"] == "error"
-    assert r["tool_calls"] == []
+    assert r["result"]["status"] == "error"
+    assert r["result"]["tool_calls"] == []
 
 
 def test_tool_di_altro_agente_non_invocabile(repo: Path):
@@ -397,7 +397,7 @@ def test_tool_di_altro_agente_non_invocabile(repo: Path):
         description = "Tool di un altro agente."
         """)
     srv = crea_server(scrivi_config(repo, extra_tool=altro))
-    assert srv._invoke_tool("kali.scan")["status"] == "error"
+    assert srv._invoke_tool("kali.scan")["result"]["status"] == "error"
 
 
 @pytest.mark.anyio
@@ -405,7 +405,7 @@ async def test_invocazione_attraverso_il_protocollo(server: HermesServer):
     """Il percorso reale: chiamata via call_tool, come farebbe Hermes."""
     esito = await server.mcp.call_tool("invoke_tool", {"tool_id": "echo.ping"})
     assert esito.structured_content is not None
-    assert esito.structured_content["status"] == "ok"
+    assert esito.structured_content["result"]["status"] == "ok"
 
 
 @pytest.mark.anyio
@@ -432,7 +432,7 @@ def test_innalzamento_tier(server: HermesServer):
 
 def test_innalzamento_rende_il_tool_non_eseguibile(server: HermesServer):
     server._raise_tool_tier("echo.ping", "rosso")
-    assert server._invoke_tool("echo.ping")["status"] == "needs_confirmation"
+    assert server._invoke_tool("echo.ping")["result"]["status"] == "needs_confirmation"
 
 
 def test_declassamento_rifiutato_via_protocollo(server: HermesServer):

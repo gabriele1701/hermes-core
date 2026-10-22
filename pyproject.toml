@@ -27,3 +27,6 @@ packages = ["mcp_server", "agents"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "slow: avvia processi veri e parla MCP su stdio (~1.5s l'uno). Saltabili durante l'iterazione con: pytest -m 'not slow'",
+]

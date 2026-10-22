@@ -81,6 +81,7 @@ def _parametri(config: Path) -> StdioServerParameters:
     )
 
 
+@pytest.mark.slow
 @pytest.mark.anyio
 async def test_client_reale_elenca_i_tool(config_pronta: Path):
     """Il server parte su stdio e un client MCP ne elenca i tool."""
@@ -98,6 +99,7 @@ async def test_client_reale_elenca_i_tool(config_pronta: Path):
     }
 
 
+@pytest.mark.slow
 @pytest.mark.anyio
 async def test_client_reale_vede_i_tool_registrati(config_pronta: Path):
     async with stdio_client(_parametri(config_pronta)) as (read, write):
@@ -111,6 +113,7 @@ async def test_client_reale_vede_i_tool_registrati(config_pronta: Path):
     assert {t["tool_id"] for t in dati["tools"]} == {"echo.ping", "echo.rosso"}
 
 
+@pytest.mark.slow
 @pytest.mark.anyio
 async def test_client_reale_invoca_un_tool(config_pronta: Path):
     async with stdio_client(_parametri(config_pronta)) as (read, write):
@@ -119,11 +122,12 @@ async def test_client_reale_invoca_un_tool(config_pronta: Path):
             esito = await session.call_tool("invoke_tool", {"tool_id": "echo.ping"})
 
     dati = esito.structured_content
-    assert dati["status"] == "ok"
-    assert dati["stdout"].strip() == "echo ok"
-    assert dati["tool_calls"][0]["authorized_by"] == "policy"
+    assert dati["result"]["status"] == "ok"
+    assert dati["output"]["stdout"].strip() == "echo ok"
+    assert dati["result"]["tool_calls"][0]["authorized_by"] == "policy"
 
 
+@pytest.mark.slow
 @pytest.mark.anyio
 async def test_client_reale_non_puo_eseguire_un_rosso(config_pronta: Path):
     """Fail-closed attraverso il trasporto reale, non solo in-process."""
@@ -133,11 +137,12 @@ async def test_client_reale_non_puo_eseguire_un_rosso(config_pronta: Path):
             esito = await session.call_tool("invoke_tool", {"tool_id": "echo.rosso"})
 
     dati = esito.structured_content
-    assert dati["status"] == "needs_confirmation"
-    assert dati["tool_calls"][0]["outcome"] == "pending"
-    assert "stdout" not in dati
+    assert dati["result"]["status"] == "needs_confirmation"
+    assert dati["result"]["tool_calls"][0]["outcome"] == "pending"
+    assert dati["output"] is None
 
 
+@pytest.mark.slow
 @pytest.mark.anyio
 async def test_client_reale_non_puo_declassare(config_pronta: Path):
     async with stdio_client(_parametri(config_pronta)) as (read, write):
@@ -154,6 +159,7 @@ async def test_client_reale_non_puo_declassare(config_pronta: Path):
     assert abbassato.structured_content["ok"] is False
 
 
+@pytest.mark.slow
 @pytest.mark.anyio
 async def test_log_scritto_dal_processo_server(config_pronta: Path):
     """La catena del processo server finisce nel log su disco."""
