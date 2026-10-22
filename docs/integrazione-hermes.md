@@ -7,6 +7,18 @@ come sottoprocesso dall'host e dialoga sul proprio stdin/stdout. All'host
 servono quindi solo due cose: **un comando da eseguire** e la cartella da cui
 eseguirlo.
 
+> **Architettura di riferimento: Hermes e il server stanno su macchine
+> diverse.** Hermes desktop gira sulla postazione, il server su una VM
+> dedicata, e il comando che Hermes lancia è `ssh`. Il motivo è che la
+> toolbox non deve abitare sulle macchine che analizza: l'orchestratore
+> custodisce il log d'audit, il vault e i controlli di scope, e un log che
+> risiede sul bersaglio vale meno di uno che risiede altrove.
+>
+> La preparazione della VM — utenti, permessi, chiave SSH vincolata a un
+> comando unico — è in **[setup-vm-hermes.md](setup-vm-hermes.md)**. Questo
+> documento copre la registrazione in Hermes e la diagnostica, e vale sia per
+> il caso remoto sia per un server sulla stessa macchina.
+
 ---
 
 ## 1. Preparare la macchina
@@ -56,6 +68,28 @@ serve per non cercare nel posto sbagliato.
 
 ## 3. Il comando da dare a Hermes
 
+### Server su VM dedicata (architettura di riferimento)
+
+```
+ssh -T -q hermes@<IP-VM>
+```
+
+SSH trasporta stdin e stdout in modo trasparente, quindi il protocollo
+attraversa la connessione senza accorgersene: per Hermes è un normale server
+stdio. Non serve indicare lo script, perché la chiave sulla VM è vincolata a
+un comando unico (vedi [setup-vm-hermes.md](setup-vm-hermes.md)) e qualunque
+cosa chieda il client, parte solo quel server.
+
+`-T` è necessario, non opzionale: un pseudo-terminale farebbe eco e
+traduzione dei caratteri, corrompendo il JSON-RPC. `-q` zittisce banner e
+avvisi, che normalmente vanno su stderr ma su stdio non vale la pena
+rischiare.
+
+L'autenticazione **deve** essere a chiave: non c'è nessuno a digitare una
+password, e con `no-pty` non ci sarebbe nemmeno dove chiederla.
+
+### Server sulla stessa macchina di Hermes
+
 ```
 /percorso/assoluto/del/repo/bin/hermes-core-server
 ```
@@ -76,35 +110,126 @@ Provalo a mano prima di configurare Hermes — deve restare in attesa senza
 stampare nulla, ed è il comportamento corretto: sta aspettando il protocollo
 sullo stdin. Si esce con `Ctrl-C`.
 
-### Se Hermes vuole comando e argomenti separati
+> Il server **non è portabile su Windows** così com'è, e non conviene renderlo
+> tale: `executor.py` lancia gli script con `python3`, il wrapper è uno script
+> `sh`, e soprattutto `chmod 0600` sul log è di fatto inefficace su Windows
+> mentre `chattr +a` non ha equivalente — si perderebbero due proprietà di
+> sicurezza, non due comodità. Il posto del server è Linux, dove staranno
+> comunque i tool che dovrà eseguire.
 
-| Campo | Valore |
-|---|---|
-| comando | `/percorso/del/repo/.venv/bin/python` |
-| argomenti | `-m`, `mcp_server.server`, `/percorso/del/repo/config/hermes.toml` |
-| directory di lavoro | `/percorso/del/repo` (facoltativa: il server non dipende dalla cwd) |
+### Diagnostica specifica del caso remoto
 
-### Se Hermes usa un file JSON in stile `mcpServers`
+Con il server su un'altra macchina si aggiungono due modi di fallire, nessuno
+dei due dentro il nostro codice.
 
-Molti host MCP adottano questa forma. **Da confermare sulla documentazione di
-Hermes**, non è detto che sia la sua:
+**La VM deve essere accesa** quando Hermes avvia il server. Un server stdio
+viene lanciato su richiesta, non è un servizio sempre attivo: se la VM è
+spenta, `ssh` fallisce e Hermes riporta un errore di connessione.
 
-```json
-{
-  "mcpServers": {
-    "hermes-core": {
-      "command": "/percorso/del/repo/bin/hermes-core-server",
-      "args": []
-    }
-  }
-}
+**L'indirizzo deve essere stabile.** La configurazione di Hermes contiene
+l'indirizzo: con il DHCP la registrazione si rompe al primo rinnovo. IP
+statico o riserva DHCP.
+
+Se `ssh -T -q hermes@<IP-VM>` funziona dal terminale di Windows ma Hermes no,
+il problema è nella registrazione. Se non funziona nemmeno dal terminale, è
+rete, chiave o `authorized_keys`.
+
+### Registrazione: usare la CLI, non scrivere la config a mano
+
+Hermes tiene le registrazioni MCP in un file **YAML** sotto la chiave di primo
+livello `mcp_servers`, indicato in `~/.hermes/config.yaml`. Le credenziali
+stanno a parte, in `~/.hermes/.env`.
+
+**Desktop e CLI condividono lo stesso file:** non esiste una configurazione
+MCP separata per l'app desktop, il cui pannello *Impostazioni → MCP Servers*
+modifica la medesima config. Una registrazione fatta dalla CLI compare quindi
+nel desktop e viceversa.
+
+> Il percorso e la condivisione desktop/CLI vengono da guide di terze parti
+> concordi fra loro; la documentazione ufficiale è orientata alla CLI e non
+> tratta il desktop. Vanno quindi considerati un'ipotesi solida ma da
+> confermare sul file vero, cosa che il comando qui sotto permette di fare.
+
+Conviene **non scrivere la config a mano** e lasciare che sia la CLI a
+metterla dove quella installazione la tiene davvero:
+
+```sh
+hermes mcp add hermes-core \
+    --command /percorso/assoluto/del/repo/bin/hermes-core-server
+
+hermes mcp list                 # conferma che sia registrato
+hermes mcp test hermes-core     # si connette, elenca i tool, esce con un codice
 ```
+
+`hermes mcp test` esce `0` se la connessione riesce, `1` se fallisce, `3` se
+il server non è in configurazione.
+
+Accoppiato al preflight, questo dà una diagnosi a due lati: **il doctor dice
+se il nostro server funziona, `hermes mcp test` se Hermes riesce a parlarci.**
+Se il primo è verde e il secondo no, il problema è nella registrazione.
+
+Dopo la registrazione vale la pena aprire il file che la CLI ha scritto: è
+quello il percorso reale su questa macchina, e conoscerlo serve per le
+modifiche successive.
+
+### Forma YAML, se la scrivi a mano
+
+```yaml
+mcp_servers:
+  hermes_core:
+    command: ssh
+    args: ["-T", "-q", "hermes@<IP-VM>"]
+```
+
+Campi disponibili secondo la documentazione: `command`, `args`, `env` per i
+server stdio; `url` e `headers` per quelli HTTP; `enabled: false` per
+disattivare senza cancellare; `tools` per filtrare ciò che viene esposto.
+
+Il nostro server non richiede `env`: il wrapper ricava l'interprete dalla
+propria posizione, quindi non dipende da variabili d'ambiente. E non richiede
+`cwd`, perché i percorsi nella sua configurazione sono risolti rispetto al
+file di configurazione e non alla directory corrente.
+
+Per applicare una modifica fatta a mano: `/reload-mcp` dentro una sessione —
+funziona anche nella chat del desktop — oppure aprirne una nuova.
+
+### Dal pannello del desktop
+
+In alternativa alla CLI: *Impostazioni → MCP Servers → aggiungi server
+personalizzato*, indicando lo stesso comando assoluto. Il pannello scrive
+nella stessa config, quindi le due vie sono interscambiabili.
+
+Dopo l'aggiunta, verificare lo stato mostrato accanto al server: una voce può
+risultare *installata ma disabilitata*, e in quel caso non espone nulla. I
+tool abilitati sono registrati in config sotto
+`mcp_servers.<nome>.tools.include`.
+
+### Come si chiamano i tool dentro Hermes
+
+Hermes espone i tool di un server MCP con un prefisso:
+`mcp_<nome-server>_<nome-tool>`. Registrando il server come `hermes-core`, le
+quattro funzioni compaiono quindi come:
+
+```
+mcp_hermes-core_list_available_tools
+mcp_hermes-core_describe_tool
+mcp_hermes-core_invoke_tool
+mcp_hermes-core_raise_tool_tier
+```
+
+Vale la pena saperlo prima: cercando `invoke_tool` senza prefisso si
+concluderebbe che la registrazione è fallita proprio mentre funziona.
+
+Dato che il nome del server finisce dentro un identificatore, un nome senza
+trattini — `hermes_core` — produce tool dal nome più pulito. È una preferenza,
+non un requisito.
 
 ---
 
 ## 4. Verificare dentro Hermes
 
-A registrazione avvenuta, Hermes dovrebbe mostrare quattro funzioni:
+A registrazione avvenuta, Hermes dovrebbe mostrare quattro funzioni — col
+prefisso `mcp_<nome-server>_` descritto sopra:
 
 | Funzione | Cosa fa |
 |---|---|
@@ -161,6 +286,28 @@ assoluto e che il wrapper abbia il bit di esecuzione (`ls -l bin/`).
 **Hermes vede il server ma non i tool.** Il preflight elenca i tool
 registrati: se li vede lui e non Hermes, il problema è nella registrazione
 lato host. Se non li vede nemmeno lui, è la config.
+
+**`hermes mcp test` esce con 1.** Connessione fallita: Hermes trova la
+registrazione ma non riesce a dialogare. Il comando è sbagliato o non
+eseguibile — provarlo a mano, esattamente come scritto nella config.
+
+**`hermes mcp test` esce con 3.** Il server non è in configurazione: la
+registrazione non è andata a buon fine, o la CLI e il processo che stai
+interrogando leggono due file diversi.
+
+**La CLI vede il server, il desktop no.** Dovrebbero condividere la stessa
+config, quindi prima di tutto `/reload-mcp` nella chat del desktop, o una
+sessione nuova. Se non basta, confrontare il file che la CLI ha scritto con
+quello che il pannello mostra: è il punto in cui l'ipotesi della config
+condivisa andrebbe smentita.
+
+**Il server risulta registrato ma non espone tool.** Controllare lo stato nel
+pannello: una voce può essere *installata ma disabilitata*. In config, i tool
+abilitati stanno sotto `mcp_servers.<nome>.tools.include`.
+
+**I tool non si trovano col nome che ti aspetti.** Hermes li espone come
+`mcp_<nome-server>_<nome-tool>`: cercare `invoke_tool` senza prefisso non dà
+risultati anche quando tutto funziona.
 
 **Il server parte e muore subito.** L'avvio fallisce apposta se un tool non è
 conforme o se il backend del vault è sconosciuto: partire con un registro

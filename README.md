@@ -91,8 +91,17 @@ proprio stdin/stdout e si aspetta un client. L'orchestratore in
 `agents/orchestrator/` è il client minimo che lo avvia, lo interroga e ne
 valida il risultato.
 
-Per registrarlo in Hermes desktop:
-[docs/integrazione-hermes.md](docs/integrazione-hermes.md).
+Per il dispiegamento e la registrazione in Hermes desktop:
+
+- [docs/setup-vm-hermes.md](docs/setup-vm-hermes.md) — preparazione della VM
+  dedicata: utenti, permessi, chiave SSH vincolata a un comando unico.
+- [docs/integrazione-hermes.md](docs/integrazione-hermes.md) — registrazione
+  in Hermes e diagnostica.
+
+L'architettura di riferimento tiene il server su una **VM dedicata**, separata
+dalle macchine che la toolbox analizza: l'orchestratore custodisce il log
+d'audit, il vault e i controlli di scope, e un log che risiede sul bersaglio
+vale meno di uno che risiede altrove.
 
 ## Stato
 
