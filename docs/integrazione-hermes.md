@@ -137,21 +137,28 @@ rete, chiave o `authorized_keys`.
 ### Registrazione: usare la CLI, non scrivere la config a mano
 
 Hermes tiene le registrazioni MCP in un file **YAML** sotto la chiave di primo
-livello `mcp_servers`, indicato in `~/.hermes/config.yaml`. Le credenziali
-stanno a parte, in `~/.hermes/.env`.
+livello `mcp_servers`.
+
+**Il percorso dipende dalla piattaforma, e non è quello che si trova scritto
+in giro.** Verificato su Windows:
+
+```
+%LOCALAPPDATA%\hermes\config.yaml
+```
+
+che la CLI riporta come `~/AppData/Local/hermes/config.yaml`. Le guide
+consultate indicavano `~/.hermes/config.yaml`, che sarà la posizione su Linux
+o macOS ma **non è quella su Windows**.
+
+È il motivo per cui conviene **non scrivere la config a mano**: si lascia
+scrivere alla CLI, che poi dice dove l'ha messa. Indovinare il percorso
+avrebbe prodotto una configurazione in un file che nessuno legge, e un guasto
+senza sintomi utili.
 
 **Desktop e CLI condividono lo stesso file:** non esiste una configurazione
 MCP separata per l'app desktop, il cui pannello *Impostazioni → MCP Servers*
 modifica la medesima config. Una registrazione fatta dalla CLI compare quindi
 nel desktop e viceversa.
-
-> Il percorso e la condivisione desktop/CLI vengono da guide di terze parti
-> concordi fra loro; la documentazione ufficiale è orientata alla CLI e non
-> tratta il desktop. Vanno quindi considerati un'ipotesi solida ma da
-> confermare sul file vero, cosa che il comando qui sotto permette di fare.
-
-Conviene **non scrivere la config a mano** e lasciare che sia la CLI a
-metterla dove quella installazione la tiene davvero:
 
 ```sh
 hermes mcp add hermes-core \
@@ -161,8 +168,24 @@ hermes mcp list                 # conferma che sia registrato
 hermes mcp test hermes-core     # si connette, elenca i tool, esce con un codice
 ```
 
+All'aggiunta, la CLI si connette, scopre i tool e **chiede di abilitarli**:
+rispondere `Y` lascia `4/4 tools enabled`. Un server registrato ma con i tool
+non abilitati esiste e non espone nulla, che è una delle modalità di
+fallimento più difficili da leggere.
+
 `hermes mcp test` esce `0` se la connessione riesce, `1` se fallisce, `3` se
-il server non è in configurazione.
+il server non è in configurazione. Nel caso remoto riporta `Transport: stdio
+→ ssh` e `Auth: none`: quest'ultima è corretta e attesa — l'autenticazione
+sta al livello SSH, non al livello MCP, ed è la chiave vincolata a decidere
+cosa quel canale può fare.
+
+Esito atteso di una registrazione riuscita:
+
+```
+✓ Connected (1969ms)
+✓ Tools discovered: 4
+    list_available_tools    describe_tool    invoke_tool    raise_tool_tier
+```
 
 Accoppiato al preflight, questo dà una diagnosi a due lati: **il doctor dice
 se il nostro server funziona, `hermes mcp test` se Hermes riesce a parlarci.**
@@ -170,7 +193,11 @@ Se il primo è verde e il secondo no, il problema è nella registrazione.
 
 Dopo la registrazione vale la pena aprire il file che la CLI ha scritto: è
 quello il percorso reale su questa macchina, e conoscerlo serve per le
-modifiche successive.
+modifiche successive. Su Windows:
+
+```powershell
+notepad $env:LOCALAPPDATA\hermes\config.yaml
+```
 
 ### Forma YAML, se la scrivi a mano
 
@@ -206,23 +233,28 @@ tool abilitati sono registrati in config sotto
 
 ### Come si chiamano i tool dentro Hermes
 
-Hermes espone i tool di un server MCP con un prefisso:
-`mcp_<nome-server>_<nome-tool>`. Registrando il server come `hermes-core`, le
-quattro funzioni compaiono quindi come:
+Hermes espone i tool di un server MCP con un prefisso a **doppio
+underscore**: `mcp__<nome-server>__<nome-tool>`. Registrando il server come
+`hermes_core`, le quattro funzioni compaiono quindi come:
 
 ```
-mcp_hermes-core_list_available_tools
-mcp_hermes-core_describe_tool
-mcp_hermes-core_invoke_tool
-mcp_hermes-core_raise_tool_tier
+mcp__hermes_core__list_available_tools
+mcp__hermes_core__describe_tool
+mcp__hermes_core__invoke_tool
+mcp__hermes_core__raise_tool_tier
 ```
 
 Vale la pena saperlo prima: cercando `invoke_tool` senza prefisso si
 concluderebbe che la registrazione è fallita proprio mentre funziona.
 
-Dato che il nome del server finisce dentro un identificatore, un nome senza
-trattini — `hermes_core` — produce tool dal nome più pulito. È una preferenza,
-non un requisito.
+**Hermes aggiunge quattro accessori del protocollo** a ogni server MCP —
+`get_prompt`, `list_prompts`, `list_resources`, `read_resource` — quindi
+`/tools` conta **8** voci per questo server, non 4. Le quattro aggiunte
+risponderanno vuoto, perché `hermes-core` non espone né prompt né risorse.
+Non è un difetto e non va corretto: è il conteggio che include il protocollo.
+
+Dato che il nome del server finisce dentro un identificatore, conviene un
+nome senza trattini — `hermes_core` e non `hermes-core`.
 
 ---
 
@@ -277,6 +309,50 @@ la propria configurazione e il proprio comando.
 
 ---
 
+## Stato verificato
+
+L'integrazione è stata provata su un dispiegamento reale: Hermes desktop
+v0.21.3 su Windows, server su VM Ubuntu Server dedicata, raggiunta via SSH con
+chiave vincolata a un comando unico.
+
+Tre percorsi distinti, tutti confermati dal log d'audit:
+
+| Prova | Esito |
+|---|---|
+| `echo.ping` a tier Verde | `status: ok`, `authorized_by: policy`, nessuna interazione |
+| `raise_tool_tier` a `rosso` | `effective_tier: rosso`, `declared_tier: verde` conservato |
+| `echo.ping` dopo l'innalzamento | `needs_confirmation`, `pending`, **script non eseguito** |
+
+La terza è quella che conta: lo stesso tool, con lo stesso comando, prima
+esegue e poi viene sospeso, perché nel frattempo è cambiato il suo tier
+effettivo.
+
+Un dettaglio che conferma l'isolamento dei tool: l'output dell'agente dummy
+riportava una versione di Python diversa da quella del virtualenv del server.
+Lo script viene eseguito con il `python3` di sistema, **fuori** dall'ambiente
+del server — il vincolo descritto in `agents/echo_agent/run.py`, e lo stesso
+confine che permetterà di spostarlo in un container.
+
+### Rumore di avvio nel log
+
+Hermes avvia un processo server **nuovo a ogni connessione**, quindi il log
+accumula una riga `tool_registered` per avvio, ciascuna con un proprio
+`correlation_id`. In una sessione di prova sono risultate dieci righe di avvio
+per tre righe di catena effettiva.
+
+Non è un difetto — sono eventi reali di registrazione e vanno tracciati — ma
+rende il log meno leggibile a occhio. Si filtra per azione:
+
+```sh
+# le catene di invocazione, senza gli avvii
+grep -v '"action":"tool_registered"' /var/log/hermes/audit.jsonl
+
+# una catena intera, dato un correlation_id
+grep '"correlation_id":"<id>"' /var/log/hermes/audit.jsonl
+```
+
+---
+
 ## Diagnostica
 
 **Hermes non vede il server.** Eseguire il comando a mano in un terminale: se
@@ -306,7 +382,7 @@ pannello: una voce può essere *installata ma disabilitata*. In config, i tool
 abilitati stanno sotto `mcp_servers.<nome>.tools.include`.
 
 **I tool non si trovano col nome che ti aspetti.** Hermes li espone come
-`mcp_<nome-server>_<nome-tool>`: cercare `invoke_tool` senza prefisso non dà
+`mcp__<nome-server>__<nome-tool>`: cercare `invoke_tool` senza prefisso non dà
 risultati anche quando tutto funziona.
 
 **Il server parte e muore subito.** L'avvio fallisce apposta se un tool non è
