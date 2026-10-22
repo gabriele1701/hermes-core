@@ -264,6 +264,30 @@ def test_override_loggato_con_dichiarato_ed_effettivo(reg: ToolRegistry, audit: 
     assert "verde" in riga.detail  # il dichiarato resta tracciato
 
 
+def test_override_registra_chi_lo_ha_chiesto(reg: ToolRegistry, audit: AuditLog):
+    """Un innalzamento di tier è una modifica ai controlli: va attribuita.
+
+    Difetto trovato leggendo un log reale: la riga `override_set` diceva che
+    il tier era cambiato, ma con `agent: null` — cioè senza dire per mano di
+    chi, sull'unico evento in cui la provenienza è il dato che conta.
+    """
+    reg.register(_spec())
+    reg.set_override("echo.ping", RiskTier.ROSSO, agent=OwnerAgent.VULN_ASSESSMENT)
+    riga = [r for r in audit.read_all() if r.action is LogAction.OVERRIDE_SET][0]
+    assert riga.agent is OwnerAgent.VULN_ASSESSMENT
+
+
+def test_override_rifiutato_registra_chi_lo_ha_chiesto(
+    reg: ToolRegistry, audit: AuditLog
+):
+    """Vale a maggior ragione per un tentativo rifiutato."""
+    reg.register(_spec(default_tier=RiskTier.ROSSO))
+    with pytest.raises(OverrideRefused):
+        reg.set_override("echo.ping", RiskTier.VERDE, agent=OwnerAgent.PENTEST_KALI)
+    riga = [r for r in audit.read_all() if r.action is LogAction.OVERRIDE_REJECTED][0]
+    assert riga.agent is OwnerAgent.PENTEST_KALI
+
+
 def test_override_usa_il_correlation_id_passato(reg: ToolRegistry, audit: AuditLog):
     reg.register(_spec())
     cid = uuid.uuid4()
