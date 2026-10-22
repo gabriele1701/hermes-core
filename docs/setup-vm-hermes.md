@@ -34,16 +34,80 @@ container dell'agente di pentest serviranno più margine — conviene creare il
 disco già da 40 GB per non doverlo allargare dopo.
 
 **Rete:** sulla stessa rete VMware delle VM di laboratorio, perché dovrà
-raggiungerle. **Indirizzo stabile**, IP statico o riserva DHCP: la
-configurazione di Hermes contiene l'indirizzo, e al primo rinnovo DHCP si
-romperebbe.
+raggiungerle, e raggiungibile dalla postazione. Con la **NAT** di VMware la
+postazione arriva alla VM attraverso l'adattatore VMnet8 e le VM sulla stessa
+VMnet sono raggiungibili; **bridged** è l'alternativa più semplice se la VM
+deve essere visibile a tutta la rete; **host-only** la isola dalla rete fisica,
+quindi va scelta solo se i bersagli stanno tutti lì.
 
 ```sh
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y git python3-venv
+sudo apt install -y git python3-venv openssh-server
+sudo systemctl enable --now ssh
 sudo ufw default deny incoming
-sudo ufw allow ssh
+sudo ufw allow ssh          # prima di 'enable', o ti chiudi fuori
 sudo ufw enable
+```
+
+`openssh-server` non è dato per scontato: su Ubuntu Server è presente solo se
+è stato selezionato durante l'installazione. Se `systemctl status ssh`
+risponde `Unit ssh.service could not be found`, è semplicemente assente.
+
+### Indirizzo fisso
+
+La configurazione di Hermes contiene l'indirizzo della VM, quindi con il DHCP
+si romperebbe al primo rinnovo.
+
+Raccogli i dati reali della rete:
+
+```sh
+ip -br a                                  # interfaccia e indirizzo attuale
+ip route                                  # gateway: la riga "default via X"
+resolvectl status | grep -i "DNS Servers"
+```
+
+Con la NAT di VMware il gateway è tipicamente `.2` e il pool DHCP parte da
+`.128`: un indirizzo sotto il pool, come `.10`, è libero. Con una rete
+*bridged* dipende dal router, e vale la pena guardare la sua configurazione —
+oppure usare una **riserva DHCP**, che ha il vantaggio di sopravvivere a una
+reinstallazione della VM.
+
+```sh
+sudo tee /etc/netplan/99-hermes-static.yaml >/dev/null <<'NETPLAN'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens33:                        # il nome della tua interfaccia
+      dhcp4: false
+      addresses:
+        - 192.168.205.10/24       # indirizzo scelto, fuori dal pool DHCP
+      routes:
+        - to: default
+          via: 192.168.205.2      # il tuo gateway
+      nameservers:
+        addresses: [192.168.205.2, 1.1.1.1]
+NETPLAN
+sudo chmod 600 /etc/netplan/99-hermes-static.yaml
+sudo netplan try
+```
+
+Due dettagli che fanno la differenza:
+
+Il prefisso **`99-`** non è estetico: netplan applica i file in ordine e
+l'ultimo vince. Con un nome più basso, il `50-cloud-init.yaml` di Ubuntu
+Server sovrascriverebbe questa configurazione.
+
+`netplan try` tiene la configurazione per 120 secondi e la annulla da sola se
+non confermi — ma **va eseguito dalla console della VM, non via SSH**:
+cambiando indirizzo la sessione SSH cade, non puoi confermare, e netplan
+annulla tutto senza che tu capisca perché.
+
+Infine, perché cloud-init non rimetta mano alla rete a un aggiornamento:
+
+```sh
+echo 'network: {config: disabled}' | \
+    sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
 ```
 
 ---
