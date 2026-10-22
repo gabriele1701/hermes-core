@@ -12,25 +12,35 @@ Priorità: **ALTA** = da chiudere prima che il componente interessato esegua
 qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 **ACCETTATA** = valutata e deliberatamente non chiusa, con mitigazione.
 
+## Chiuse
+
+| Voce | Chiusa in | Come |
+|---|---|---|
+| `exec_sha256` dichiarato ma mai verificato | passo 6a | `executor.py` ricalcola lo SHA e lo confronta **prima di ogni esecuzione**, non all'avvio; discordanza → esecuzione negata e riga di audit. Resta il residuo TOCTOU qui sotto. |
+
 ---
 
-## ALTA — `exec_sha256` dichiarato ma mai verificato
+## ACCETTATA — finestra TOCTOU fra verifica dell'hash ed esecuzione
 
-**Dove:** `mcp_server/contracts.py` (campo), `mcp_server/registry.py` (registrazione).
+**Dove:** `mcp_server/executor.py`.
 
-Il contratto di registrazione pinna la versione dello script con uno SHA-256,
-ma **nessuno verifica che il file all'`exec_path` abbia davvero quell'hash**.
-Finché non si verifica, il pinning è un commento: uno script sostituito dopo
-la registrazione verrebbe eseguito senza che nulla se ne accorga.
+Lo SHA viene ricalcolato prima di ogni esecuzione, ma fra il calcolo
+dell'hash e lo spawn del processo passano alcuni millisecondi in cui il file
+potrebbe essere sostituito. La verifica legge il file, l'esecuzione lo rilegge
+dal percorso: sono due letture distinte.
 
-Rimandata perché in Milestone 0 nulla viene ancora eseguito.
+**Decisione:** chiuderla richiederebbe di eseguire dal descrittore già aperto
+e verificato (`fexecve`), che Python non espone in modo portabile. Il costo di
+aggirare il problema supera il beneficio, dato il contesto.
 
-**Condizione di chiusura:** il server calcola lo SHA-256 del file e lo
-confronta con `exec_sha256` **prima di ogni esecuzione**, non solo alla
-registrazione — un controllo all'avvio lascerebbe aperta la finestra fra
-avvio ed esecuzione. Discordanza → esecuzione negata e riga di audit.
-Da chiudere **nel passo 6** (wiring del server MCP), che è il primo punto in
-cui un'esecuzione diventa possibile.
+**Mitigazione:** la finestra è di millisecondi e sfruttarla richiede già
+accesso in scrittura alla directory degli script. La protezione reale è
+quella: **la directory degli script non deve essere scrivibile dall'utente che
+esegue il server.** Chi può riscrivere gli script non ha bisogno di vincere
+una corsa, cambia direttamente la configurazione.
+
+**Da rivalutare se:** il server girerà con un utente che ha accesso in
+scrittura al repo, o se gli script arriveranno da una sorgente non versionata.
 
 ---
 
