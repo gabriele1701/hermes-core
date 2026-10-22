@@ -28,6 +28,27 @@ Scelte difensive
 * **Una riga = un oggetto JSON.** ``json.dumps`` escapa newline e caratteri
   di controllo, quindi un ``detail`` multilinea non può spezzare il formato
   né iniettare una riga di log falsa.
+
+Limiti noti
+-----------
+
+Il log è append-only a livello di API, **non tamper-evident**: chi ha accesso
+in scrittura al file può riscriverlo a posteriori. La difesa non sta nel
+formato, sta fuori:
+
+* ``chattr +a`` sul file (richiede root per essere messo o tolto) impedisce
+  troncamenti e riscritture a qualunque processo non privilegiato, incluso
+  questo codice — che non deve girare da root;
+* la spedizione a un collector esterno: una copia già fuori dall'host non è
+  raggiungibile da una manomissione locale.
+
+L'hash-chaining dei record è stato **deliberatamente escluso**. Imporrebbe di
+serializzare le scritture (ogni record deve conoscere l'hash del precedente),
+perdendo il writer stateless e concorrente descritto sopra; e senza un
+ancoraggio esterno dell'hash di coda non sposta il modello di minaccia, perché
+chi controlla file e codice ricalcola l'intera catena. Se un domani il log
+dovesse reggere da solo come prova, la strada è firmare un digest periodico
+con chiave esterna, che non tocca il percorso di scrittura.
 """
 
 from __future__ import annotations
