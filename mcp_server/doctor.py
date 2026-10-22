@@ -124,7 +124,12 @@ def _log(referto: Referto, cfg: ServerConfig) -> None:
             "log d'audit",
             Esito.ERRORE,
             f"non scrivibile: {err}",
-            "Verificare permessi e percorso di server.log_path.",
+            "Verificare permessi e percorso di server.log_path. "
+            "Attenzione: un percorso **relativo** viene risolto rispetto alla "
+            "cartella della configurazione, quindi\n"
+            "             'var/log/...' finisce dentro il repo mentre "
+            "'/var/log/...' è assoluto.\n"
+            f"             Percorso risolto: {percorso}",
         )
         return
 
@@ -345,8 +350,14 @@ def _handshake(referto: Referto, percorso_config: Path) -> None:
             "avvio su stdio",
             Esito.ERRORE,
             f"nessuna risposta su stdout (exit={esito.returncode})"
-            + (f"\n             stderr: {_prima_riga(esito.stderr)}" if esito.stderr else ""),
-            "Il server non è partito: controllare l'errore riportato sopra.",
+            + (
+                f"\n             causa: {_errore_da_stderr(esito.stderr)}"
+                if esito.stderr
+                else ""
+            ),
+            "Il server non è partito per la causa riportata sopra. "
+            "Per vedere il traceback completo:\n"
+            f"             {sys.executable} -m mcp_server.server {percorso_config}",
         )
         return
 
@@ -397,6 +408,35 @@ def _e_json(riga: str) -> bool:
 def _prima_riga(valore: object) -> str:
     testo = str(valore).strip().splitlines()
     return testo[0][:300] if testo else ""
+
+
+def _errore_da_stderr(stderr: str) -> str:
+    """Estrae da stderr la riga che dice davvero cosa è andato storto.
+
+    La **prima** riga di un traceback è ``Traceback (most recent call last):``,
+    che non informa di nulla: l'eccezione sta in fondo. Qui si prende l'ultima
+    riga non vuota, e per un traceback si risale anche alla riga di contesto
+    precedente, perché un ``PermissionError`` è utile solo se accompagnato dal
+    percorso che l'ha provocato.
+    """
+    righe = [
+        r.rstrip()
+        for r in str(stderr).splitlines()
+        if r.strip() and not _solo_marcatori(r)
+    ]
+    if not righe:
+        return ""
+    ultima = righe[-1]
+    if len(righe) >= 2 and righe[0].startswith("Traceback"):
+        contesto = righe[-2].strip()
+        if contesto and not contesto.startswith("File "):
+            return f"{ultima[:240]} | {contesto[:120]}"
+    return ultima[:360]
+
+
+def _solo_marcatori(riga: str) -> bool:
+    """Se la riga è solo l'indicatore di posizione di Python 3.11+ (``~~~^^^``)."""
+    return bool(riga.strip()) and not (set(riga.strip()) - set("~^ "))
 
 
 # --------------------------------------------------------------------------- #

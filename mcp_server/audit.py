@@ -56,6 +56,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import stat
 import uuid
 from enum import StrEnum
 from pathlib import Path
@@ -244,11 +245,32 @@ class AuditLog:
         fd = os.open(self._path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, _FILE_MODE)
         os.close(fd)
         # mkdir/open rispettano la umask: i permessi vanno imposti dopo.
-        os.chmod(self._path, _FILE_MODE)
-        try:
-            os.chmod(self._path.parent, _DIR_MODE)
-        except PermissionError:  # pragma: no cover - directory non nostra
-            pass
+        _restringi(self._path, _FILE_MODE)
+        _restringi(self._path.parent, _DIR_MODE)
+
+
+def _restringi(percorso: Path, modo: int) -> None:
+    """Impone i permessi, se non sono già quelli, tollerando un rifiuto.
+
+    ``open`` e ``mkdir`` rispettano la umask, quindi i permessi vanno imposti
+    dopo la creazione. Ma un log irrigidito con ``chattr +a`` **rifiuta la
+    chmod con EPERM**, anche al proprietario: insistere significherebbe che
+    indurire il log impedisce di scriverlo, cioè che la misura di protezione
+    mette fuori uso ciò che protegge.
+
+    Quindi si cambia solo ciò che va cambiato — sul caso normale, file appena
+    creato con i permessi giusti, la chmod non viene nemmeno tentata — e un
+    rifiuto non è fatale. Che i permessi siano davvero restrittivi lo verifica
+    il preflight, che è il posto giusto per segnalarlo: un controllo che
+    *riporta* non deve stare sul percorso che *scrive*.
+    """
+    try:
+        if stat.S_IMODE(percorso.stat().st_mode) != modo:
+            os.chmod(percorso, modo)
+    except OSError:
+        # Append-only, filesystem non POSIX, directory di qualcun altro: in
+        # tutti i casi il log resta scrivibile, che è ciò che conta qui.
+        pass
 
 
 def _esito_da_status(result: AgentResult) -> CallOutcome:
