@@ -234,6 +234,82 @@ def test_flag_interprete_malformati_rifiutati(repo: Path, guasto: str):
         load_config(percorso)
 
 
+def test_limiti_di_default(repo: Path):
+    cfg = load_config(scrivi_config(repo))
+    assert cfg.max_output_bytes == 1024 * 1024
+    assert cfg.max_concurrent_tools == 2
+
+
+def test_limiti_configurabili(repo: Path):
+    percorso = scrivi_config(repo)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        "container_available = false",
+        "container_available = false\nmax_output_bytes = 4096\n"
+        "max_concurrent_tools = 5",
+    )
+    percorso.write_text(testo, encoding="utf-8")
+    cfg = load_config(percorso)
+    assert cfg.max_output_bytes == 4096
+    assert cfg.max_concurrent_tools == 5
+
+
+@pytest.mark.parametrize(
+    "guasto",
+    [
+        "max_output_bytes = 0",
+        "max_output_bytes = -1",
+        "max_output_bytes = 10",
+        "max_concurrent_tools = 0",
+        "max_concurrent_tools = -3",
+        'max_output_bytes = "molti"',
+        "max_concurrent_tools = true",
+    ],
+)
+def test_limiti_che_disattiverebbero_il_tetto_rifiutati(repo: Path, guasto: str):
+    """Zero non è «nessun limite»: è un limite scritto male.
+
+    Trattarlo come illimitato trasformerebbe un refuso nella rimozione di un
+    controllo.
+    """
+    percorso = scrivi_config(repo)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        "container_available = false", f"container_available = false\n{guasto}"
+    )
+    percorso.write_text(testo, encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(percorso)
+
+
+def test_server_propaga_i_limiti(repo: Path):
+    percorso = scrivi_config(repo)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        "container_available = false",
+        "container_available = false\nmax_output_bytes = 8192\n"
+        "max_concurrent_tools = 1",
+    )
+    percorso.write_text(testo, encoding="utf-8")
+    srv = crea_server(percorso)
+    assert srv._executor.max_output_bytes == 8192
+    assert srv._executor.max_concurrent == 1
+
+
+def test_truncated_nella_risposta(repo: Path):
+    """Il modello deve poter sapere che sta leggendo un output tagliato."""
+    (repo / SCRIPT).write_text(
+        "import sys\nsys.stdout.write('A' * 20000)\n", encoding="utf-8"
+    )
+    percorso = scrivi_config(repo)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        "container_available = false",
+        "container_available = false\nmax_output_bytes = 2048",
+    )
+    percorso.write_text(testo, encoding="utf-8")
+
+    r = crea_server(percorso)._invoke_tool("echo.ping")
+    assert r["output"]["truncated"] is True
+    assert len(r["output"]["stdout"]) == 2048
+
+
 def test_server_usa_l_interprete_della_config(repo: Path):
     srv = crea_server(scrivi_config(repo))
     assert srv._executor.tool_python == Path("/usr/bin/python3")

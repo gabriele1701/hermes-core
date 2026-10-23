@@ -83,14 +83,22 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
 import subprocess
+import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence, runtime_checkable
 
 from mcp_server.audit import AuditLog, LogAction
-from mcp_server.config import TOOL_PYTHON_DEFAULT, TOOL_PYTHON_FLAGS_DEFAULT
+from mcp_server.config import (
+    MAX_CONCURRENT_DEFAULT,
+    MAX_OUTPUT_BYTES_DEFAULT,
+    TOOL_PYTHON_DEFAULT,
+    TOOL_PYTHON_FLAGS_DEFAULT,
+)
 from mcp_server.contracts import (
     AuthorizedBy,
     CallOutcome,
@@ -105,6 +113,14 @@ from mcp_server.tiers import ConfirmationPolicy
 #: Timeout di default di un'esecuzione. Un tool che non termina è un tool che
 #: blocca la catena: meglio un errore che un'attesa indefinita.
 TIMEOUT_DEFAULT = 300
+
+#: Secondi concessi a un tool fra SIGTERM e SIGKILL, perché possa chiudere
+#: file e connessioni invece di essere troncato a metà.
+GRAZIA_SIGTERM = 2.0
+
+#: Quanto si attende un posto libero prima di rifiutare. Attendere a lungo
+#: accumulerebbe richieste; rifiutare subito dà un riscontro al chiamante.
+ATTESA_POSTO_LIBERO = 1.0
 
 #: Variabili d'ambiente passate ai tool. Tutto il resto viene scartato, perché
 #: l'ambiente del server può contenere credenziali che il tool non deve vedere.
@@ -130,6 +146,10 @@ class IntegrityMismatch(ExecutionError):
     """Lo script non corrisponde allo SHA dichiarato, o non è raggiungibile."""
 
 
+class ConcurrencyLimitReached(ExecutionError):
+    """Troppe esecuzioni contemporanee in questo processo."""
+
+
 class ConfirmationRequired(ExecutionError):
     """La policy richiede una conferma che non è stata fornita."""
 
@@ -146,6 +166,10 @@ class RunResult:
     returncode: int
     stdout: str
     stderr: str
+    #: Se l'output ha superato il tetto e è stato tagliato. Va dichiarato, non
+    #: nascosto: un output troncato in silenzio fa trarre conclusioni
+    #: sbagliate a chi lo legge, modello compreso.
+    truncated: bool = False
 
 
 @runtime_checkable
@@ -163,6 +187,20 @@ class SubprocessRunner:
     da una shell, quindi non esiste una via di iniezione via metacaratteri.
     L'ambiente è una lista bianca, non l'ambiente ereditato.
 
+    Lo stdin del tool è ``/dev/null``
+    ---------------------------------
+
+    Non è un dettaglio di pulizia. Su trasporto stdio **lo stdin del server è
+    il canale del protocollo MCP**: un figlio che lo eredita può leggere — e
+    quindi *consumare* — i byte che l'host sta inviando. Verificato: un tool
+    lanciato come prima riceveva ``{"jsonrpc":"2.0","id":1,"method":"initia…``.
+
+    Le conseguenze sono due, entrambe serie: il server perde input e la
+    sessione si corrompe, e il tool vede ciò che il client manda — che con
+    l'elicitation comprenderà le risposte dell'utente alle richieste di
+    conferma. Un tool non deve avere alcun canale di lettura verso il
+    protocollo.
+
     Decodifica tollerante
     ---------------------
 
@@ -178,21 +216,89 @@ class SubprocessRunner:
     un'esecuzione dalla traccia d'audit.
     """
 
+    def __init__(
+        self,
+        *,
+        max_output_bytes: int = MAX_OUTPUT_BYTES_DEFAULT,
+        grazia_sigterm: float = GRAZIA_SIGTERM,
+    ) -> None:
+        self._max_output = max_output_bytes
+        self._grazia = grazia_sigterm
+
     def run(self, argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int) -> RunResult:
-        completato = subprocess.run(  # noqa: S603 - argv esplicito, shell=False
-            argv,
-            cwd=str(cwd),
-            env=env,
-            timeout=timeout,
-            capture_output=True,
-            shell=False,
-            check=False,
-        )
+        # File temporanei invece di pipe: con due pipe e un solo thread di
+        # lettura un tool che riempie un buffer manderebbe tutto in stallo, e
+        # l'alternativa (leggere i due stream in parallelo) aggiunge
+        # concorrenza dove non serve. Il consumo di disco resta limitato dal
+        # timeout.
+        with tempfile.TemporaryFile() as f_out, tempfile.TemporaryFile() as f_err:
+            processo = subprocess.Popen(  # noqa: S603 - argv esplicito, shell=False
+                argv,
+                cwd=str(cwd),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=f_out,
+                stderr=f_err,
+                shell=False,
+                # Il figlio diventa capogruppo: al timeout si può terminare
+                # tutta la discendenza, non solo lui.
+                start_new_session=True,
+            )
+            try:
+                processo.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._termina_gruppo(processo)
+                raise
+            finally:
+                if processo.poll() is None:  # pragma: no cover - rete di sicurezza
+                    self._termina_gruppo(processo)
+
+            stdout, tagliato_out = self._leggi(f_out)
+            stderr, tagliato_err = self._leggi(f_err)
+
         return RunResult(
-            returncode=completato.returncode,
-            stdout=_decodifica(completato.stdout),
-            stderr=_decodifica(completato.stderr),
+            returncode=processo.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            truncated=tagliato_out or tagliato_err,
         )
+
+    # -- interno ------------------------------------------------------------ #
+
+    def _termina_gruppo(self, processo: subprocess.Popen) -> None:
+        """Termina il processo e tutta la sua discendenza.
+
+        ``subprocess`` ucciderebbe solo il figlio diretto: un tool che ha
+        lanciato a sua volta qualcosa — ``nmap`` dentro uno script, per dire —
+        lascerebbe quel qualcosa vivo e adottato da init, mentre il log
+        dichiara l'esecuzione terminata. Una scansione «conclusa» che continua
+        a girare è peggio di un errore, perché nessuno la sta più guardando.
+
+        Prima ``SIGTERM``, per dare al tool la possibilità di chiudere i
+        propri file e connessioni, poi ``SIGKILL`` se non basta.
+        """
+        try:
+            gruppo = os.getpgid(processo.pid)
+        except (ProcessLookupError, PermissionError):  # pragma: no cover
+            return
+
+        for segnale in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(gruppo, segnale)
+            except (ProcessLookupError, PermissionError):
+                return
+            try:
+                processo.wait(timeout=self._grazia)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+
+    def _leggi(self, handle) -> tuple[str, bool]:
+        """Legge al massimo ``max_output_bytes``, segnalando il taglio."""
+        handle.seek(0)
+        dati = handle.read(self._max_output + 1)
+        tagliato = len(dati) > self._max_output
+        return _decodifica(dati[: self._max_output]), tagliato
 
 
 def _decodifica(grezzo: bytes | str | None) -> str:
@@ -301,14 +407,21 @@ class ToolExecutor:
         runner: Runner | None = None,
         tool_python: Path | str = TOOL_PYTHON_DEFAULT,
         tool_python_flags: Sequence[str] = TOOL_PYTHON_FLAGS_DEFAULT,
+        max_output_bytes: int = MAX_OUTPUT_BYTES_DEFAULT,
+        max_concurrent: int = MAX_CONCURRENT_DEFAULT,
     ) -> None:
         self._registry = registry
         self._audit = audit
         self._repo_root = Path(repo_root)
         self._container_available = container_available
-        self._runner = runner or SubprocessRunner()
+        self._runner = runner or SubprocessRunner(max_output_bytes=max_output_bytes)
         self._tool_python = Path(tool_python)
         self._tool_python_flags = tuple(tool_python_flags)
+        self._max_output_bytes = max_output_bytes
+        self._max_concurrent = max_concurrent
+        # I tool sincroni girano nel thread pool del framework MCP, quindi le
+        # invocazioni concorrenti sono thread reali dello stesso processo.
+        self._posti = threading.BoundedSemaphore(max_concurrent)
 
     @property
     def container_available(self) -> bool:
@@ -322,6 +435,14 @@ class ToolExecutor:
     @property
     def tool_python_flags(self) -> tuple[str, ...]:
         return self._tool_python_flags
+
+    @property
+    def max_output_bytes(self) -> int:
+        return self._max_output_bytes
+
+    @property
+    def max_concurrent(self) -> int:
+        return self._max_concurrent
 
     # -- preparazione -------------------------------------------------------- #
 
@@ -462,6 +583,22 @@ class ToolExecutor:
             target=target,
         )
 
+        # Posto libero, o rifiuto tracciato. Il gate è l'unico punto in cui
+        # passano le esecuzioni, quindi è il punto in cui si contano.
+        if not self._posti.acquire(timeout=ATTESA_POSTO_LIBERO):
+            self._nega(
+                pronta.spec,
+                agent,
+                pronta.effective_tier,
+                correlation_id,
+                target,
+                f"limite di esecuzioni contemporanee raggiunto "
+                f"({self._max_concurrent}): invocazione rifiutata",
+            )
+            raise ConcurrencyLimitReached(
+                f"già {self._max_concurrent} esecuzioni in corso in questo processo"
+            )
+
         argv = [str(self._tool_python), *self._tool_python_flags, str(pronta.script)]
         try:
             esito = self._runner.run(
@@ -486,9 +623,14 @@ class ToolExecutor:
             if not isinstance(err, Exception):
                 raise
             return call, risultato
+        finally:
+            self._posti.release()
 
         outcome = CallOutcome.OK if esito.returncode == 0 else CallOutcome.ERROR
-        call = self._traccia(pronta, outcome, f"exit={esito.returncode}")
+        detail = f"exit={esito.returncode}"
+        if esito.truncated:
+            detail += f"; output troncato a {self._max_output_bytes} byte per stream"
+        call = self._traccia(pronta, outcome, detail)
         self._log_call(call, pronta)
         return call, esito
 

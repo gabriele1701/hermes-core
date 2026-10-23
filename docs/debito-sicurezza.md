@@ -19,6 +19,8 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | `exec_sha256` dichiarato ma mai verificato | passo 6a | `executor.py` ricalcola lo SHA e lo confronta **prima di ogni esecuzione**, non all'avvio; discordanza → esecuzione negata e riga di audit. Resta il residuo TOCTOU qui sotto. |
 | HC-01 — esecuzione senza riga di audit | patch sic. 1 | Decodifica tollerante e, dopo lo spawn, ogni eccezione convertita in esito registrato. Rete di sicurezza finale nel server. |
 | HC-03 — interprete ereditato dal `PATH`, user site e moduli omonimi | patch sic. 2 | Interprete assoluto dalla configurazione, verificato all'avvio, eseguito con `-I -S`. Preflight: posizione, permessi e isolamento effettivo. |
+| HC-06 — processi orfani al timeout, output e concorrenza illimitati | patch sic. 3 | `start_new_session` + terminazione del gruppo (SIGTERM poi SIGKILL), tetto per stream con flag `truncated` dichiarato, semaforo con rifiuto tracciato. |
+| Lo stdin dei tool era il canale MCP del server | patch sic. 3 | `stdin=DEVNULL`. Trovato verificando il report, non era fra i suoi finding: un tool poteva leggere e consumare i byte del protocollo. |
 
 ---
 
@@ -93,6 +95,29 @@ punto due `tool_id` con identità identica e tier diverso sono aliasing
 genuino, e il registro può **rifiutare** quello a tier inferiore invece di
 limitarsi a segnalarlo. Da affrontare **quando i tool avranno bisogno di
 argomenti**, cioè all'ingresso dei primi tool reali in Milestone 1.
+
+---
+
+## MEDIA — il limite di concorrenza è per processo, non complessivo
+
+**Dove:** `mcp_server/executor.py` (semaforo), `docs/integrazione-hermes.md`.
+
+Il tetto sulle esecuzioni contemporanee vive in un semaforo del processo
+server, e Hermes avvia **un processo per connessione**. Contiene quindi un
+modello in ciclo dentro una sessione, non la somma di più sessioni o
+connessioni aperte in parallelo.
+
+**Perché rimandata:** un limite complessivo richiede uno stato condiviso fra
+processi — un file di lock o un contatore in `/var/lib/hermes` — e lo stesso
+problema si presenta per gli override durevoli. Conviene risolverli insieme,
+con un solo meccanismo di stato condiviso, invece di inventarne due.
+
+**Mitigazione:** il limite per processo copre il caso realistico di oggi, cioè
+un agente che invoca in ciclo nella sessione in cui sta lavorando. Ogni
+rifiuto è tracciato, quindi una saturazione si vede nel log.
+
+**Condizione di chiusura:** insieme alla persistenza degli override, con lo
+stesso store append-only.
 
 ---
 

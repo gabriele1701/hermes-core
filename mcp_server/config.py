@@ -36,6 +36,8 @@ _CHIAVI_SERVER = frozenset(
         "log_path",
         "tool_python",
         "tool_python_flags",
+        "max_output_bytes",
+        "max_concurrent_tools",
     }
 )
 _CHIAVI_VAULT = frozenset({"backend", "stub_secrets"})
@@ -57,6 +59,17 @@ TOOL_PYTHON_DEFAULT = Path("/usr/bin/python3")
 #: terze parti non partirebbe — e la risposta giusta in quel caso è un venv
 #: dedicato in sola lettura per quel tool, non allentare i flag per tutti.
 TOOL_PYTHON_FLAGS_DEFAULT = ("-I", "-S")
+
+#: Tetto per ciascuno dei due stream di output di un tool. L'output finisce
+#: nel contesto del modello: senza un limite, un tool prolisso — o un
+#: bersaglio che risponde a valanga — riempie la memoria del server e il
+#: contesto dell'agente.
+MAX_OUTPUT_BYTES_DEFAULT = 1024 * 1024
+
+#: Esecuzioni di tool contemporanee ammesse in un processo server. Un modello
+#: in ciclo può invocare senza fermarsi: il limite trasforma una saturazione
+#: in un rifiuto tracciato.
+MAX_CONCURRENT_DEFAULT = 2
 
 
 class ConfigError(Exception):
@@ -87,6 +100,10 @@ class ServerConfig:
     #: Interprete dei tool: percorso assoluto, verificato all'avvio.
     tool_python: Path = TOOL_PYTHON_DEFAULT
     tool_python_flags: tuple[str, ...] = TOOL_PYTHON_FLAGS_DEFAULT
+    #: Tetto per stream sull'output di un tool, e tetto sulle esecuzioni
+    #: contemporanee in questo processo.
+    max_output_bytes: int = MAX_OUTPUT_BYTES_DEFAULT
+    max_concurrent_tools: int = MAX_CONCURRENT_DEFAULT
     vault: VaultConfig = VaultConfig()
     #: Payload grezzi dei tool: la validazione spetta al registro, che la
     #: registra nel log d'audit.
@@ -141,6 +158,12 @@ def load_config(path: str | Path) -> ServerConfig:
         container_available=container,
         tool_python=_interprete(server.get("tool_python")),
         tool_python_flags=_flag_interprete(server.get("tool_python_flags")),
+        max_output_bytes=_intero_positivo(
+            server, "max_output_bytes", MAX_OUTPUT_BYTES_DEFAULT, minimo=1024
+        ),
+        max_concurrent_tools=_intero_positivo(
+            server, "max_concurrent_tools", MAX_CONCURRENT_DEFAULT, minimo=1
+        ),
         vault=_vault(dati.get("vault")),
         tools=_tools(dati.get("tool")),
     )
@@ -176,6 +199,27 @@ def _agente(valore: Any) -> OwnerAgent:
         raise ConfigError(
             f"server.agent non riconosciuto: {valore!r}. Ammessi: {ammessi}"
         ) from err
+
+
+def _intero_positivo(
+    valori: Mapping[str, Any], chiave: str, default: int, *, minimo: int
+) -> int:
+    """Legge un intero di limite, rifiutando valori che disattiverebbero il tetto.
+
+    Un limite a zero o negativo non è «nessun limite»: è un limite scritto
+    male, e trattarlo come illimitato trasformerebbe un refuso nella rimozione
+    di un controllo.
+    """
+    valore = valori.get(chiave)
+    if valore is None:
+        return default
+    if isinstance(valore, bool) or not isinstance(valore, int):
+        raise ConfigError(f"server.{chiave} deve essere un intero")
+    if valore < minimo:
+        raise ConfigError(
+            f"server.{chiave} deve essere almeno {minimo}, ricevuto {valore}"
+        )
+    return valore
 
 
 def _interprete(valore: Any) -> Path:
