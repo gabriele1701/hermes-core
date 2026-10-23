@@ -16,6 +16,7 @@ quali solo al primo uso. Un errore all'avvio è rumoroso e si corregge subito.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,9 +29,34 @@ from mcp_server.contracts import OwnerAgent
 #: configurazione di sicurezza è una impostazione che credi di aver messo.
 _SEZIONI_AMMESSE = frozenset({"server", "vault", "tool"})
 _CHIAVI_SERVER = frozenset(
-    {"agent", "repo_root", "container_available", "log_path"}
+    {
+        "agent",
+        "repo_root",
+        "container_available",
+        "log_path",
+        "tool_python",
+        "tool_python_flags",
+    }
 )
 _CHIAVI_VAULT = frozenset({"backend", "stub_secrets"})
+
+#: Interprete con cui vengono eseguiti i tool. Percorso **assoluto**: è il
+#: punto dell'intera architettura in cui si decide quale codice gira, e
+#: lasciarlo al ``PATH`` significa non saperlo.
+TOOL_PYTHON_DEFAULT = Path("/usr/bin/python3")
+
+#: Flag di isolamento dell'interprete dei tool.
+#:
+#: ``-I`` (modalità isolata) esclude da ``sys.path`` sia la directory dello
+#: script sia lo user site dell'utente che esegue, e ignora le variabili
+#: d'ambiente ``PYTHON*``. Chiude due vie con cui codice non verificato
+#: entrerebbe in esecuzione pur lasciando intatto lo SHA dello script.
+#:
+#: ``-S`` salta anche ``site``, quindi nessun ``site-packages`` e nessun file
+#: ``.pth`` di sistema. Costo: un tool che avesse bisogno di un pacchetto di
+#: terze parti non partirebbe — e la risposta giusta in quel caso è un venv
+#: dedicato in sola lettura per quel tool, non allentare i flag per tutti.
+TOOL_PYTHON_FLAGS_DEFAULT = ("-I", "-S")
 
 
 class ConfigError(Exception):
@@ -58,6 +84,9 @@ class ServerConfig:
     repo_root: Path
     log_path: Path
     container_available: bool = False
+    #: Interprete dei tool: percorso assoluto, verificato all'avvio.
+    tool_python: Path = TOOL_PYTHON_DEFAULT
+    tool_python_flags: tuple[str, ...] = TOOL_PYTHON_FLAGS_DEFAULT
     vault: VaultConfig = VaultConfig()
     #: Payload grezzi dei tool: la validazione spetta al registro, che la
     #: registra nel log d'audit.
@@ -110,6 +139,8 @@ def load_config(path: str | Path) -> ServerConfig:
         repo_root=repo_root,
         log_path=log_path,
         container_available=container,
+        tool_python=_interprete(server.get("tool_python")),
+        tool_python_flags=_flag_interprete(server.get("tool_python_flags")),
         vault=_vault(dati.get("vault")),
         tools=_tools(dati.get("tool")),
     )
@@ -145,6 +176,55 @@ def _agente(valore: Any) -> OwnerAgent:
         raise ConfigError(
             f"server.agent non riconosciuto: {valore!r}. Ammessi: {ammessi}"
         ) from err
+
+
+def _interprete(valore: Any) -> Path:
+    """Valida l'interprete dei tool, o solleva.
+
+    Deve essere un percorso **assoluto**, esistente ed eseguibile. Non si
+    accetta un nome da risolvere nel ``PATH``: quale interprete esegue i tool
+    è una decisione di sicurezza, e il ``PATH`` del server la delegherebbe
+    all'ambiente in cui il server è stato avviato — che su una macchina
+    cambia, e con esso cambia la superficie d'attacco.
+    """
+    if valore is None:
+        candidato = TOOL_PYTHON_DEFAULT
+    elif isinstance(valore, str) and valore:
+        candidato = Path(valore).expanduser()
+    else:
+        raise ConfigError("server.tool_python deve essere una stringa non vuota")
+
+    if not candidato.is_absolute():
+        raise ConfigError(
+            f"server.tool_python deve essere un percorso assoluto, non "
+            f"{str(candidato)!r}: un nome risolto dal PATH non è deterministico"
+        )
+    if not candidato.is_file():
+        raise ConfigError(f"server.tool_python non esiste: {candidato}")
+    if not os.access(candidato, os.X_OK):
+        raise ConfigError(f"server.tool_python non è eseguibile: {candidato}")
+    return candidato
+
+
+def _flag_interprete(valore: Any) -> tuple[str, ...]:
+    """Valida i flag dell'interprete dei tool.
+
+    Restano configurabili perché un tool futuro potrebbe richiedere un
+    ambiente diverso, ma il default è il più stretto: chi li allenta lo fa
+    scrivendolo in configurazione, dove si vede in review.
+    """
+    if valore is None:
+        return TOOL_PYTHON_FLAGS_DEFAULT
+    if not isinstance(valore, list) or not all(isinstance(f, str) for f in valore):
+        raise ConfigError(
+            "server.tool_python_flags deve essere una lista di stringhe"
+        )
+    if any(not f.startswith("-") or not f.strip() for f in valore):
+        raise ConfigError(
+            "server.tool_python_flags accetta solo opzioni dell'interprete "
+            "(es. [\"-I\", \"-S\"]), non percorsi o argomenti"
+        )
+    return tuple(valore)
 
 
 def _percorso(valore: Any, rispetto_a: Path) -> Path | None:

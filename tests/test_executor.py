@@ -16,6 +16,7 @@ import pytest
 
 from mcp_server.audit import AuditLog, LogAction
 from mcp_server.contracts import AuthorizedBy, CallOutcome, OwnerAgent, RiskTier, ToolSpec
+from mcp_server.config import TOOL_PYTHON_DEFAULT
 from mcp_server.executor import (
     ConfirmationRequired,
     ContainerUnavailable,
@@ -327,8 +328,130 @@ def test_esecuzione_senza_shell(repo, registry, audit):
         "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
     )
     argv = runner.chiamate[0]["argv"]
-    assert isinstance(argv, list) and len(argv) == 2
-    assert argv[1].endswith("echo.py")
+    assert isinstance(argv, list)
+    assert argv[-1].endswith("echo.py")
+
+
+# --------------------------------------------------------------------------- #
+# L'interprete è deciso, non ereditato
+# --------------------------------------------------------------------------- #
+
+
+def test_interprete_assoluto_e_isolato_per_default(repo, registry, audit):
+    """Mai `python3` dal PATH: quale codice gira è una decisione, non un caso."""
+    registry.register(_spec(repo))
+    runner = RunnerFinto()
+    _executor(registry, audit, repo, runner=runner).execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    argv = runner.chiamate[0]["argv"]
+    assert Path(argv[0]).is_absolute(), "l'interprete non va risolto dal PATH"
+    assert argv[0] == str(TOOL_PYTHON_DEFAULT)
+    assert "-I" in argv and "-S" in argv
+
+
+def test_interprete_configurabile(repo, registry, audit):
+    registry.register(_spec(repo))
+    runner = RunnerFinto()
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        runner=runner,
+        tool_python="/usr/bin/python3.13",
+        tool_python_flags=("-I",),
+    )
+    ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+    argv = runner.chiamate[0]["argv"]
+    assert argv[0] == "/usr/bin/python3.13"
+    assert argv[1:-1] == ["-I"]
+    assert ex.tool_python == Path("/usr/bin/python3.13")
+    assert ex.tool_python_flags == ("-I",)
+
+
+def test_modulo_omonimo_non_sostituisce_la_stdlib(repo, registry, audit):
+    """Il vettore confermato dal security review: `json.py` accanto allo script.
+
+    La directory dello script era in testa a `sys.path`, quindi un modulo
+    omonimo rimpiazzava la libreria standard — con lo SHA dello script
+    invariato e la verifica d'integrità superata. `-I` esclude quella
+    directory da `sys.path`.
+    """
+    (repo / SCRIPT).write_text(
+        "import json\nprint(json.dumps({'x': 1}))\n", encoding="utf-8"
+    )
+    (repo / "tools" / "json.py").write_text(
+        "def dumps(*a, **k):\n    return 'SOSTITUITA'\n", encoding="utf-8"
+    )
+    registry.register(_spec(repo))
+    ex = ToolExecutor(registry, audit, repo_root=repo, runner=SubprocessRunner())
+
+    call, esito = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.OK
+    assert "SOSTITUITA" not in esito.stdout
+    assert '{"x": 1}' in esito.stdout
+
+
+def test_user_site_escluso(repo, registry, audit):
+    """`-I` esclude lo user site, dove l'utente di servizio può scrivere.
+
+    È la via con cui un tool compromesso otterrebbe esecuzione in ogni tool
+    futuro — un `.pth` eseguito prima dello script — senza toccare nessuno
+    SHA.
+    """
+    (repo / SCRIPT).write_text(
+        "import sys, pathlib\n"
+        "print('isolated', sys.flags.isolated)\n"
+        "print('no_site', sys.flags.no_site)\n"
+        "dirscript = str(pathlib.Path(__file__).resolve().parent)\n"
+        "print('dir_script_in_path', dirscript in [str(p) for p in sys.path])\n"
+        "print('user_site_in_path', any('.local' in str(p) for p in sys.path))\n",
+        encoding="utf-8",
+    )
+    registry.register(_spec(repo))
+    ex = ToolExecutor(registry, audit, repo_root=repo, runner=SubprocessRunner())
+    _, esito = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    # Con -S il modulo `site` non viene mai inizializzato: più forte di
+    # "user site disattivato", perché non c'è nemmeno la fase in cui i .pth
+    # verrebbero letti.
+    assert "isolated 1" in esito.stdout
+    assert "no_site 1" in esito.stdout
+    assert "dir_script_in_path False" in esito.stdout
+    assert "user_site_in_path False" in esito.stdout
+
+
+def test_echo_agent_reale_gira_isolato(registry, audit):
+    """Il tool che consegniamo deve funzionare coi flag più stretti.
+
+    Verifica il vincolo dichiarato in `agents/echo_agent/run.py`: un tool è un
+    eseguibile autonomo, che usa solo la libreria standard.
+    """
+    import json
+
+    radice = Path(__file__).resolve().parent.parent
+    reale = "agents/echo_agent/run.py"
+    registry.register(
+        ToolSpec(
+            tool_id="echo.ping",
+            owner_agent=OwnerAgent.ECHO_DUMMY,
+            default_tier=RiskTier.VERDE,
+            personal_data=False,
+            requires_container=False,
+            exec_path=reale,
+            exec_sha256=sha256_file(radice / reale),
+            description="Echo agent reale.",
+        )
+    )
+    ex = ToolExecutor(registry, audit, repo_root=radice, runner=SubprocessRunner())
+    call, esito = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.OK
+    assert json.loads(esito.stdout)["tool"] == "echo.ping"
 
 
 def test_timeout_propagato(repo, registry, audit):

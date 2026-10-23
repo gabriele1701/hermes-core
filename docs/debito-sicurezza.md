@@ -17,6 +17,30 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | Voce | Chiusa in | Come |
 |---|---|---|
 | `exec_sha256` dichiarato ma mai verificato | passo 6a | `executor.py` ricalcola lo SHA e lo confronta **prima di ogni esecuzione**, non all'avvio; discordanza → esecuzione negata e riga di audit. Resta il residuo TOCTOU qui sotto. |
+| HC-01 — esecuzione senza riga di audit | patch sic. 1 | Decodifica tollerante e, dopo lo spawn, ogni eccezione convertita in esito registrato. Rete di sicurezza finale nel server. |
+| HC-03 — interprete ereditato dal `PATH`, user site e moduli omonimi | patch sic. 2 | Interprete assoluto dalla configurazione, verificato all'avvio, eseguito con `-I -S`. Preflight: posizione, permessi e isolamento effettivo. |
+
+---
+
+## ACCETTATA — l'interprete dei tool non è coperto da uno SHA
+
+**Dove:** `mcp_server/config.py` (`tool_python`), `mcp_server/executor.py`.
+
+L'interprete con cui girano i tool è ora un percorso assoluto deciso in
+configurazione ed eseguito isolato, ma il suo **contenuto** non è verificato
+come quello degli script: non c'è un hash atteso per `/usr/bin/python3`.
+
+**Decisione:** pinnare anche l'interprete significherebbe inseguire ogni
+aggiornamento di sistema, e il beneficio è marginale rispetto al vincolo che
+lo sostituisce: quel file appartiene al sistema e non all'utente di servizio.
+
+**Mitigazione:** il preflight verifica che l'interprete sia fuori da
+`repo_root` e non scrivibile da gruppo o altri, e lo riporta con modo e
+proprietario. Chi può riscrivere `/usr/bin/python3` è già root.
+
+**Da rivalutare se:** i tool verranno eseguiti da un venv dedicato dentro il
+perimetro del progetto, perché a quel punto l'interprete torna a essere un
+file che il progetto controlla.
 
 ---
 

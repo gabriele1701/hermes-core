@@ -164,6 +164,82 @@ def test_container_available_deve_essere_booleano(repo: Path):
         load_config(percorso)
 
 
+def test_interprete_default_assoluto_e_isolato(repo: Path):
+    cfg = load_config(scrivi_config(repo))
+    assert cfg.tool_python.is_absolute()
+    assert cfg.tool_python == Path("/usr/bin/python3")
+    assert cfg.tool_python_flags == ("-I", "-S")
+
+
+def test_interprete_relativo_rifiutato(repo: Path):
+    """Un nome risolto dal PATH non è deterministico: va rifiutato all'avvio."""
+    percorso = scrivi_config(repo, sezioni_extra='\n')
+    testo = percorso.read_text(encoding="utf-8").replace(
+        'container_available = false',
+        'container_available = false\ntool_python = "python3"',
+    )
+    percorso.write_text(testo, encoding="utf-8")
+    with pytest.raises(ConfigError, match="assoluto"):
+        load_config(percorso)
+
+
+def test_interprete_inesistente_rifiutato(repo: Path):
+    percorso = scrivi_config(repo)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        'container_available = false',
+        'container_available = false\ntool_python = "/usr/bin/python-inesistente"',
+    )
+    percorso.write_text(testo, encoding="utf-8")
+    with pytest.raises(ConfigError, match="non esiste"):
+        load_config(percorso)
+
+
+def test_interprete_non_eseguibile_rifiutato(repo: Path, tmp_path: Path):
+    finto = tmp_path / "python-finto"
+    finto.write_text("#!/bin/sh\n", encoding="utf-8")
+    finto.chmod(0o644)
+    percorso = scrivi_config(repo)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        'container_available = false',
+        f'container_available = false\ntool_python = "{finto}"',
+    )
+    percorso.write_text(testo, encoding="utf-8")
+    with pytest.raises(ConfigError, match="non è eseguibile"):
+        load_config(percorso)
+
+
+def test_flag_interprete_configurabili(repo: Path):
+    percorso = scrivi_config(repo)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        'container_available = false',
+        'container_available = false\ntool_python_flags = ["-I"]',
+    )
+    percorso.write_text(testo, encoding="utf-8")
+    assert load_config(percorso).tool_python_flags == ("-I",)
+
+
+@pytest.mark.parametrize(
+    "guasto",
+    ['tool_python_flags = "-I"', 'tool_python_flags = ["/etc/passwd"]',
+     'tool_python_flags = ["-I", 42]'],
+)
+def test_flag_interprete_malformati_rifiutati(repo: Path, guasto: str):
+    """I flag accettano solo opzioni, non percorsi o argomenti."""
+    percorso = scrivi_config(repo)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        'container_available = false', f'container_available = false\n{guasto}'
+    )
+    percorso.write_text(testo, encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(percorso)
+
+
+def test_server_usa_l_interprete_della_config(repo: Path):
+    srv = crea_server(scrivi_config(repo))
+    assert srv._executor.tool_python == Path("/usr/bin/python3")
+    assert srv._executor.tool_python_flags == ("-I", "-S")
+
+
 def test_backend_vault_sconosciuto_fa_fallire_avvio(repo: Path):
     """Credere di avere credenziali reali e averne di finte è un guasto silenzioso."""
     cfg = scrivi_config(repo, sezioni_extra="")

@@ -41,6 +41,27 @@ log_path = "../logs/hermes-audit.jsonl"
 # requires_container vengono NEGATI, non eseguiti sull'host.
 container_available = false
 
+# Interprete con cui vengono eseguiti i tool. PERCORSO ASSOLUTO obbligatorio:
+# un nome come "python3" lo farebbe risolvere dal PATH del server, e quale
+# codice gira diventerebbe una proprietà dell'ambiente di avvio invece di una
+# decisione. Verificato all'avvio: deve esistere ed essere eseguibile.
+#
+# Non deve stare dentro repo_root né essere scrivibile da gruppo o altri: lo
+# SHA pinna gli script, non chi li esegue. Il preflight lo controlla.
+tool_python = "/usr/bin/python3"
+
+# Flag di isolamento dell'interprete. Il default è il più stretto:
+#   -I  modalità isolata: esclude da sys.path la directory dello script e lo
+#       user site dell'utente di servizio, e ignora le variabili PYTHON*.
+#       Chiude due vie per cui codice non verificato girerebbe prima dello
+#       script lasciando lo SHA intatto.
+#   -S  salta site: nessun site-packages, nessun file .pth.
+#
+# Un tool che avesse bisogno di pacchetti di terze parti non partirebbe. La
+# risposta giusta in quel caso è un venv dedicato in sola lettura per quel
+# tool, non allentare i flag per tutti.
+tool_python_flags = ["-I", "-S"]
+
 [vault]
 # In questa milestone è disponibile solo "stub", che non contiene
 # credenziali reali. Un backend sconosciuto fa fallire l'avvio.

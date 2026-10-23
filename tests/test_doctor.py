@@ -106,6 +106,87 @@ def test_handshake_e_stdout_pulito(tmp_path: Path, radice: Path):
 
 
 # --------------------------------------------------------------------------- #
+# Interprete dei tool
+# --------------------------------------------------------------------------- #
+
+
+def test_interprete_verificato(tmp_path: Path, radice: Path):
+    referto = esegui(scrivi_config(tmp_path, radice))
+    c = _controllo(referto, "interprete dei tool")
+    assert c.esito is Esito.OK
+    assert "/usr/bin/python3" in c.messaggio
+    assert "-I -S" in c.messaggio
+
+
+def test_isolamento_confermato(tmp_path: Path, radice: Path):
+    c = _controllo(esegui(scrivi_config(tmp_path, radice)), "isolamento dei tool")
+    assert c.esito is Esito.OK
+
+
+def test_isolamento_mancante_segnalato(tmp_path: Path, radice: Path):
+    """Chi allenta i flag deve vederselo dire dal preflight."""
+    percorso = scrivi_config(tmp_path, radice)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        "container_available = false",
+        'container_available = false\ntool_python_flags = ["-I"]',
+    )
+    percorso.write_text(testo, encoding="utf-8")
+
+    c = _controllo(esegui(percorso), "isolamento dei tool")
+    assert c.esito is Esito.AVVISO
+    assert "-S" in c.messaggio
+
+
+def test_interprete_dentro_il_repo_rilevato(tmp_path: Path, radice: Path):
+    """L'interprete non è coperto dallo SHA: dentro il repo è un errore."""
+    finto = tmp_path / "python-nel-repo"
+    finto.write_text("#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n", encoding="utf-8")
+    finto.chmod(0o755)
+    percorso = scrivi_config(tmp_path, radice)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        f'repo_root = "{radice}"', f'repo_root = "{tmp_path}"'
+    ).replace(
+        "container_available = false",
+        f'container_available = false\ntool_python = "{finto}"',
+    )
+    percorso.write_text(testo, encoding="utf-8")
+
+    referto = esegui(percorso)
+    c = _controllo(referto, "interprete fuori dal repo")
+    assert c.esito is Esito.ERRORE
+    assert referto.pronto is False
+
+
+def test_interprete_scrivibile_da_altri_rilevato(tmp_path: Path, radice: Path):
+    finto = tmp_path / "python-permissivo"
+    finto.write_text("#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n", encoding="utf-8")
+    finto.chmod(0o777)
+    percorso = scrivi_config(tmp_path, radice)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        "container_available = false",
+        f'container_available = false\ntool_python = "{finto}"',
+    )
+    percorso.write_text(testo, encoding="utf-8")
+
+    referto = esegui(percorso)
+    c = _controllo(referto, "permessi dell'interprete")
+    assert c.esito is Esito.ERRORE
+    assert "chmod go-w" in c.rimedio
+
+
+def test_flag_che_impediscono_l_avvio_rilevati(tmp_path: Path, radice: Path):
+    percorso = scrivi_config(tmp_path, radice)
+    testo = percorso.read_text(encoding="utf-8").replace(
+        "container_available = false",
+        'container_available = false\ntool_python_flags = ["--flag-inventato"]',
+    )
+    percorso.write_text(testo, encoding="utf-8")
+
+    c = _controllo(esegui(percorso), "interprete dei tool")
+    assert c.esito is Esito.ERRORE
+
+
+# --------------------------------------------------------------------------- #
 # Guasti rilevati
 # --------------------------------------------------------------------------- #
 
