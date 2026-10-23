@@ -83,6 +83,13 @@ from mcp_server.registry import (
 from mcp_server.vault import StubBackend, Vault, VaultBackend
 
 NOME_SERVER = "hermes-core"
+
+#: Durata di un override di tier impostato a runtime. L'host avvia un
+#: processo server per connessione, quindi lo store in memoria del registro
+#: vive quanto la connessione. Dichiarato nelle risposte perché un
+#: controllo che decade in silenzio è peggio di un controllo assente: chi
+#: legge il log vede l'override e crede che sia ancora in vigore.
+OVERRIDE_SCOPE = "session"
 VERSIONE = "0.0.1"
 
 _ISTRUZIONI = """\
@@ -250,18 +257,28 @@ class HermesServer:
         Nessun parametro di conferma e nessun parametro di identità: vedere la
         docstring del modulo.
 
-        ``correlation_id`` invece **è** un parametro, e la differenza è che non
-        è una credenziale: è un identificativo di tracciamento. Il server non
-        concede nulla in base al suo valore, serve solo a far ricadere sotto
-        un'unica catena le righe scritte dall'orchestratore e quelle scritte
-        qui — che sono processi distinti sullo stesso log. Se assente o
-        malformato ne viene generato uno nuovo, perché un identificativo
-        illeggibile non deve impedire l'esecuzione né, peggio, far perdere la
-        traccia.
+        ``correlation_id`` resta un parametro, ma **non è più l'identità della
+        catena**: quella la genera il server. Il valore del client viene
+        registrato a parte, in ``peer_correlation_id``.
+
+        La differenza conta. Prima, un client poteva dichiarare il
+        ``correlation_id`` di un'altra invocazione e scrivere le proprie righe
+        sotto quella catena, rendendo ambigua la ricostruzione — e un log in
+        cui non si distingue quale riga appartiene a quale invocazione è un
+        log che non si può usare per rispondere a «cosa è stato eseguito».
+
+        Il collegamento non si perde: resta registrato come *affermazione del
+        chiamante*, che è ciò che è. E il ``correlation_id`` del server viene
+        restituito nel risultato, così chi ha invocato può annotare a sua
+        volta la corrispondenza dalla propria parte — due registrazioni
+        indipendenti dello stesso collegamento, nessuna delle due falsificabile
+        dall'altra parte.
         """
-        correlation_id = _correlation_id(correlation_id)
+        dichiarato = _peer_correlation_id(correlation_id)
+        correlation_id = uuid.uuid4()
         self._audit.log(
             correlation_id=correlation_id,
+            peer_correlation_id=dichiarato,
             action=LogAction.AGENT_INVOKED,
             outcome=CallOutcome.OK,
             agent=self._config.agent,
@@ -352,6 +369,15 @@ class HermesServer:
             "tool_id": tool_id,
             "effective_tier": risultante.value,
             "declared_tier": self._registry.spec(tool_id).default_tier.value,
+            # La durata va dichiarata, non lasciata presumere: l'host avvia un
+            # processo server nuovo a ogni connessione, quindi l'innalzamento
+            # non sopravvive. Chi alza un tier dopo un incidente si aspetta il
+            # contrario.
+            "override_scope": OVERRIDE_SCOPE,
+            "override_note": (
+                "l'innalzamento vale per questa connessione; a una nuova "
+                "connessione il tool torna al tier dichiarato"
+            ),
         }
 
     # -- riassunti e risultati ---------------------------------------------- #
@@ -378,6 +404,9 @@ class HermesServer:
             base["shares_script_with"] = list(
                 self._registry.tools_sharing_exec(tool_id)
             )
+            attivo = tool_id in self._registry.overrides
+            base["override_active"] = attivo
+            base["override_scope"] = OVERRIDE_SCOPE if attivo else None
         return base
 
     def _log_risultato(self, risultato: AgentResult) -> None:
@@ -457,20 +486,19 @@ class HermesServer:
         return {"result": risultato.model_dump(mode="json"), "output": None}
 
 
-def _correlation_id(valore: str | None) -> uuid.UUID:
-    """Converte un correlation_id ricevuto, o ne genera uno nuovo.
+def _peer_correlation_id(valore: object) -> str | None:
+    """Normalizza l'identificativo dichiarato dal client, per registrarlo.
 
-    Un valore assente o malformato non è un errore da propagare: è un
-    identificativo di tracciamento, e rifiutare l'invocazione per un UUID
-    scritto male significherebbe far dipendere l'esecuzione da un campo che
-    non autorizza nulla.
+    Non viene usato come identità della catena, quindi non deve essere un
+    UUID valido: viene conservato come stringa, perché registrare «il client
+    ha dichiarato questo valore malformato» è più informativo che scartarlo.
+
+    Trattato come input non fidato: solo stringhe, troncate alla lunghezza del
+    campo di log.
     """
-    if valore:
-        try:
-            return uuid.UUID(str(valore))
-        except (ValueError, AttributeError, TypeError):
-            pass
-    return uuid.uuid4()
+    if isinstance(valore, str) and valore.strip():
+        return valore.strip()[:128]
+    return None
 
 
 def _costruisci_backend(config: ServerConfig) -> VaultBackend:

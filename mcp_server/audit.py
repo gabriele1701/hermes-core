@@ -25,6 +25,14 @@ Scelte difensive
   segreto possa entrare "di passaggio": il vault registra il *nome* del
   segreto e l'esito dell'accesso, mai il valore. ``extra="forbid"`` fa
   fallire qualunque tentativo di aggiungere campi non dichiarati.
+* **Ciò che dice l'altra parte sta in un campo suo.** ``correlation_id``
+  è generato da chi scrive la riga e identifica la *sua* catena;
+  ``peer_correlation_id`` registra l'identificativo dichiarato dall'altro
+  lato del confine di processo. Tenerli separati impedisce a un client di
+  scrivere le proprie righe sotto la catena di un'altra invocazione,
+  rendendo ambigua la ricostruzione, e lascia comunque il collegamento —
+  perché quel collegamento serve, e registrato da entrambi i lati non è
+  falsificabile da uno solo.
 * **Una riga = un oggetto JSON.** ``json.dumps`` escapa newline e caratteri
   di controllo, quindi un ``detail`` multilinea non può spezzare il formato
   né iniettare una riga di log falsa.
@@ -115,7 +123,18 @@ class LogRecord(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     ts: str = Field(default_factory=_now_iso, description="ISO 8601 UTC.")
-    correlation_id: uuid.UUID = Field(description="Catena di invocazione.")
+    correlation_id: uuid.UUID = Field(
+        description="Catena di invocazione, generata dal server."
+    )
+    peer_correlation_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Identificativo della catena dall'altra parte del confine di "
+            "processo, come dichiarato da quella parte. Registrato come "
+            "affermazione, mai usato come identità di questa catena."
+        ),
+    )
     action: LogAction
     outcome: CallOutcome
     agent: OwnerAgent | None = None
