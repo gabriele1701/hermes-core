@@ -14,24 +14,54 @@
 # protocollo MCP, e una singola riga di rumore lo corrompe. Gli errori vanno
 # su stderr.
 #
+# I controlli qui sotto esistono perché l'host mostra poco o nulla di un
+# avvio fallito. Un messaggio che dice cosa fare vale più di un traceback
+# dentro `importlib`: la causa più comune è un permesso, e un
+# `PermissionError` su un file di libreria non dice all'operatore che deve
+# sistemare le ACL del repo.
+#
 set -eu
 
 # Directory del progetto, risolta dai symlink.
 SCRIPT_PATH=$(readlink -f "$0" 2>/dev/null || echo "$0")
 PROGETTO=$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)
 
-PYTHON="$PROGETTO/.venv/bin/python"
+# Il virtualenv è in .venv per default; HERMES_VENV lo sposta senza modificare
+# questo script, per i dispiegamenti che lo tengono altrove.
+VENV="${HERMES_VENV:-$PROGETTO/.venv}"
+PYTHON="$VENV/bin/python"
 CONFIG="${1:-$PROGETTO/config/hermes.toml}"
 
-if [ ! -x "$PYTHON" ]; then
-    echo "hermes-core: virtualenv assente in $PROGETTO/.venv" >&2
-    echo "  rimedio: python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2
+errore() {
+    echo "hermes-core: $1" >&2
+    [ $# -gt 1 ] && echo "  rimedio: $2" >&2
     exit 1
-fi
+}
 
-if [ ! -f "$CONFIG" ]; then
-    echo "hermes-core: configurazione assente: $CONFIG" >&2
-    echo "  rimedio: cp config/hermes.example.toml config/hermes.toml" >&2
+[ -x "$PYTHON" ] || errore \
+    "interprete del virtualenv assente o non eseguibile: $PYTHON" \
+    "python3 -m venv '$VENV' && '$VENV/bin/pip' install -e '$PROGETTO[dev]'
+           (oppure indicare un percorso diverso con HERMES_VENV)"
+
+[ -f "$CONFIG" ] || errore \
+    "configurazione assente: $CONFIG" \
+    "cp '$PROGETTO/config/hermes.example.toml' '$PROGETTO/config/hermes.toml'"
+
+[ -r "$CONFIG" ] || errore \
+    "configurazione non leggibile dall'utente $(id -un): $CONFIG" \
+    "verificare permessi e ACL: getfacl '$CONFIG'"
+
+# Il package deve essere importabile DA QUESTO UTENTE. È il controllo che
+# trasforma un PermissionError dentro importlib in un messaggio utile: su un
+# dispiegamento in cui il repo è in sola lettura per l'utente di servizio, un
+# pull può lasciare file che quell'utente non legge.
+if ! IMPORT_ERR=$("$PYTHON" -c 'import mcp_server.server' 2>&1); then
+    echo "hermes-core: il package non è importabile dall'utente $(id -un)" >&2
+    echo "$IMPORT_ERR" | tail -3 | sed 's/^/           /' >&2
+    echo "  rimedio: se è un errore di permessi, verificare le ACL del repo:" >&2
+    echo "           getfacl '$PROGETTO'" >&2
+    echo "           sudo setfacl -R -m g:<gruppo-servizio>:rX '$PROGETTO'" >&2
+    echo "           sudo setfacl -R -d -m g:<gruppo-servizio>:rX '$PROGETTO'" >&2
     exit 1
 fi
 

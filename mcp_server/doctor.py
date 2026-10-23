@@ -281,6 +281,78 @@ def _limiti(referto: Referto, cfg: ServerConfig) -> None:
     )
 
 
+#: Quanti file esaminare al massimo nel controllo di scrivibilità. Serve a non
+#: trasformare il preflight in una scansione del filesystem su un repo grande.
+_LIMITE_SCANSIONE = 20_000
+
+#: Quanti percorsi scrivibili elencare nel referto prima di fermarsi: l'elenco
+#: serve a far capire il problema, non a essere esaustivo.
+_MAX_SEGNALATI = 5
+
+
+def _scrivibilita_file(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica che l'utente corrente non possa riscrivere ciò che esegue.
+
+    Esiste accanto al controllo sulla radice perché i due guardano cose
+    diverse, e il caso reale lo ha mostrato: la directory può essere in sola
+    lettura mentre un singolo file, riscritto da un ``git pull`` con una umask
+    permissiva, è rimasto scrivibile. Il controllo sulla radice direbbe che va
+    tutto bene.
+
+    Il virtualenv è compreso nella scansione di proposito: se l'utente di
+    servizio può scrivere dentro ``.venv``, può modificare l'interprete e le
+    librerie del **server**, che è peggio che modificare uno script di tool —
+    quello almeno ha uno SHA che non corrisponderebbe più.
+    """
+    if os.geteuid() == 0:
+        referto.aggiungi(
+            "scrivibilità dei file",
+            Esito.AVVISO,
+            "eseguito come root: il controllo non è significativo, root scrive "
+            "comunque",
+            "Eseguire il preflight con l'utente di servizio:\n"
+            "             sudo -u <utente> <venv>/bin/python -m mcp_server.doctor <config>",
+        )
+        return
+
+    radice = cfg.repo_root
+    scrivibili: list[Path] = []
+    esaminati = 0
+    troncato = False
+
+    for percorso in radice.rglob("*"):
+        if ".git" in percorso.parts:
+            continue
+        if percorso.is_dir() or percorso.is_symlink():
+            continue
+        esaminati += 1
+        if esaminati > _LIMITE_SCANSIONE:
+            troncato = True
+            break
+        if os.access(percorso, os.W_OK):
+            scrivibili.append(percorso)
+            if len(scrivibili) >= _MAX_SEGNALATI:
+                break
+
+    if scrivibili:
+        elenco = ", ".join(str(p.relative_to(radice)) for p in scrivibili)
+        referto.aggiungi(
+            "scrivibilità dei file",
+            Esito.ERRORE,
+            f"{len(scrivibili)} o più file sono scrivibili da questo utente: {elenco}",
+            "L'utente che esegue non deve poter riscrivere ciò che esegue. "
+            "Con le ACL, in modo che valga anche per i file futuri:\n"
+            f"             sudo setfacl -R -m g:<gruppo>:rX {radice}\n"
+            f"             sudo setfacl -R -d -m g:<gruppo>:rX {radice}",
+        )
+        return
+
+    dettaglio = f"{esaminati} file esaminati, nessuno scrivibile"
+    if troncato:
+        dettaglio += f" (scansione fermata a {_LIMITE_SCANSIONE})"
+    referto.aggiungi("scrivibilità dei file", Esito.OK, dettaglio)
+
+
 def _scrivibilita_script(referto: Referto, cfg: ServerConfig) -> None:
     """Verifica la mitigazione del TOCTOU: gli script non devono essere nostri.
 
@@ -567,6 +639,7 @@ def esegui(percorso_config: str | Path) -> Referto:
     _interprete(referto, cfg)
     _limiti(referto, cfg)
     _scrivibilita_script(referto, cfg)
+    _scrivibilita_file(referto, cfg)
     _vault(referto, cfg)
     _container(referto, cfg)
     _tool(referto, cfg)
@@ -619,7 +692,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     referto = esegui(args.config)
-    stampa(referto)
+    try:
+        stampa(referto)
+    except BrokenPipeError:
+        # Succede passando l'output a `head` o `grep -m`: non è un guasto del
+        # preflight, e morire con un traceback farebbe sospettare il contrario.
+        try:
+            sys.stdout.close()
+        except BrokenPipeError:
+            pass
+        return 0 if referto.pronto else 1
     return 0 if referto.pronto else 1
 
 
