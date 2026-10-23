@@ -290,32 +290,66 @@ _LIMITE_SCANSIONE = 20_000
 _MAX_SEGNALATI = 5
 
 
-def _scrivibilita_file(referto: Referto, cfg: ServerConfig) -> None:
-    """Verifica che l'utente corrente non possa riscrivere ciò che esegue.
+def _scrivibilita(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica che chi esegue il server non possa riscrivere ciò che esegue.
 
-    Esiste accanto al controllo sulla radice perché i due guardano cose
-    diverse, e il caso reale lo ha mostrato: la directory può essere in sola
-    lettura mentre un singolo file, riscritto da un ``git pull`` con una umask
-    permissiva, è rimasto scrivibile. Il controllo sulla radice direbbe che va
-    tutto bene.
+    È la mitigazione reale della finestra TOCTOU fra verifica dello SHA ed
+    esecuzione: l'hash protegge dalla modifica accidentale, non da chi
+    controlla il conto che può riscrivere gli script.
 
-    Il virtualenv è compreso nella scansione di proposito: se l'utente di
-    servizio può scrivere dentro ``.venv``, può modificare l'interprete e le
-    librerie del **server**, che è peggio che modificare uno script di tool —
-    quello almeno ha uno SHA che non corrisponderebbe più.
+    Il controllo scende ai **file** e non si ferma alla directory, perché il
+    caso reale lo ha mostrato: la directory può essere in sola lettura mentre
+    un singolo file, riscritto da un ``git pull`` con una umask permissiva, è
+    rimasto scrivibile. Il virtualenv è compreso di proposito — un ``.venv``
+    scrivibile dall'utente di servizio è peggio di uno script modificabile,
+    perché contiene le librerie del *server* e non ha uno SHA che possa
+    smascherarlo.
+
+    Quando il controllo non può dire nulla
+    --------------------------------------
+
+    Il risultato è significativo **solo se il preflight gira con l'utente di
+    servizio**. Per root e per il proprietario del repo la risposta è nota in
+    anticipo — possono scrivere comunque, e il proprietario potrebbe in ogni
+    caso cambiarsi i permessi da sé — quindi segnalarlo come errore sarebbe
+    rumore che blocca il referto senza informare.
+
+    In quei due casi si dichiara che il controllo non è applicabile e si dice
+    come eseguirlo in modo utile. Un controllo che non sa rispondere deve
+    dirlo, non rispondere male.
     """
-    if os.geteuid() == 0:
+    radice = cfg.repo_root
+    utente = os.geteuid()
+
+    if utente == 0:
         referto.aggiungi(
-            "scrivibilità dei file",
+            "scrivibilità del codice",
             Esito.AVVISO,
-            "eseguito come root: il controllo non è significativo, root scrive "
-            "comunque",
-            "Eseguire il preflight con l'utente di servizio:\n"
-            "             sudo -u <utente> <venv>/bin/python -m mcp_server.doctor <config>",
+            "eseguito come root: il controllo non è applicabile, root scrive comunque",
+            "Eseguirlo con l'utente di servizio:\n"
+            "             sudo -u <utente> <venv>/bin/python "
+            "-m mcp_server.doctor <config>",
         )
         return
 
-    radice = cfg.repo_root
+    try:
+        proprietario = radice.stat().st_uid
+    except OSError as err:  # pragma: no cover
+        referto.aggiungi("scrivibilità del codice", Esito.ERRORE, str(err))
+        return
+
+    if utente == proprietario:
+        referto.aggiungi(
+            "scrivibilità del codice",
+            Esito.AVVISO,
+            f"eseguito dal proprietario del repo (uid {utente}): il controllo "
+            "non è applicabile, il proprietario può comunque modificare i permessi",
+            "Eseguirlo con l'utente di servizio:\n"
+            "             sudo -u <utente> <venv>/bin/python "
+            "-m mcp_server.doctor <config>",
+        )
+        return
+
     scrivibili: list[Path] = []
     esaminati = 0
     troncato = False
@@ -337,42 +371,21 @@ def _scrivibilita_file(referto: Referto, cfg: ServerConfig) -> None:
     if scrivibili:
         elenco = ", ".join(str(p.relative_to(radice)) for p in scrivibili)
         referto.aggiungi(
-            "scrivibilità dei file",
+            "scrivibilità del codice",
             Esito.ERRORE,
-            f"{len(scrivibili)} o più file sono scrivibili da questo utente: {elenco}",
-            "L'utente che esegue non deve poter riscrivere ciò che esegue. "
-            "Con le ACL, in modo che valga anche per i file futuri:\n"
+            f"{len(scrivibili)} o più file sono scrivibili dall'utente di "
+            f"servizio: {elenco}",
+            "Chi esegue non deve poter riscrivere ciò che esegue. Con le ACL, "
+            "così che valga anche per i file futuri:\n"
             f"             sudo setfacl -R -m g:<gruppo>:rX {radice}\n"
             f"             sudo setfacl -R -d -m g:<gruppo>:rX {radice}",
         )
         return
 
-    dettaglio = f"{esaminati} file esaminati, nessuno scrivibile"
+    dettaglio = f"{esaminati} file esaminati, nessuno scrivibile dal servizio"
     if troncato:
         dettaglio += f" (scansione fermata a {_LIMITE_SCANSIONE})"
-    referto.aggiungi("scrivibilità dei file", Esito.OK, dettaglio)
-
-
-def _scrivibilita_script(referto: Referto, cfg: ServerConfig) -> None:
-    """Verifica la mitigazione del TOCTOU: gli script non devono essere nostri.
-
-    Se l'utente che esegue il server può riscrivere gli script, la verifica
-    dello SHA protegge dall'errore ma non da chi controlla quel conto.
-    """
-    radice = cfg.repo_root
-    if os.access(radice, os.W_OK):
-        referto.aggiungi(
-            "scrivibilità script",
-            Esito.AVVISO,
-            f"l'utente corrente può scrivere in {radice}: la verifica dello SHA "
-            "resta utile contro l'errore, non contro chi controlla questo conto",
-            "In uso continuativo, eseguire il server con un utente che abbia "
-            "solo lettura sul repo.",
-        )
-    else:
-        referto.aggiungi(
-            "scrivibilità script", Esito.OK, "il repo non è scrivibile da questo utente"
-        )
+    referto.aggiungi("scrivibilità del codice", Esito.OK, dettaglio)
 
 
 def _tool(referto: Referto, cfg: ServerConfig) -> None:
@@ -638,8 +651,7 @@ def esegui(percorso_config: str | Path) -> Referto:
     _log(referto, cfg)
     _interprete(referto, cfg)
     _limiti(referto, cfg)
-    _scrivibilita_script(referto, cfg)
-    _scrivibilita_file(referto, cfg)
+    _scrivibilita(referto, cfg)
     _vault(referto, cfg)
     _container(referto, cfg)
     _tool(referto, cfg)
