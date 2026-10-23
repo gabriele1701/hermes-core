@@ -119,6 +119,8 @@ class HermesServer:
             container_available=config.container_available,
             tool_python=config.tool_python,
             tool_python_flags=config.tool_python_flags,
+            max_output_bytes=config.max_output_bytes,
+            max_concurrent=config.max_concurrent_tools,
         )
         self._carica_tool()
         self._mcp = self._costruisci_mcp()
@@ -315,6 +317,9 @@ class HermesServer:
                 "stdout": esito.stdout,
                 "stderr": esito.stderr,
                 "returncode": esito.returncode,
+                # Dichiarato, non nascosto: chi legge un output tagliato senza
+                # saperlo — il modello compreso — ne trae conclusioni sbagliate.
+                "truncated": esito.truncated,
             },
         }
 

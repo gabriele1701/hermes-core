@@ -62,6 +62,22 @@ tool_python = "/usr/bin/python3"
 # tool, non allentare i flag per tutti.
 tool_python_flags = ["-I", "-S"]
 
+# Tetto sull'output di un tool, per ciascuno dei due stream. L'output finisce
+# nel contesto del modello: senza limite, un tool prolisso — o un bersaglio
+# che risponde a valanga — riempie la memoria del server e il contesto
+# dell'agente. Oltre il tetto l'output viene tagliato e il risultato lo
+# DICHIARA (campo "truncated"), perché un taglio silenzioso fa trarre
+# conclusioni sbagliate.
+max_output_bytes = 1048576
+
+# Esecuzioni di tool contemporanee ammesse in questo processo. Un modello in
+# ciclo può invocare senza fermarsi: oltre il limite l'invocazione viene
+# rifiutata e la riga finisce nel log, invece di accumularsi.
+#
+# Il limite è PER PROCESSO, e Hermes avvia un processo per connessione:
+# contiene un ciclo dentro una sessione, non la somma di piu' sessioni.
+max_concurrent_tools = 2
+
 [vault]
 # In questa milestone è disponibile solo "stub", che non contiene
 # credenziali reali. Un backend sconosciuto fa fallire l'avvio.

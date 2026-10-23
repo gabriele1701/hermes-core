@@ -9,6 +9,7 @@ cosa ferma, non da cosa lascia passare.
 from __future__ import annotations
 
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from mcp_server.audit import AuditLog, LogAction
 from mcp_server.contracts import AuthorizedBy, CallOutcome, OwnerAgent, RiskTier, ToolSpec
 from mcp_server.config import TOOL_PYTHON_DEFAULT
 from mcp_server.executor import (
+    ConcurrencyLimitReached,
     ConfirmationRequired,
     ContainerUnavailable,
     IntegrityMismatch,
@@ -603,6 +605,183 @@ def test_errori_del_gate_non_producono_righe_di_esecuzione(repo, registry, audit
     assert runner.chiamate == []
     righe = [r for r in audit.read_all() if r.action is LogAction.TOOL_CALL]
     assert [r.outcome for r in righe] == [CallOutcome.DENIED]
+
+
+# --------------------------------------------------------------------------- #
+# Contenimento dei processi
+# --------------------------------------------------------------------------- #
+
+
+def test_stdin_del_tool_e_devnull(repo, registry, audit):
+    """Su stdio, lo stdin del server è il canale MCP: il tool non deve vederlo.
+
+    Trovato verificando il report: un figlio che eredita fd 0 può leggere — e
+    quindi *consumare* — i byte che l'host sta inviando. Verificato prima
+    della correzione: il tool riceveva
+    `{"jsonrpc":"2.0","id":1,"method":"initia…`.
+
+    Conseguenze: il server perde input e la sessione si corrompe, e il tool
+    vede ciò che il client manda, che con l'elicitation comprenderà le
+    risposte dell'utente alle richieste di conferma.
+    """
+    (repo / SCRIPT).write_text(
+        "import sys\nprint('letto da stdin:', repr(sys.stdin.read()))\n",
+        encoding="utf-8",
+    )
+    registry.register(_spec(repo))
+    ex = ToolExecutor(registry, audit, repo_root=repo, runner=SubprocessRunner())
+    _, esito = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert "letto da stdin: ''" in esito.stdout
+
+
+def test_discendenza_terminata_al_timeout(repo, registry, audit):
+    """Il report lo ha confermato: `subprocess` uccideva solo il figlio diretto.
+
+    Un tool che ha lanciato qualcosa a sua volta — nmap dentro uno script —
+    lasciava quel qualcosa vivo e adottato da init, mentre il log dichiarava
+    l'esecuzione terminata. Una scansione «conclusa» che continua a girare è
+    peggio di un errore, perché nessuno la sta più guardando.
+    """
+    import subprocess as sp
+
+    marcatore = f"hermes-orfano-{uuid.uuid4().hex[:8]}"
+    (repo / SCRIPT).write_text(
+        "import subprocess, time, sys\n"
+        f"subprocess.Popen(['sleep', '47'], stdout=subprocess.DEVNULL)\n"
+        f"sys.stderr.write({marcatore!r})\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    registry.register(_spec(repo))
+    ex = ToolExecutor(registry, audit, repo_root=repo, runner=SubprocessRunner())
+
+    call, _ = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4(), timeout=2
+    )
+    assert call.outcome is CallOutcome.ERROR
+    assert "timeout" in call.detail
+
+    time.sleep(0.5)
+    vivi = sp.run(["pgrep", "-f", "sleep 47"], capture_output=True, text=True)
+    try:
+        assert vivi.stdout.strip() == "", f"processi orfani: {vivi.stdout!r}"
+    finally:
+        sp.run(["pkill", "-f", "sleep 47"], capture_output=True)
+
+
+def test_output_troncato_e_dichiarato(repo, registry, audit):
+    """Un output troncato in silenzio fa trarre conclusioni sbagliate."""
+    (repo / SCRIPT).write_text(
+        "import sys\nsys.stdout.write('A' * 50000)\n", encoding="utf-8"
+    )
+    registry.register(_spec(repo))
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        runner=SubprocessRunner(max_output_bytes=1024),
+        max_output_bytes=1024,
+    )
+    call, esito = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert len(esito.stdout) == 1024
+    assert esito.truncated is True
+    assert "troncato" in call.detail
+    riga = [r for r in audit.read_all() if r.action is LogAction.TOOL_CALL][-1]
+    assert "troncato" in riga.detail
+
+
+def test_output_sotto_il_tetto_non_e_troncato(repo, registry, audit):
+    registry.register(_spec(repo))
+    ex = ToolExecutor(registry, audit, repo_root=repo, runner=SubprocessRunner())
+    _, esito = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert esito.truncated is False
+
+
+def test_limite_di_concorrenza_rifiuta_e_traccia(repo, registry, audit):
+    """Un modello in ciclo deve ricevere un rifiuto, non saturare il server."""
+    import threading
+
+    (repo / SCRIPT).write_text("import time\ntime.sleep(3)\n", encoding="utf-8")
+    registry.register(_spec(repo))
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        runner=SubprocessRunner(),
+        max_concurrent=1,
+    )
+
+    partito = threading.Event()
+    esiti: list[str] = []
+
+    def occupa():
+        partito.set()
+        try:
+            ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4(), timeout=5)
+            esiti.append("primo-ok")
+        except Exception as err:  # pragma: no cover
+            esiti.append(f"primo-{type(err).__name__}")
+
+    t = threading.Thread(target=occupa, daemon=True)
+    t.start()
+    partito.wait(timeout=5)
+    time.sleep(0.4)  # il primo ha preso il posto
+
+    with pytest.raises(ConcurrencyLimitReached):
+        ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+
+    negate = [
+        r
+        for r in audit.read_all()
+        if r.action is LogAction.TOOL_CALL and r.outcome is CallOutcome.DENIED
+    ]
+    assert negate and "contemporanee" in negate[-1].detail
+    t.join(timeout=10)
+
+
+def test_il_posto_viene_restituito_dopo_l_esecuzione(repo, registry, audit):
+    """Senza release il server si bloccherebbe dopo N invocazioni."""
+    registry.register(_spec(repo))
+    ex = ToolExecutor(
+        registry, audit, repo_root=repo, runner=SubprocessRunner(), max_concurrent=1
+    )
+    for _ in range(4):
+        call, _ = ex.execute(
+            "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+        )
+        assert call.outcome is CallOutcome.OK
+
+
+def test_il_posto_viene_restituito_anche_dopo_un_errore(repo, registry, audit):
+    class RunnerGuasto:
+        def run(self, argv, *, cwd, env, timeout):
+            raise RuntimeError("guasto")
+
+    registry.register(_spec(repo))
+    ex = _executor(registry, audit, repo, runner=RunnerGuasto(), max_concurrent=1)
+    for _ in range(3):
+        call, _ = ex.execute(
+            "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+        )
+        assert call.outcome is CallOutcome.ERROR
+
+
+def test_limiti_introspezionabili(repo, registry, audit):
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        max_output_bytes=2048,
+        max_concurrent=3,
+    )
+    assert ex.max_output_bytes == 2048
+    assert ex.max_concurrent == 3
 
 
 # --------------------------------------------------------------------------- #

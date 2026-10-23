@@ -265,6 +265,22 @@ def _interprete(referto: Referto, cfg: ServerConfig) -> None:
         )
 
 
+def _limiti(referto: Referto, cfg: ServerConfig) -> None:
+    """Riporta i limiti di contenimento dei processi.
+
+    Non sono guasti da rilevare ma impostazioni da rendere visibili: un
+    operatore che non sa qual è il tetto sull'output non sa interpretare un
+    risultato troncato.
+    """
+    referto.aggiungi(
+        "limiti di esecuzione",
+        Esito.OK,
+        f"output max {cfg.max_output_bytes // 1024} KiB per stream · "
+        f"{cfg.max_concurrent_tools} esecuzioni contemporanee · "
+        f"stdin dei tool su /dev/null · discendenza terminata al timeout",
+    )
+
+
 def _scrivibilita_script(referto: Referto, cfg: ServerConfig) -> None:
     """Verifica la mitigazione del TOCTOU: gli script non devono essere nostri.
 
@@ -549,6 +565,7 @@ def esegui(percorso_config: str | Path) -> Referto:
     _radice(referto, cfg)
     _log(referto, cfg)
     _interprete(referto, cfg)
+    _limiti(referto, cfg)
     _scrivibilita_script(referto, cfg)
     _vault(referto, cfg)
     _container(referto, cfg)
