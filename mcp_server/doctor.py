@@ -172,6 +172,99 @@ def _append_only(percorso: Path) -> bool:
     return "a" in esito.stdout.split()[0] if esito.stdout.split() else False
 
 
+def _interprete(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica l'interprete con cui girano i tool.
+
+    Lo SHA pinna lo script, non chi lo esegue: se l'interprete fosse
+    scrivibile da chi non deve, il pinning proteggerebbe il file sbagliato.
+    """
+    percorso = cfg.tool_python
+    flag = " ".join(cfg.tool_python_flags) or "(nessuno)"
+
+    try:
+        prova = subprocess.run(
+            [str(percorso), *cfg.tool_python_flags, "-c", "import sys; print(sys.version.split()[0])"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        referto.aggiungi(
+            "interprete dei tool",
+            Esito.ERRORE,
+            f"non eseguibile: {_prima_riga(err)}",
+            "Correggere server.tool_python (percorso assoluto di un interprete).",
+        )
+        return
+
+    if prova.returncode != 0:
+        referto.aggiungi(
+            "interprete dei tool",
+            Esito.ERRORE,
+            f"i flag '{flag}' impediscono l'avvio: "
+            f"{_errore_da_stderr(prova.stderr) or f'exit={prova.returncode}'}",
+            "Verificare server.tool_python_flags.",
+        )
+        return
+
+    referto.aggiungi(
+        "interprete dei tool",
+        Esito.OK,
+        f"{percorso} (Python {prova.stdout.strip()}) con flag '{flag}'",
+    )
+
+    # Isolamento effettivo, non dichiarato.
+    mancanti = [f for f in ("-I", "-S") if f not in cfg.tool_python_flags]
+    if mancanti:
+        referto.aggiungi(
+            "isolamento dei tool",
+            Esito.AVVISO,
+            f"flag di isolamento assenti: {', '.join(mancanti)}",
+            "-I esclude user site e directory dello script da sys.path; "
+            "-S salta site e i .pth. Senza, codice non verificato può girare "
+            "prima dello script lasciando lo SHA intatto.",
+        )
+    else:
+        referto.aggiungi("isolamento dei tool", Esito.OK, "-I e -S attivi")
+
+    # L'interprete non deve stare dentro il repo, né essere scrivibile da altri.
+    try:
+        dentro = percorso.resolve().is_relative_to(cfg.repo_root.resolve())
+    except (OSError, ValueError):  # pragma: no cover
+        dentro = False
+    if dentro:
+        referto.aggiungi(
+            "interprete fuori dal repo",
+            Esito.ERRORE,
+            f"l'interprete sta dentro repo_root: {percorso}",
+            "L'interprete non è coperto dallo SHA degli script: va preso da "
+            "una posizione di sistema, non dal repo.",
+        )
+    else:
+        referto.aggiungi("interprete fuori dal repo", Esito.OK, "posizione di sistema")
+
+    try:
+        modo = stat.S_IMODE(percorso.stat().st_mode)
+        proprietario = percorso.stat().st_uid
+    except OSError:  # pragma: no cover
+        return
+    if modo & 0o022:
+        referto.aggiungi(
+            "permessi dell'interprete",
+            Esito.ERRORE,
+            f"scrivibile da gruppo o altri (modo {modo:04o})",
+            f"sudo chmod go-w {percorso}",
+        )
+    else:
+        referto.aggiungi(
+            "permessi dell'interprete",
+            Esito.OK,
+            f"modo {modo:04o}, uid proprietario {proprietario}",
+        )
+
+
 def _scrivibilita_script(referto: Referto, cfg: ServerConfig) -> None:
     """Verifica la mitigazione del TOCTOU: gli script non devono essere nostri.
 
@@ -455,6 +548,7 @@ def esegui(percorso_config: str | Path) -> Referto:
 
     _radice(referto, cfg)
     _log(referto, cfg)
+    _interprete(referto, cfg)
     _scrivibilita_script(referto, cfg)
     _vault(referto, cfg)
     _container(referto, cfg)

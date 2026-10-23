@@ -117,6 +117,8 @@ class HermesServer:
             self._audit,
             repo_root=config.repo_root,
             container_available=config.container_available,
+            tool_python=config.tool_python,
+            tool_python_flags=config.tool_python_flags,
         )
         self._carica_tool()
         self._mcp = self._costruisci_mcp()

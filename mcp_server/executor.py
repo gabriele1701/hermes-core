@@ -40,6 +40,34 @@ Python non offre in modo portabile. La protezione reale è che la directory
 degli script non sia scrivibile dall'utente che esegue il server. È
 registrato in ``docs/debito-sicurezza.md``.
 
+L'interprete è deciso, non ereditato
+------------------------------------
+
+Lo SHA pinna lo *script*, ma lo script non è l'unico codice che gira: lo
+esegue un interprete, che prima di arrivare al file carica altro. Finché
+l'interprete era ``python3`` risolto dal ``PATH``, **non era noto quale
+codice venisse eseguito**: dipendeva dall'ambiente in cui il server era
+stato avviato, cambiava da macchina a macchina, e con esso cambiava la
+superficie d'attacco. Su una macchina il venv, su un'altra il Python di
+sistema — con comportamenti diversi rispetto allo user site.
+
+Ora l'interprete è un **percorso assoluto dalla configurazione**, verificato
+all'avvio, eseguito con i flag di isolamento (``-I -S`` per default). Questo
+chiude tre vie per cui codice non verificato entrava in esecuzione pur
+lasciando intatto lo SHA:
+
+* i file ``.pth`` e ``usercustomize.py`` nello **user site** dell'utente di
+  servizio, che quell'utente può scrivere: una persistenza invisibile al
+  gate, la stessa tecnica vista in compromissioni reali di pacchetti;
+* un **modulo omonimo** accanto allo script, perché la sua directory era in
+  testa a ``sys.path``: un ``json.py`` vicino a ``run.py`` sostituiva la
+  libreria standard;
+* i ``site-packages`` di sistema e i loro ``.pth``.
+
+Resta una dipendenza esplicita e documentata: l'interprete configurato non
+deve essere scrivibile dall'utente che esegue il server, altrimenti il
+pinning dello script protegge il file sbagliato. Il preflight lo verifica.
+
 Confinamento del percorso
 -------------------------
 
@@ -59,9 +87,10 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol, Sequence, runtime_checkable
 
 from mcp_server.audit import AuditLog, LogAction
+from mcp_server.config import TOOL_PYTHON_DEFAULT, TOOL_PYTHON_FLAGS_DEFAULT
 from mcp_server.contracts import (
     AuthorizedBy,
     CallOutcome,
@@ -270,16 +299,29 @@ class ToolExecutor:
         repo_root: Path,
         container_available: bool = False,
         runner: Runner | None = None,
+        tool_python: Path | str = TOOL_PYTHON_DEFAULT,
+        tool_python_flags: Sequence[str] = TOOL_PYTHON_FLAGS_DEFAULT,
     ) -> None:
         self._registry = registry
         self._audit = audit
         self._repo_root = Path(repo_root)
         self._container_available = container_available
         self._runner = runner or SubprocessRunner()
+        self._tool_python = Path(tool_python)
+        self._tool_python_flags = tuple(tool_python_flags)
 
     @property
     def container_available(self) -> bool:
         return self._container_available
+
+    @property
+    def tool_python(self) -> Path:
+        """Interprete con cui vengono eseguiti i tool."""
+        return self._tool_python
+
+    @property
+    def tool_python_flags(self) -> tuple[str, ...]:
+        return self._tool_python_flags
 
     # -- preparazione -------------------------------------------------------- #
 
@@ -420,7 +462,7 @@ class ToolExecutor:
             target=target,
         )
 
-        argv = ["python3", str(pronta.script)]
+        argv = [str(self._tool_python), *self._tool_python_flags, str(pronta.script)]
         try:
             esito = self._runner.run(
                 argv,
