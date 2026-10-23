@@ -106,6 +106,87 @@ def test_handshake_e_stdout_pulito(tmp_path: Path, radice: Path):
 
 
 # --------------------------------------------------------------------------- #
+# Scrivibilità del codice: il controllo deve sapere quando non può rispondere
+# --------------------------------------------------------------------------- #
+
+
+def test_scrivibilita_non_applicabile_per_il_proprietario(tmp_path: Path, radice: Path):
+    """Difetto trovato eseguendo la suite sulla VM.
+
+    Il controllo segnalava ERRORE anche quando lo lanciava il proprietario del
+    repo — per il quale la risposta è nota in anticipo, dato che potrebbe
+    comunque cambiarsi i permessi da sé. Risultato: referto «NON PRONTO» e
+    quattro test rotti, senza che nulla fosse realmente mal configurato.
+
+    Un controllo che non sa rispondere deve dirlo, non rispondere male.
+    """
+    import os
+
+    referto = esegui(scrivi_config(tmp_path, radice))
+    c = _controllo(referto, "scrivibilità del codice")
+
+    assert c.esito is Esito.AVVISO
+    assert "non è applicabile" in c.messaggio
+    assert "sudo -u" in c.rimedio
+    assert referto.pronto is True, "un controllo inapplicabile non blocca il referto"
+
+    if os.geteuid() == 0:
+        assert "root" in c.messaggio
+    else:
+        assert "proprietario" in c.messaggio
+
+
+def test_scrivibilita_segnalata_per_l_utente_di_servizio(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Con l'utente di servizio invece il controllo è significativo, e blocca."""
+    import os
+
+    import mcp_server.doctor as doctor
+
+    # Simula un utente che non è né root né il proprietario del repo.
+    # Si falsifica SOLO la risposta sulla scrittura: `os.access` serve anche a
+    # validare l'eseguibilità dell'interprete, e sostituirla del tutto farebbe
+    # fallire il caricamento della configurazione prima di arrivare al
+    # controllo che ci interessa.
+    reale = os.access
+    monkeypatch.setattr(os, "geteuid", lambda: 4242)
+    monkeypatch.setattr(
+        doctor.os,
+        "access",
+        lambda percorso, modo, **k: True if modo == os.W_OK else reale(percorso, modo),
+    )
+
+    referto = esegui(scrivi_config(tmp_path, radice))
+    c = _controllo(referto, "scrivibilità del codice")
+
+    assert c.esito is Esito.ERRORE
+    assert "utente di servizio" in c.messaggio
+    assert "setfacl" in c.rimedio
+    assert referto.pronto is False
+
+
+def test_scrivibilita_ok_quando_nulla_e_scrivibile(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    import os
+
+    import mcp_server.doctor as doctor
+
+    reale = os.access
+    monkeypatch.setattr(os, "geteuid", lambda: 4242)
+    monkeypatch.setattr(
+        doctor.os,
+        "access",
+        lambda percorso, modo, **k: False if modo == os.W_OK else reale(percorso, modo),
+    )
+
+    c = _controllo(esegui(scrivi_config(tmp_path, radice)), "scrivibilità del codice")
+    assert c.esito is Esito.OK
+    assert "nessuno scrivibile" in c.messaggio
+
+
+# --------------------------------------------------------------------------- #
 # Interprete dei tool
 # --------------------------------------------------------------------------- #
 
