@@ -22,6 +22,7 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | HC-06 — processi orfani al timeout, output e concorrenza illimitati | patch sic. 3 | `start_new_session` + terminazione del gruppo (SIGTERM poi SIGKILL), tetto per stream con flag `truncated` dichiarato, semaforo con rifiuto tracciato. |
 | Lo stdin dei tool era il canale MCP del server | patch sic. 3 | `stdin=DEVNULL`. Trovato verificando il report, non era fra i suoi finding: un tool poteva leggere e consumare i byte del protocollo. |
 | HC-08 — `valida_nome_segreto` accettava un newline finale | patch sic. 4 | `fullmatch` invece di `match`: in `re` il `$` combacia anche prima di un `\n` finale. Si rifiuta, non si normalizza. |
+| HC-07 — provenienza nel log controllata dal client | patch sic. 5 | `correlation_id` generato dal server, quello del client registrato come `peer_correlation_id` e collegato da entrambi i lati. Etichetta onesta: «richiesto dal client MCP», non «override utente». |
 | HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che e' la protezione vera, e' documentato in `docs/dipendenze.md` e resta da generare. |
 
 ---
@@ -97,6 +98,35 @@ punto due `tool_id` con identità identica e tier diverso sono aliasing
 genuino, e il registro può **rifiutare** quello a tier inferiore invece di
 limitarsi a segnalarlo. Da affrontare **quando i tool avranno bisogno di
 argomenti**, cioè all'ingresso dei primi tool reali in Milestone 1.
+
+---
+
+## MEDIA — gli override di tier non sopravvivono alla connessione
+
+**Dove:** `mcp_server/registry.py` (store in memoria), `mcp_server/server.py`
+(`OVERRIDE_SCOPE`).
+
+L'host avvia un processo server nuovo a ogni connessione, a ogni
+`/reload-mcp` e a ogni sessione, quindi un tool innalzato a Rosso torna al
+proprio tier dichiarato alla connessione successiva. Chi alza un tier dopo un
+incidente si aspetta il contrario, e il log continua a mostrare
+l'`override_set` anche quando non è più in vigore.
+
+**Mitigazione in essere:** la durata è **dichiarata** e non lasciata
+presumere — `override_scope: "session"` nelle risposte di `raise_tool_tier` e
+`describe_tool`, `override_active` in quest'ultima, e la riga di log dice «vale
+per questa connessione». Un controllo che decade in silenzio è peggio di un
+controllo assente, perché chi legge crede che sia attivo.
+
+**Condizione di chiusura:** due strade, non esclusive. Un campo
+`override_tier` in `[[tool]]`, versionato e applicato all'avvio con la stessa
+regola `max()`, per gli innalzamenti che devono restare. E uno store
+append-only a runtime — per esempio `/var/lib/hermes/overrides.jsonl` con
+`chattr +a`, ricaricato all'avvio, con il tier effettivo pari al `max()` di
+tutte le righe, così che cancellarne una non possa abbassare nulla.
+
+Da affrontare **insieme al limite di concorrenza**: richiedono lo stesso stato
+condiviso fra processi, e inventarne due meccanismi separati sarebbe un errore.
 
 ---
 

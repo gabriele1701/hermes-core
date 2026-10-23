@@ -28,13 +28,27 @@ essere usata: se un agente restituisse qualcosa di non conforme —
 difettoso, aggiornato male o compromesso — l'orchestratore se ne accorge lì,
 invece di propagare una struttura inattesa al resto della catena.
 
-Una sola catena, due processi
------------------------------
+Due catene, collegate da entrambi i lati
+----------------------------------------
 
-L'orchestratore genera il ``correlation_id`` e lo passa all'agente, così le
-righe che scrivono i due processi finiscono sotto un'unica catena nello
-stesso file di log. È ciò che rende il log append-only del passo 2 utile per
-davvero: due scrittori indipendenti, nessun lock, nessuna riga spezzata.
+Ogni lato del confine di processo genera la propria catena e **registra
+quella dell'altro** come ``peer_correlation_id``.
+
+Prima l'orchestratore imponeva il proprio identificativo all'agente, e le
+righe dei due processi finivano sotto un'unica catena. Era comodo da leggere
+ma non difendibile: un client qualunque potrebbe dichiarare la catena di
+un'altra invocazione e scriverci dentro le proprie righe, e un log in cui non
+si distingue quale riga appartiene a quale invocazione non può più rispondere
+a «cosa è stato eseguito».
+
+Ora l'identità di una catena la decide chi scrive le righe, e il collegamento
+è un'affermazione — annotata però **in entrambe le direzioni**, quindi
+nessuno dei due lati può falsificarla da solo. Ricostruire un'invocazione
+resta un'operazione in due passi: si parte da una catena e si segue il
+collegamento.
+
+Resta valido ciò che il log append-only del passo 2 rende possibile: due
+scrittori indipendenti sullo stesso file, nessun lock, nessuna riga spezzata.
 """
 
 from __future__ import annotations
@@ -42,7 +56,7 @@ from __future__ import annotations
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -86,10 +100,21 @@ class AgentEndpoint:
 
 @dataclass(frozen=True, slots=True)
 class Invocation:
-    """Esito completo di un'invocazione: risultato validato e output grezzo."""
+    """Esito completo di un'invocazione: risultato validato e output grezzo.
+
+    ``correlation_id`` è la catena dell'orchestratore, ``agent_correlation_id``
+    quella dell'agente. Sono due perché ciascun lato è autorevole sulle proprie
+    righe; servono entrambe per ricostruire l'invocazione dal log.
+    """
 
     result: AgentResult
     output: dict[str, Any] | None = None
+    correlation_id: uuid.UUID | None = None
+
+    @property
+    def agent_correlation_id(self) -> uuid.UUID:
+        """Catena dell'agente, dichiarata da lui nel risultato."""
+        return self.result.correlation_id
 
     @property
     def riuscita(self) -> bool:
@@ -164,9 +189,13 @@ class Orchestrator:
             )
 
         invocazione = self._valida(esito.structured_content, cid, endpoint)
+        invocazione = replace(invocazione, correlation_id=cid)
 
         self._audit.log(
             correlation_id=cid,
+            # Il collegamento annotato da questo lato: la catena dell'agente
+            # come lui l'ha dichiarata nel risultato.
+            peer_correlation_id=str(invocazione.agent_correlation_id),
             action=LogAction.AGENT_RESULT,
             outcome=_esito(invocazione.result.status),
             agent=OwnerAgent.ORCHESTRATOR,

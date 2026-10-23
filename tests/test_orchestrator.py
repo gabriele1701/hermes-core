@@ -212,24 +212,75 @@ async def test_catena_completa(orchestratore, endpoint, audit):
 
 @pytest.mark.slow
 @pytest.mark.anyio
-async def test_un_solo_correlation_id_dall_invoke_al_log(
+async def test_due_catene_collegate_da_entrambi_i_lati(
     orchestratore, endpoint, audit
 ):
-    """Il requisito centrale: una catena, un identificativo, due processi."""
+    """Il requisito di M0 cambiato in qualcosa di più difendibile.
+
+    Prima l'orchestratore imponeva il proprio `correlation_id` all'agente, e
+    le righe dei due processi finivano sotto un'unica catena. Comodo da
+    leggere, ma non difendibile: un client qualunque poteva dichiarare la
+    catena di un'altra invocazione e scriverci dentro le proprie righe.
+
+    Ora l'identità di una catena la decide chi scrive le righe, e il
+    collegamento è annotato **in entrambe le direzioni** — quindi nessuno dei
+    due lati può falsificarlo da solo.
+    """
     cid = uuid.uuid4()
-    await orchestratore.invoca(endpoint, "echo.ping", correlation_id=cid)
+    inv = await orchestratore.invoca(endpoint, "echo.ping", correlation_id=cid)
+
+    agente = inv.agent_correlation_id
+    assert agente != cid, "l'agente non adotta l'identificativo del client"
 
     righe = audit.read_all()
-    della_catena = [r for r in righe if r.correlation_id == cid]
+    dell_orchestratore = [r for r in righe if r.correlation_id == cid]
+    dell_agente = [r for r in righe if r.correlation_id == agente]
 
-    # Tutte le righe non di avvio appartengono alla catena.
-    non_di_avvio = [r for r in righe if r.action is not LogAction.TOOL_REGISTERED]
-    assert len(della_catena) == len(non_di_avvio)
+    assert dell_orchestratore, "l'orchestratore ha la propria catena"
+    assert dell_agente, "l'agente ha la propria catena"
 
-    azioni = [r.action for r in della_catena]
-    assert azioni.count(LogAction.AGENT_INVOKED) == 2  # orchestratore + agente
-    assert LogAction.TOOL_CALL in azioni
-    assert azioni.count(LogAction.AGENT_RESULT) == 2  # agente + orchestratore
+    # Collegamento annotato da entrambi i lati.
+    assert any(
+        r.peer_correlation_id == str(cid) for r in dell_agente
+    ), "l'agente registra la catena dichiarata dal client"
+    assert any(
+        r.peer_correlation_id == str(agente) for r in dell_orchestratore
+    ), "l'orchestratore registra la catena dell'agente"
+
+    # Ciascuna catena è internamente coerente.
+    assert {r.agent for r in dell_orchestratore} == {OwnerAgent.ORCHESTRATOR}
+    azioni_agente = [r.action for r in dell_agente]
+    assert LogAction.AGENT_INVOKED in azioni_agente
+    assert LogAction.TOOL_CALL in azioni_agente
+    assert LogAction.AGENT_RESULT in azioni_agente
+
+
+@pytest.mark.slow
+@pytest.mark.anyio
+async def test_invocazione_ricostruibile_seguendo_il_collegamento(
+    orchestratore, endpoint, audit
+):
+    """Ricostruire resta possibile: in due passi invece di uno.
+
+    Si parte dalla catena dell'orchestratore, si legge il collegamento, e si
+    arriva alle righe dell'agente. È l'operazione che un operatore fa in
+    audit, e deve restare fattibile con un grep.
+    """
+    cid = uuid.uuid4()
+    await orchestratore.invoca(endpoint, "echo.ping", target="lab-kali", correlation_id=cid)
+
+    righe = audit.read_all()
+    partenza = [r for r in righe if r.correlation_id == cid]
+    collegamenti = {r.peer_correlation_id for r in partenza if r.peer_correlation_id}
+    assert len(collegamenti) == 1, "un solo collegamento da seguire"
+
+    # Estratto prima della comprehension: dentro, `pop()` verrebbe chiamato a
+    # ogni iterazione e svuoterebbe l'insieme al primo giro.
+    catena_agente = collegamenti.pop()
+    arrivo = [r for r in righe if str(r.correlation_id) == catena_agente]
+    esecuzioni = [r for r in arrivo if r.action is LogAction.TOOL_CALL]
+    assert esecuzioni and esecuzioni[0].tool_id == "echo.ping"
+    assert esecuzioni[0].target == "lab-kali"
 
 
 @pytest.mark.slow
