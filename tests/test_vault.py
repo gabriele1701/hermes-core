@@ -166,12 +166,42 @@ def test_nomi_validi(buono: str):
         "ssh//lab",               # segmento vuoto
         "ssh/./lab",              # segmento '.'
         "x" * 200,                # troppo lungo
+        "ssh/lab-kali\n",         # newline finale (HC-08)
+        "ssh/lab-kali\r\n",       # CRLF
+        "ssh/lab-kali\n\n",       # piu' newline
+        "ssh/lab-kali\t",         # tab
+        "ssh/lab-kali ",          # spazio finale
+        "\nssh/lab-kali",         # newline iniziale
     ],
 )
 def test_nomi_rifiutati(cattivo: str):
     """Un backend reale mappa il nome su un percorso: va confinato prima."""
     with pytest.raises(InvalidSecretName):
         valida_nome_segreto(cattivo)
+
+
+def test_newline_finale_rifiutato_non_normalizzato():
+    """HC-08: in `re` di Python `$` combacia anche prima di un newline finale.
+
+    `match` accettava `'ssh/lab-kali\\n'` **col newline intatto**. Oggi è
+    innocuo perché lo stub fa una ricerca per chiave, ma col backend `pass`
+    quel nome diventa argomento di un processo e nome di un file — e un
+    newline in un argomento è il genere di cosa che cambia il significato di
+    un comando.
+
+    Si rifiuta invece di normalizzare: un nome di credenziale che arriva
+    diverso da come è scritto in configurazione è un errore da segnalare, non
+    da indovinare.
+    """
+    with pytest.raises(InvalidSecretName):
+        valida_nome_segreto("ssh/lab-kali\n")
+
+
+def test_accesso_con_newline_negato_e_loggato(vault: Vault, audit: AuditLog):
+    with pytest.raises(InvalidSecretName):
+        vault.get_secret("ssh/lab-kali\n")
+    riga = audit.read_all()[0]
+    assert riga.outcome is CallOutcome.DENIED
 
 
 def test_nome_non_conforme_negato_e_loggato(vault: Vault, audit: AuditLog):

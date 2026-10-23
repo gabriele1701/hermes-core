@@ -7,9 +7,20 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "gabriele1701" }]
 
+# Intervalli con tetto, e minimi veritieri.
+#
+# "mcp>=1.2.0" dichiarava compatibili versioni che il codice NON puo'
+# importare: mcp.server.mcpserver.MCPServer esiste solo dalla 2.x. Un vincolo
+# che descrive il falso fa passare per compatibili versioni che non
+# partirebbero, e fa comparire nelle scansioni advisory su versioni che non
+# useremmo mai.
+#
+# Il tetto non protegge da un rilascio compromesso dentro l'intervallo: quella
+# e' la funzione del lockfile con hash (vedi docs/dipendenze.md). Serve a non
+# accogliere una major nuova senza averla provata.
 dependencies = [
-    "mcp>=1.2.0",
-    "pydantic>=2.6",
+    "mcp>=2.3,<3",
+    "pydantic>=2.12,<3",
 ]
 
 [project.optional-dependencies]

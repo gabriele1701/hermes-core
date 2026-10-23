@@ -424,6 +424,59 @@ def test_wrapper_non_scrive_su_stdout(radice: Path):
     assert righe_echo == []
 
 
+def test_wrapper_segnala_venv_assente(radice: Path, tmp_path: Path):
+    """L'host mostra poco di un avvio fallito: il messaggio deve bastare."""
+    import os
+    import subprocess
+
+    ambiente = dict(os.environ, HERMES_VENV=str(tmp_path / "venv-inesistente"))
+    esito = subprocess.run(
+        [str(radice / "bin" / "hermes-core-server")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=ambiente,
+    )
+    assert esito.returncode == 1
+    assert esito.stdout == "", "su stdio, stdout appartiene al protocollo"
+    assert "virtualenv assente" in esito.stderr
+    assert "HERMES_VENV" in esito.stderr
+
+
+def test_wrapper_segnala_package_non_importabile(radice: Path, tmp_path: Path):
+    """Il caso reale: un PermissionError dentro importlib non dice cosa fare.
+
+    Si riproduce con un progetto finto che ha il venv ma non il package.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    finto = tmp_path / "progetto"
+    (finto / "bin").mkdir(parents=True)
+    (finto / "config").mkdir()
+    (finto / ".venv" / "bin").mkdir(parents=True)
+    shutil.copy(radice / "bin" / "hermes-core-server", finto / "bin")
+    (finto / ".venv" / "bin" / "python").symlink_to(
+        Path(os.sys.executable).resolve()
+    )
+    (finto / "config" / "hermes.toml").write_text(
+        '[server]\nagent = "echo_dummy"\nrepo_root = "."\n', encoding="utf-8"
+    )
+
+    esito = subprocess.run(
+        [str(finto / "bin" / "hermes-core-server")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(tmp_path),
+    )
+    assert esito.returncode == 1
+    assert esito.stdout == ""
+    assert "non è importabile" in esito.stderr
+    assert "setfacl" in esito.stderr, "il rimedio deve indicare le ACL"
+
+
 def test_wrapper_segnala_config_assente(radice: Path, tmp_path: Path):
     import subprocess
 
@@ -436,4 +489,7 @@ def test_wrapper_segnala_config_assente(radice: Path, tmp_path: Path):
     assert esito.returncode == 1
     assert esito.stdout == ""
     assert "configurazione assente" in esito.stderr
-    assert "cp config/hermes.example.toml" in esito.stderr
+    # Percorsi assoluti nel rimedio: un comando copiabile vale piu' di uno
+    # relativo a una directory che l'operatore potrebbe non avere.
+    assert "hermes.example.toml" in esito.stderr
+    assert "/opt" in esito.stderr or str(radice) in esito.stderr

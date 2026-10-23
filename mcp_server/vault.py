@@ -214,7 +214,17 @@ def valida_nome_segreto(name: str) -> str:
         raise InvalidSecretName("il nome deve usare '/' come separatore")
     if ".." in name.split("/"):
         raise InvalidSecretName("il nome non può contenere '..'")
-    if not _NOME_SEGRETO.match(name):
+    # fullmatch e non match: in `re` di Python il metacarattere `$` combacia
+    # anche *prima* di un newline finale, quindi 'ssh/lab-kali\n' superava la
+    # validazione col newline intatto. Oggi è innocuo perché lo stub fa una
+    # ricerca per chiave, ma col backend `pass` quel nome diventa argomento di
+    # un processo e nome di un file — e un newline in un argomento è il genere
+    # di cosa che cambia il significato di un comando.
+    #
+    # Si rifiuta invece di normalizzare: un nome di credenziale che arriva
+    # diverso da come è scritto in configurazione è un errore da segnalare,
+    # non da indovinare.
+    if not _NOME_SEGRETO.fullmatch(name):
         raise InvalidSecretName(
             f"nome non conforme: {name!r} "
             "(lowercase, separatori . _ - e / fra segmenti)"
