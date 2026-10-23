@@ -133,6 +133,20 @@ class SubprocessRunner:
     ``shell=False`` e argv esplicito: nessuna stringa viene mai interpretata
     da una shell, quindi non esiste una via di iniezione via metacaratteri.
     L'ambiente è una lista bianca, non l'ambiente ereditato.
+
+    Decodifica tollerante
+    ---------------------
+
+    L'output viene catturato come **byte** e decodificato con
+    ``errors="replace"``. Con ``text=True``, Python decodifica in modo strict e
+    solleva ``UnicodeDecodeError`` **dopo** che il processo è terminato: lo
+    script ha già avuto i suoi effetti, ma la chiamata fallisce con
+    un'eccezione che non è un errore di esecuzione, e l'esito non viene
+    registrato da nessuno.
+
+    Non serve un attaccante per arrivarci: basta un banner binario restituito
+    da un host scansionato. Un byte fuori posto non deve poter cancellare
+    un'esecuzione dalla traccia d'audit.
     """
 
     def run(self, argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int) -> RunResult:
@@ -142,15 +156,27 @@ class SubprocessRunner:
             env=env,
             timeout=timeout,
             capture_output=True,
-            text=True,
             shell=False,
             check=False,
         )
         return RunResult(
             returncode=completato.returncode,
-            stdout=completato.stdout,
-            stderr=completato.stderr,
+            stdout=_decodifica(completato.stdout),
+            stderr=_decodifica(completato.stderr),
         )
+
+
+def _decodifica(grezzo: bytes | str | None) -> str:
+    """Decodifica l'output di un processo senza poter fallire.
+
+    I byte non decodificabili diventano il carattere di sostituzione: perdere
+    un carattere è accettabile, perdere la riga di audit non lo è.
+    """
+    if grezzo is None:
+        return ""
+    if isinstance(grezzo, str):
+        return grezzo
+    return grezzo.decode("utf-8", errors="replace")
 
 
 def ambiente_minimo() -> dict[str, str]:
@@ -369,6 +395,22 @@ class ToolExecutor:
 
         La :class:`~mcp_server.contracts.ToolCall` restituita è già conforme
         al contratto e pronta per entrare in un ``AgentResult``.
+
+        Dopo lo spawn, nessuna eccezione sfugge
+        ---------------------------------------
+
+        Superata la preparazione, il processo **può essere già partito**: da
+        quel punto in avanti qualunque errore — timeout, interprete non
+        trovato, output indecodificabile, un guasto del runner — viene
+        convertito in un esito **registrato** invece di risalire come
+        eccezione.
+
+        Il motivo è che l'alternativa non è "l'esecuzione non avviene": è
+        "l'esecuzione avviene e il log non la contiene". Un'eccezione che
+        risale lascia lo script con i suoi effetti già prodotti e l'audit con
+        un ``agent_invoked`` orfano, e chi legge il log conclude che non è
+        stato eseguito nulla. Meglio una riga che dice «eseguito, esito
+        incerto» di nessuna riga.
         """
         pronta = self.prepare(
             tool_id,
@@ -387,9 +429,21 @@ class ToolExecutor:
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
-            call = self._traccia(pronta, CallOutcome.ERROR, f"timeout dopo {timeout}s")
-            self._log_call(call, pronta)
-            return call, RunResult(returncode=-1, stdout="", stderr="timeout")
+            return self._esito_non_riuscito(
+                pronta, f"timeout dopo {timeout}s", "timeout"
+            )
+        except BaseException as err:
+            # BaseException e non Exception: anche un KeyboardInterrupt o un
+            # SystemExit a metà esecuzione deve lasciare la riga, prima di
+            # essere ri-sollevato.
+            call, risultato = self._esito_non_riuscito(
+                pronta,
+                f"errore del runner dopo lo spawn: {type(err).__name__}",
+                type(err).__name__,
+            )
+            if not isinstance(err, Exception):
+                raise
+            return call, risultato
 
         outcome = CallOutcome.OK if esito.returncode == 0 else CallOutcome.ERROR
         call = self._traccia(pronta, outcome, f"exit={esito.returncode}")
@@ -397,6 +451,18 @@ class ToolExecutor:
         return call, esito
 
     # -- interno ------------------------------------------------------------- #
+
+    def _esito_non_riuscito(
+        self, pronta: PreparedExecution, detail: str, stderr: str
+    ) -> tuple[ToolCall, RunResult]:
+        """Registra un'esecuzione andata male e ne restituisce la traccia.
+
+        ``returncode = -1`` segnala che il processo non ha riportato un codice
+        d'uscita proprio: distingue «ha fallito» da «è uscito con errore».
+        """
+        call = self._traccia(pronta, CallOutcome.ERROR, detail)
+        self._log_call(call, pronta)
+        return call, RunResult(returncode=-1, stdout="", stderr=stderr)
 
     def _traccia(
         self, pronta: PreparedExecution, outcome: CallOutcome, detail: str

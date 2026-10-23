@@ -378,6 +378,49 @@ def test_container_assente_nega(repo: Path):
     assert "container" in r["result"]["summary"]
 
 
+def test_eccezione_inattesa_diventa_risultato_tracciato(
+    server: HermesServer, monkeypatch
+):
+    """Nessuna eccezione deve risalire al framework MCP.
+
+    Un'eccezione che risalisse lascerebbe nel log un `agent_invoked` orfano, e
+    chi lo legge concluderebbe che non è stato eseguito nulla — mentre il tool
+    potrebbe aver già agito.
+    """
+
+    def esplode(*args, **kwargs):
+        raise RuntimeError("guasto inatteso")
+
+    monkeypatch.setattr(server._executor, "execute", esplode)
+
+    r = server._invoke_tool("echo.ping")
+    assert r["result"]["status"] == "error"
+    assert "RuntimeError" in r["result"]["summary"]
+
+    azioni = [x.action for x in server.audit.read_all()]
+    assert LogAction.AGENT_INVOKED in azioni
+    assert LogAction.AGENT_RESULT in azioni, "la catena non resta orfana"
+
+
+def test_output_non_utf8_attraverso_il_server(repo: Path):
+    """Il caso del security review, lungo tutto il percorso del server."""
+    (repo / SCRIPT).write_text(
+        "import sys\nsys.stdout.buffer.write(b'banner \\xff\\xfe')\n", encoding="utf-8"
+    )
+    srv = crea_server(scrivi_config(repo))
+
+    r = srv._invoke_tool("echo.ping")
+    assert r["result"]["status"] == "ok"
+    assert "�" in r["output"]["stdout"]
+
+    cid = r["result"]["correlation_id"]
+    azioni = [
+        x.action for x in srv.audit.read_all() if str(x.correlation_id) == cid
+    ]
+    assert LogAction.TOOL_CALL in azioni
+    assert LogAction.AGENT_RESULT in azioni
+
+
 def test_tool_inesistente_errore_strutturato(server: HermesServer):
     r = server._invoke_tool("mai.registrato")
     assert r["result"]["status"] == "error"

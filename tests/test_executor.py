@@ -363,6 +363,126 @@ def test_exit_non_zero_e_errore(repo, registry, audit):
 
 
 # --------------------------------------------------------------------------- #
+# Nessuna esecuzione senza traccia
+# --------------------------------------------------------------------------- #
+
+
+def test_output_non_utf8_resta_tracciato(repo, registry, audit):
+    """Il caso del security review: un byte fuori posto cancellava la riga.
+
+    Lo script produce un effetto osservabile e poi scrive byte non
+    decodificabili. Con `text=True` la decodifica strict sollevava
+    UnicodeDecodeError **dopo** l'esecuzione: lo script aveva agito, ma nel
+    log non c'era alcuna `tool_call`. Non serve un attaccante — basta un
+    banner binario da un host scansionato.
+    """
+    (repo / SCRIPT).write_text(
+        "import sys, pathlib\n"
+        "pathlib.Path(__file__).parent.joinpath('MARKER').write_text('x')\n"
+        "sys.stdout.buffer.write(b'banner \\xff\\xfe')\n",
+        encoding="utf-8",
+    )
+    registry.register(_spec(repo))
+    ex = ToolExecutor(registry, audit, repo_root=repo, runner=SubprocessRunner())
+
+    call, esito = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+
+    assert (repo / "tools" / "MARKER").exists(), "lo script deve avere agito"
+    tracciate = [r for r in audit.read_all() if r.action is LogAction.TOOL_CALL]
+    assert len(tracciate) == 1, "l'esecuzione deve lasciare esattamente una riga"
+    assert call.outcome is CallOutcome.OK
+    assert "�" in esito.stdout, "i byte invalidi diventano sostituzioni"
+    assert "banner" in esito.stdout
+
+
+def test_decodifica_tollerante_su_stderr(repo, registry, audit):
+    (repo / SCRIPT).write_text(
+        "import sys\nsys.stderr.buffer.write(b'\\xff\\xfe')\nsys.exit(0)\n",
+        encoding="utf-8",
+    )
+    registry.register(_spec(repo))
+    ex = ToolExecutor(registry, audit, repo_root=repo, runner=SubprocessRunner())
+    call, esito = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.OK
+    assert "�" in esito.stderr
+
+
+def test_eccezione_del_runner_dopo_lo_spawn_resta_tracciata(repo, registry, audit):
+    """Dopo lo spawn il processo può essere già partito: niente deve sfuggire."""
+
+    class RunnerGuasto:
+        def run(self, argv, *, cwd, env, timeout):
+            raise RuntimeError("guasto a metà esecuzione")
+
+    registry.register(_spec(repo))
+    ex = _executor(registry, audit, repo, runner=RunnerGuasto())
+
+    call, esito = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.ERROR
+    assert "RuntimeError" in call.detail
+    assert esito.returncode == -1
+    assert [r.action for r in audit.read_all()].count(LogAction.TOOL_CALL) == 1
+
+
+def test_interprete_mancante_resta_tracciato(repo, registry, audit):
+    """FileNotFoundError sull'interprete non deve risalire come eccezione."""
+
+    class RunnerSenzaInterprete:
+        def run(self, argv, *, cwd, env, timeout):
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    registry.register(_spec(repo))
+    ex = _executor(registry, audit, repo, runner=RunnerSenzaInterprete())
+    call, _ = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.ERROR
+    assert "FileNotFoundError" in call.detail
+
+
+def test_interruzione_lascia_la_riga_prima_di_risalire(repo, registry, audit):
+    """Un KeyboardInterrupt viene ri-sollevato, ma solo dopo aver tracciato."""
+
+    class RunnerInterrotto:
+        def run(self, argv, *, cwd, env, timeout):
+            raise KeyboardInterrupt
+
+    registry.register(_spec(repo))
+    ex = _executor(registry, audit, repo, runner=RunnerInterrotto())
+
+    with pytest.raises(KeyboardInterrupt):
+        ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+
+    tracciate = [r for r in audit.read_all() if r.action is LogAction.TOOL_CALL]
+    assert len(tracciate) == 1
+    assert tracciate[0].outcome is CallOutcome.ERROR
+
+
+def test_errori_del_gate_non_producono_righe_di_esecuzione(repo, registry, audit):
+    """Chi non supera il gate non ha eseguito: la sua riga è `denied`, non `error`.
+
+    Serve a non confondere le due cose: 'negato prima di partire' e 'partito e
+    andato male' sono stati diversi, e il log deve distinguerli.
+    """
+    registry.register(_spec(repo, exec_sha256="f" * 64))
+    runner = RunnerFinto()
+    ex = _executor(registry, audit, repo, runner=runner)
+
+    with pytest.raises(IntegrityMismatch):
+        ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+
+    assert runner.chiamate == []
+    righe = [r for r in audit.read_all() if r.action is LogAction.TOOL_CALL]
+    assert [r.outcome for r in righe] == [CallOutcome.DENIED]
+
+
+# --------------------------------------------------------------------------- #
 # Tracciamento
 # --------------------------------------------------------------------------- #
 
