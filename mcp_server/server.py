@@ -284,8 +284,18 @@ class HermesServer:
             return self._risultato_negato(correlation_id, tool_id, target, str(err))
         except (InvocationRefused, ToolNotRegistered) as err:
             return self._risultato_errore(correlation_id, str(err))
-        except ExecutionError as err:  # pragma: no cover - rete di sicurezza
+        except ExecutionError as err:
             return self._risultato_errore(correlation_id, f"esecuzione fallita: {err}")
+        except Exception as err:
+            # Rete di sicurezza finale. Un'eccezione che risalisse al framework
+            # MCP lascerebbe nel log un 'agent_invoked' orfano, e chi lo legge
+            # concluderebbe che non è stato eseguito nulla — mentre il tool
+            # potrebbe aver già agito. Una riga che dice «esito incerto» è
+            # un'informazione; l'assenza di righe è una conclusione sbagliata.
+            return self._risultato_errore(
+                correlation_id,
+                f"errore inatteso durante l'invocazione: {type(err).__name__}: {err}",
+            )
 
         risultato = AgentResult(
             correlation_id=correlation_id,
