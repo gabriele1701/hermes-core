@@ -28,6 +28,8 @@ from pathlib import Path
 from mcp_server.config import ConfigError, ServerConfig, load_config
 from mcp_server.contracts import RiskTier, ToolSpec
 from mcp_server.executor import risolvi_script, sha256_file
+from mcp_server.overrides import NOME_FILE as NOME_FILE_OVERRIDE
+from mcp_server.overrides import OverrideStore, OverrideStoreError
 from mcp_server.tiers import derive_policy_for
 
 _TIMEOUT_HANDSHAKE = 30
@@ -153,6 +155,110 @@ def _log(referto: Referto, cfg: ServerConfig) -> None:
         )
     else:
         referto.aggiungi("log append-only", Esito.OK, "attributo +a impostato")
+
+
+def _stato(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica lo store che fa sopravvivere gli innalzamenti di tier.
+
+    Due esiti negativi diversi, per due cose diverse:
+
+    * ``state_dir`` **non configurata** è un AVVISO. Il server funziona, e il
+      comportamento — innalzamenti validi per la connessione — è quello di
+      sempre e viene dichiarato nelle risposte. Manca una proprietà, non un
+      pezzo.
+    * ``state_dir`` configurata e **non utilizzabile** è un ERRORE. Qui
+      l'operatore ha chiesto la persistenza e non la sta ottenendo: è un
+      controllo che si crede di avere e non c'è, che è il caso peggiore dei
+      due e la ragione per cui questo preflight esiste.
+    """
+    if cfg.state_dir is None:
+        referto.aggiungi(
+            "store degli override",
+            Esito.AVVISO,
+            "server.state_dir non configurata: gli innalzamenti di tier "
+            "valgono solo per la connessione",
+            "Per renderli persistenti:\n"
+            "             sudo install -d -o $(id -un) -g $(id -gn) -m 700 "
+            "/var/lib/hermes\n"
+            "             poi in [server]: state_dir = \"/var/lib/hermes\"\n"
+            "             Attenzione: un percorso relativo viene risolto "
+            "rispetto alla cartella della configurazione, quindi finirebbe "
+            "dentro il repo.",
+        )
+        return
+
+    percorso = cfg.state_dir / NOME_FILE_OVERRIDE
+
+    # Illeggibile non è vuoto: se il file c'è e non si apre, il server non
+    # parte di proposito, perché potrebbe contenere innalzamenti da applicare.
+    if percorso.exists():
+        try:
+            OverrideStore(percorso).carica()
+        except OverrideStoreError as err:
+            referto.aggiungi(
+                "store degli override",
+                Esito.ERRORE,
+                str(err),
+                f"Verificare permessi e proprietario di {percorso}: il server "
+                f"non parte finché lo store esiste e non è leggibile.",
+            )
+            return
+
+    try:
+        cfg.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(percorso, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        os.close(fd)
+    except OSError as err:
+        referto.aggiungi(
+            "store degli override",
+            Esito.ERRORE,
+            f"configurata ma non scrivibile: {err}",
+            f"sudo install -d -o $(id -un) -g $(id -gn) -m 700 {cfg.state_dir}\n"
+            f"             Percorso risolto: {percorso}",
+        )
+        return
+
+    try:
+        dentro = cfg.state_dir.resolve().is_relative_to(cfg.repo_root.resolve())
+    except (OSError, ValueError):  # pragma: no cover
+        dentro = False
+    if dentro:
+        referto.aggiungi(
+            "store fuori dal repo",
+            Esito.AVVISO,
+            f"state_dir sta dentro repo_root: {cfg.state_dir}",
+            "Uno stato di sicurezza dentro l'albero di lavoro sparisce a un "
+            "checkout o a una pulizia, e un innalzamento di tier perso non "
+            "lo segnala nessuno. Spostarlo fuori (es. /var/lib/hermes).",
+        )
+
+    esito = OverrideStore(percorso).carica()
+    modo = stat.S_IMODE(percorso.stat().st_mode)
+    if modo & 0o077:
+        referto.aggiungi(
+            "permessi dello store",
+            Esito.AVVISO,
+            f"permessi {modo:04o}: leggibile da altri utenti",
+            f"chmod 600 {percorso}",
+        )
+
+    if esito.scartate:
+        referto.aggiungi(
+            "store degli override",
+            Esito.AVVISO,
+            f"{esito.scartate} righe illeggibili su {esito.righe}: ciascuna "
+            f"potrebbe essere un innalzamento perduto",
+            f"Ispezionare {percorso} e ripristinare a mano i tier che "
+            f"risultassero mancanti con raise_tool_tier.",
+        )
+    else:
+        referto.aggiungi(
+            "store degli override",
+            Esito.OK,
+            f"{percorso}: {esito.righe} righe, "
+            f"{len(esito.tiers)} tool con innalzamento persistente "
+            f"(permessi {modo:04o})",
+        )
 
 
 def _append_only(percorso: Path) -> bool:
@@ -649,6 +755,7 @@ def esegui(percorso_config: str | Path) -> Referto:
 
     _radice(referto, cfg)
     _log(referto, cfg)
+    _stato(referto, cfg)
     _interprete(referto, cfg)
     _limiti(referto, cfg)
     _scrivibilita(referto, cfg)

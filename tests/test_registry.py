@@ -14,7 +14,9 @@ import pytest
 
 from mcp_server.audit import AuditLog, LogAction
 from mcp_server.contracts import CallOutcome, OwnerAgent, RiskTier, ToolSpec
+from mcp_server.overrides import OverrideScope, OverrideStore
 from mcp_server.registry import (
+    CHIAVE_OVERRIDE,
     InvocationRefused,
     OverrideRefused,
     ToolAlreadyRegistered,
@@ -240,14 +242,19 @@ def test_tier_effettivo_monotono_non_decrescente(reg: ToolRegistry):
     assert osservati[-1] == RiskTier.ROSSO.rank
 
 
-def test_override_piu_basso_nello_store_resta_inerte(reg: ToolRegistry):
+def test_override_piu_basso_nello_store_resta_inerte(audit: AuditLog, tmp_path):
     """Secondo presidio: il max() scarta un override basso anche se c'è.
 
-    Simula uno store corrotto scrivendo direttamente nella struttura interna:
-    la difesa non riposa solo sul controllo all'ingresso.
+    Lo store è un file su disco, quindi può contenere una riga vecchia,
+    manomessa o relativa a una versione precedente della spec. La difesa non
+    riposa solo sul controllo all'ingresso: il tier dichiarato è un pavimento.
     """
+    percorso = tmp_path / "overrides.jsonl"
+    percorso.write_text(
+        '{"tool_id": "echo.ping", "tier": "verde"}\n', encoding="utf-8"
+    )
+    reg = ToolRegistry(audit, store=OverrideStore(percorso))
     reg.register(_spec(default_tier=RiskTier.ROSSO))
-    reg._overrides["echo.ping"] = RiskTier.VERDE  # noqa: SLF001 - corruzione simulata
     assert reg.effective_tier("echo.ping") is RiskTier.ROSSO
 
 
@@ -471,3 +478,90 @@ def test_altro_agente_rifiutato(reg: ToolRegistry, audit: AuditLog):
 def test_invocazione_tool_sconosciuto_solleva(reg: ToolRegistry):
     with pytest.raises(ToolNotRegistered):
         reg.assert_can_invoke("mai.registrato", OwnerAgent.ECHO_DUMMY)
+
+
+# --------------------------------------------------------------------------- #
+# override_tier in configurazione versionata
+# --------------------------------------------------------------------------- #
+
+
+def test_override_di_config_innalza(reg: ToolRegistry):
+    reg.register_payload(_payload(default_tier="verde", **{CHIAVE_OVERRIDE: "rosso"}))
+    assert reg.effective_tier("echo.ping") is RiskTier.ROSSO
+    assert reg.override_scope("echo.ping") is OverrideScope.CONFIG
+
+
+def test_override_di_config_non_entra_nella_spec(reg: ToolRegistry):
+    """La spec deve restare quella dichiarata dall'integratore.
+
+    Altrimenti in audit non si distingue più «era rischioso» da «l'ho alzato
+    io», che è l'intera ragione per cui gli override stanno fuori dalla spec.
+    """
+    spec = reg.register_payload(
+        _payload(default_tier="verde", **{CHIAVE_OVERRIDE: "rosso"})
+    )
+    assert spec.default_tier is RiskTier.VERDE
+    assert not hasattr(spec, CHIAVE_OVERRIDE)
+
+
+def test_override_di_config_inventato_fa_fallire_l_avvio(
+    reg: ToolRegistry, audit: AuditLog
+):
+    """Qui l'operatore crede di aver alzato un tier e non l'ha alzato."""
+    with pytest.raises(ToolSpecRejected, match="override_tier non valido"):
+        reg.register_payload(_payload(**{CHIAVE_OVERRIDE: "rossa"}))
+    assert "echo.ping" not in reg
+    assert LogAction.TOOL_REGISTRATION_REJECTED in _azioni(audit)
+
+
+def test_override_di_config_piu_basso_e_inerte_ma_non_fatale(
+    reg: ToolRegistry, audit: AuditLog
+):
+    """L'esito è il tier dichiarato, cioè il più stretto: non si cade per questo."""
+    reg.register_payload(_payload(default_tier="rosso", **{CHIAVE_OVERRIDE: "verde"}))
+    assert reg.effective_tier("echo.ping") is RiskTier.ROSSO
+    assert reg.override_scope("echo.ping") is OverrideScope.NONE
+
+    riga = [r for r in audit.read_all() if r.action is LogAction.OVERRIDE_REJECTED][0]
+    assert riga.outcome is CallOutcome.DENIED
+    assert "inerte" in riga.detail
+
+
+def test_override_di_config_ridondante_non_risulta_attivo(reg: ToolRegistry):
+    """Un override che coincide col dichiarato non cambia nulla: non va mostrato."""
+    reg.register_payload(_payload(default_tier="giallo", **{CHIAVE_OVERRIDE: "giallo"}))
+    assert reg.override_scope("echo.ping") is OverrideScope.NONE
+    assert "echo.ping" not in reg.overrides
+
+
+def test_runtime_puo_salire_sopra_l_override_di_config(
+    audit: AuditLog, tmp_path
+):
+    """Le fonti non si escludono: il tier effettivo è il massimo di tutte."""
+    store = OverrideStore.in_directory(tmp_path / "stato")
+    reg = ToolRegistry(audit, store=store)
+    reg.register_payload(_payload(default_tier="verde", **{CHIAVE_OVERRIDE: "giallo"}))
+    reg.set_override("echo.ping", RiskTier.ROSSO)
+    assert reg.effective_tier("echo.ping") is RiskTier.ROSSO
+    assert reg.override_scope("echo.ping") is OverrideScope.PERSISTENT
+
+
+def test_config_vince_se_e_la_fonte_piu_alta(audit: AuditLog, tmp_path):
+    """Lo scope segnalato è quello della fonte che regge il tier corrente."""
+    percorso = tmp_path / "overrides.jsonl"
+    percorso.write_text('{"tool_id": "echo.ping", "tier": "giallo"}\n', encoding="utf-8")
+    reg = ToolRegistry(audit, store=OverrideStore(percorso))
+    reg.register_payload(_payload(default_tier="verde", **{CHIAVE_OVERRIDE: "rosso"}))
+    assert reg.effective_tier("echo.ping") is RiskTier.ROSSO
+    assert reg.override_scope("echo.ping") is OverrideScope.CONFIG
+
+
+def test_store_con_tool_mai_registrato_non_disturba(audit: AuditLog, tmp_path):
+    """Un tool rimosso dalla config lascia la sua riga: deve restare inerte."""
+    percorso = tmp_path / "overrides.jsonl"
+    percorso.write_text('{"tool_id": "sparito.vecchio", "tier": "rosso"}\n', encoding="utf-8")
+    reg = ToolRegistry(audit, store=OverrideStore(percorso))
+    reg.register(_spec())
+    assert reg.effective_tier("echo.ping") is RiskTier.VERDE
+    with pytest.raises(ToolNotRegistered):
+        reg.effective_tier("sparito.vecchio")

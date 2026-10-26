@@ -34,6 +34,7 @@ _CHIAVI_SERVER = frozenset(
         "repo_root",
         "container_available",
         "log_path",
+        "state_dir",
         "tool_python",
         "tool_python_flags",
         "max_output_bytes",
@@ -97,6 +98,13 @@ class ServerConfig:
     repo_root: Path
     log_path: Path
     container_available: bool = False
+    #: Directory dello stato che deve sopravvivere alla connessione — oggi lo
+    #: store degli override di tier. ``None`` significa **non configurata**, e
+    #: non un default inventato: un percorso di default che non esiste
+    #: produrrebbe un errore all'avvio su ogni installazione che non l'ha
+    #: creato, mentre l'assenza ha una conseguenza precisa e dichiarabile (gli
+    #: innalzamenti valgono per la connessione) che il preflight segnala.
+    state_dir: Path | None = None
     #: Interprete dei tool: percorso assoluto, verificato all'avvio.
     tool_python: Path = TOOL_PYTHON_DEFAULT
     tool_python_flags: tuple[str, ...] = TOOL_PYTHON_FLAGS_DEFAULT
@@ -156,6 +164,7 @@ def load_config(path: str | Path) -> ServerConfig:
         repo_root=repo_root,
         log_path=log_path,
         container_available=container,
+        state_dir=_percorso(server.get("state_dir"), percorso),
         tool_python=_interprete(server.get("tool_python")),
         tool_python_flags=_flag_interprete(server.get("tool_python_flags")),
         max_output_bytes=_intero_positivo(

@@ -46,14 +46,20 @@ def scrivi_config(
     sha: str | None = None,
     extra_tool: str = "",
     sezioni_extra: str = "",
+    righe_server: str = "",
+    override_tool: str | None = None,
 ) -> Path:
     sha = sha if sha is not None else sha256_file(repo / SCRIPT)
+    riga_override = (
+        f'override_tier = "{override_tool}"\n' if override_tool is not None else ""
+    )
     testo = textwrap.dedent(f"""\
         [server]
         agent = "{agent}"
         repo_root = ".."
         log_path = "../logs/audit.jsonl"
         container_available = false
+        {righe_server}
 
         [vault]
         backend = "stub"
@@ -68,7 +74,7 @@ def scrivi_config(
         exec_path = "{SCRIPT}"
         exec_sha256 = "{sha}"
         description = "Agente dummy."
-        """) + extra_tool + sezioni_extra
+        """) + riga_override + extra_tool + sezioni_extra
     percorso = repo / "config" / "hermes.toml"
     percorso.write_text(testo, encoding="utf-8")
     return percorso
@@ -659,7 +665,10 @@ def test_override_loggato_come_richiesto_dal_client(server: HermesServer):
     ][0]
     assert "client MCP" in riga.detail
     assert "utente" not in riga.detail.replace("client MCP", "")
-    assert "questa connessione" in riga.detail
+    # Senza state_dir configurata la durata reale è la connessione, e il log
+    # deve dirlo in italiano: 'session' da solo, riletto fra mesi, non dice se
+    # quell'innalzamento fosse ancora in vigore.
+    assert "solo questa connessione" in riga.detail
 
 
 def test_correlation_id_generato_dal_server(server: HermesServer):
@@ -783,3 +792,81 @@ def test_config_esempio_valida_come_toml():
         dati = tomllib.load(fh)
     assert dati["server"]["agent"] == "echo_dummy"
     assert dati["tool"][0]["tool_id"] == "echo.ping"
+
+
+# --------------------------------------------------------------------------- #
+# Durata degli override e onestà delle risposte (patch di sicurezza, passo 6a)
+# --------------------------------------------------------------------------- #
+
+
+def test_state_dir_rende_persistente_l_innalzamento(repo: Path, tmp_path: Path):
+    """Due server consecutivi sulla stessa config: è il caso reale.
+
+    Hermes avvia un processo nuovo a ogni connessione e a ogni /reload-mcp.
+    """
+    stato = tmp_path / "stato"
+    percorso = scrivi_config(repo, righe_server=f'state_dir = "{stato}"')
+
+    primo = crea_server(percorso)
+    risposta = primo._raise_tool_tier("echo.ping", "rosso")
+    assert risposta["override_scope"] == "persistent"
+    assert "prossime connessioni" in risposta["override_note"]
+
+    secondo = crea_server(percorso)
+    assert secondo._describe_tool("echo.ping")["effective_tier"] == "rosso"
+    assert secondo._describe_tool("echo.ping")["declared_tier"] == "verde"
+
+
+def test_senza_state_dir_la_risposta_dichiara_la_durata(server: HermesServer):
+    """Il campo diceva sempre 'session': ora dice la durata reale.
+
+    Senza store configurato quella *è* la durata, e la nota deve dirlo in
+    chiaro: un modello che crede che l'innalzamento duri non ricontrolla.
+    """
+    risposta = server._raise_tool_tier("echo.ping", "rosso")
+    assert risposta["override_scope"] == "session"
+    assert "solo per questa connessione" in risposta["override_note"]
+
+
+def test_override_da_config_dichiarato_come_tale(repo: Path):
+    percorso = scrivi_config(repo, tier="verde", override_tool="rosso")
+    srv = crea_server(percorso)
+    dettaglio = srv._describe_tool("echo.ping")
+    assert dettaglio["declared_tier"] == "verde"
+    assert dettaglio["effective_tier"] == "rosso"
+    assert dettaglio["override_active"] is True
+    assert dettaglio["override_scope"] == "config"
+
+
+def test_override_tier_inventato_non_fa_partire_il_server(repo: Path):
+    """Chi l'ha scritto crede di aver alzato un tier: deve accorgersene subito."""
+    from mcp_server.registry import ToolSpecRejected
+
+    percorso = scrivi_config(repo, override_tool="rossa")
+    with pytest.raises(ToolSpecRejected, match="override_tier"):
+        crea_server(percorso)
+
+
+def test_describe_senza_override_non_mostra_durata(server: HermesServer):
+    dettaglio = server._describe_tool("echo.ping")
+    assert dettaglio["override_active"] is False
+    assert dettaglio["override_scope"] is None
+    assert dettaglio["override_note"] is None
+
+
+def test_conferma_non_dice_di_essere_in_attesa(repo: Path):
+    """Non c'è nessuna attesa: non esiste un canale su cui la conferma arrivi.
+
+    Un modello che legge "in attesa" conclude che qualcuno risponderà, e il
+    comportamento ragionevole diventa riprovare — o cercare un'altra via per
+    ottenere lo stesso effetto, che è ciò che la conferma doveva impedire.
+    """
+    srv = crea_server(scrivi_config(repo, tier="rosso"))
+    risposta = srv._invoke_tool("echo.ping")
+
+    chiamata = risposta["result"]["tool_calls"][0]
+    assert chiamata["outcome"] == "pending"
+    assert "in attesa" not in chiamata["detail"]
+    assert "nessun canale di conferma" in chiamata["detail"]
+    assert "NON è stato eseguito" in chiamata["detail"]
+    assert "riprovando" in chiamata["detail"]

@@ -161,6 +161,7 @@ Modifica `config/hermes.toml`:
 agent = "echo_dummy"
 repo_root = "/opt/hermes-core"
 log_path = "/var/log/hermes/audit.jsonl"
+state_dir = "/var/lib/hermes/state"
 container_available = false
 ```
 
@@ -178,14 +179,32 @@ l'esecuzione sui file che erano già eseguibili (il wrapper, i binari del
 venv), senza renderli scrivibili. `g-w` toglie la scrittura, `o-rwx` esclude
 tutti gli altri.
 
-### La directory del log
+### Le directory scrivibili dal servizio
 
 ```sh
 sudo install -d -o hermes -g hermes -m 700 /var/log/hermes
+sudo install -d -o hermes -g hermes -m 700 /var/lib/hermes/state
 ```
 
-Appartiene al servizio, non al repo: è l'unico posto in cui ha bisogno di
-scrivere.
+Sono gli unici due posti in cui il servizio ha bisogno di scrivere, e stanno
+fuori dal repo di proposito: il repo è in sola lettura per l'utente che
+esegue, ed è la mitigazione del TOCTOU fra verifica dello SHA ed esecuzione.
+
+`/var/lib/hermes/state` tiene lo **store degli innalzamenti di tier**
+(`overrides.jsonl`). Senza, un tool alzato a Rosso dopo un incidente torna al
+tier dichiarato alla connessione successiva, perché Hermes avvia un processo
+nuovo ogni volta. Il server parte lo stesso e lo dichiara nelle risposte, ma
+la persistenza è il comportamento che serve.
+
+Anche lo store si può irrigidire con `chattr +a`, per la stessa ragione del
+log e con la stessa avvertenza: l'attributo va messo sul **file**, quindi dopo
+il primo innalzamento, perché su un file che non esiste non si applica. Il
+comando sta più avanti, insieme a quello del log.
+
+La protezione che vale sempre, anche senza `+a`, è un'altra: il tier
+dichiarato nella configurazione resta un **pavimento**, e nessuna riga di
+questo file può abbassarlo. Il peggio che può fare una riga manomessa è
+alzare un tier, cioè chiedere più conferme.
 
 ---
 
@@ -247,17 +266,25 @@ sudo -u hermes /opt/hermes-core/.venv/bin/python \
      -m mcp_server.doctor /opt/hermes-core/config/hermes.toml
 ```
 
-### Rendere il log non riscrivibile
+### Rendere log e store non riscrivibili
 
-Da fare **dopo** il primo avvio, perché il file deve esistere:
+Da fare **dopo** il primo avvio, perché i file devono esistere. Lo store
+nasce al primo innalzamento di tier, quindi il suo `+a` va messo dopo:
 
 ```sh
 sudo chattr +a /var/log/hermes/audit.jsonl
 lsattr /var/log/hermes/audit.jsonl      # deve mostrare 'a'
+
+# dopo il primo raise_tool_tier:
+sudo chattr +a /var/lib/hermes/state/overrides.jsonl
+lsattr /var/lib/hermes/state/overrides.jsonl
 ```
 
-Da quel momento il log si può solo accrescere: nessun processo non
-privilegiato può troncarlo o riscriverlo, incluso il nostro.
+Da quel momento quei file si possono solo accrescere: nessun processo non
+privilegiato può troncarli o riscriverli, incluso il nostro. Entrambi gli
+scrittori lo tollerano per costruzione — scrivono in `O_APPEND` e non
+insistono sulla `chmod`, che un file append-only rifiuta anche al
+proprietario.
 
 ---
 

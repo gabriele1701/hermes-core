@@ -41,7 +41,9 @@ def scrivi_config(
     backend: str = "stub",
     senza_tool: bool = False,
     agent: str = "echo_dummy",
+    state_dir: Path | str | None = None,
 ) -> Path:
+    riga_stato = f'state_dir = "{state_dir}"\n' if state_dir is not None else ""
     sha = sha if sha is not None else sha256_file(radice / SCRIPT)
     blocco_tool = (
         ""
@@ -67,6 +69,7 @@ def scrivi_config(
             log_path = "{tmp_path}/audit.jsonl"
             container_available = false
 
+            {riga_stato}
             [vault]
             backend = "{backend}"
             stub_secrets = ["ssh/lab-kali"]
@@ -574,3 +577,80 @@ def test_wrapper_segnala_config_assente(radice: Path, tmp_path: Path):
     # relativo a una directory che l'operatore potrebbe non avere.
     assert "hermes.example.toml" in esito.stderr
     assert "/opt" in esito.stderr or str(radice) in esito.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Store degli override: due esiti negativi diversi per due cose diverse
+# --------------------------------------------------------------------------- #
+
+
+def test_store_non_configurato_e_avviso_non_errore(tmp_path: Path, radice: Path):
+    """Manca una proprietà, non un pezzo: il server funziona e lo dichiara."""
+    referto = esegui(scrivi_config(tmp_path, radice))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.AVVISO
+    assert referto.pronto is True
+    assert "state_dir" in controllo.messaggio
+    assert "install -d" in controllo.rimedio
+
+
+def test_store_configurato_e_scrivibile(tmp_path: Path, radice: Path):
+    referto = esegui(
+        scrivi_config(tmp_path, radice, state_dir=tmp_path / "stato")
+    )
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.OK
+    assert referto.pronto is True
+
+
+def test_store_configurato_ma_non_utilizzabile_e_errore(
+    tmp_path: Path, radice: Path
+):
+    """Qui l'operatore ha chiesto la persistenza e non la sta ottenendo.
+
+    È il caso peggiore dei due — un controllo che si crede di avere e non c'è —
+    ed è la ragione per cui questo preflight esiste.
+    """
+    finta = tmp_path / "stato"
+    finta.write_text("non sono una directory\n", encoding="utf-8")
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=finta))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.ERRORE
+    assert referto.pronto is False
+
+
+def test_store_illeggibile_e_errore(tmp_path: Path, radice: Path):
+    stato = tmp_path / "stato"
+    stato.mkdir()
+    (stato / "overrides.jsonl").mkdir()  # esiste ma non si apre in lettura
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=stato))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.ERRORE
+    assert "non leggibile" in controllo.messaggio
+
+
+def test_righe_scartate_segnalate(tmp_path: Path, radice: Path):
+    """Ogni riga scartata può essere un innalzamento perduto."""
+    stato = tmp_path / "stato"
+    stato.mkdir()
+    (stato / "overrides.jsonl").write_text("{rotta\n", encoding="utf-8")
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=stato))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.AVVISO
+    assert "innalzamento perduto" in controllo.messaggio
+
+
+def test_store_dentro_il_repo_segnalato(tmp_path: Path, radice: Path):
+    """Uno stato di sicurezza nell'albero di lavoro sparisce a un checkout."""
+    referto = esegui(
+        scrivi_config(tmp_path, radice, state_dir=radice / "var-stato-test")
+    )
+    try:
+        controllo = _controllo(referto, "store fuori dal repo")
+        assert controllo.esito is Esito.AVVISO
+    finally:
+        percorso = radice / "var-stato-test"
+        if percorso.exists():
+            for figlio in percorso.iterdir():
+                figlio.unlink()
+            percorso.rmdir()

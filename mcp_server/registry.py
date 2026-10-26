@@ -3,21 +3,21 @@
 Unico punto in cui un tool diventa invocabile. Tiene tre cose separate:
 
 1. le :class:`~mcp_server.contracts.ToolSpec` registrate, immutabili;
-2. gli **override di tier** dell'utente, in uno store distinto dalle spec;
+2. gli **override di tier** dell'utente, in store distinti dalle spec;
 3. il calcolo del **tier effettivo** e della policy che ne deriva.
 
-Perché lo store degli override è separato
------------------------------------------
+Perché gli store degli override sono separati
+---------------------------------------------
 
 Il tier dichiarato all'integrazione non è modificabile: la spec è ``frozen``.
-Un innalzamento richiesto dall'utente finisce in uno store a parte, e il tier
-effettivo è ``max(default, override)``. Da questo derivano due proprietà che
-una singola struttura mutabile non darebbe:
+Un innalzamento finisce in uno store a parte, e il tier effettivo è il massimo
+fra la spec e gli store. Da questo derivano due proprietà che una singola
+struttura mutabile non darebbe:
 
 * il tier dichiarato resta sempre ispezionabile come l'ha dichiarato
   l'integratore, utile in audit per distinguere "era rischioso" da "l'ho
   alzato io";
-* un override più basso del default è **inerte anche se finisse nello store**,
+* un override più basso del default è **inerte anche se finisse in uno store**,
   perché il massimo lo scarta. La difesa non riposa solo sul controllo
   all'ingresso.
 
@@ -30,25 +30,38 @@ un modo di disattivare i controlli, cosa che il documento di scope vieta:
 l'override è consenso a eseguire qualcosa di rischioso, non licenza di
 dichiararlo meno rischioso di quanto sia.
 
-L'invariante che ne risulta è che il tier effettivo è monotòno non
-decrescente — **per la durata di questo processo**, non oltre.
+L'invariante che ne risulta è che il tier effettivo è monotòno non decrescente.
 
-Gli override non sopravvivono alla connessione
-----------------------------------------------
+Tre fonti di innalzamento, un solo massimo
+------------------------------------------
 
-Lo store degli override è un dizionario in memoria, e l'host MCP avvia un
-processo server **nuovo a ogni connessione**, a ogni ``/reload-mcp`` e a ogni
-sessione. Un tool innalzato a Rosso torna quindi al proprio tier dichiarato
-alla connessione successiva.
+Il tier effettivo è ``max`` di tre fonti, e **nessuna può abbassare le altre**:
 
-È un limite da conoscere, non una proprietà: chi alza un tier dopo un
-incidente si aspetta che resti alzato, e il log continua a mostrare
-l'``override_set`` anche quando non è più in vigore. Per questo la durata
-viene **dichiarata** nelle risposte di ``raise_tool_tier`` e
-``describe_tool`` (``override_scope``) invece di essere lasciata presumere, e
-la persistenza è registrata in ``docs/debito-sicurezza.md`` come lavoro da
-fare — insieme al limite di concorrenza, perché richiedono lo stesso stato
-condiviso fra processi.
+1. il tier **dichiarato** nella spec, che fa da pavimento;
+2. ``override_tier`` in ``[[tool]]``, versionato, per gli innalzamenti che
+   devono restare e che si vedono in review;
+3. lo **store** append-only (:mod:`mcp_server.overrides`), scritto quando
+   l'innalzamento arriva a runtime via MCP.
+
+Prima di questa patch esisteva solo un dizionario in memoria, e l'host MCP
+avvia un processo server **nuovo a ogni connessione**, a ogni ``/reload-mcp``
+e a ogni sessione: un tool innalzato a Rosso tornava al proprio tier
+dichiarato poco dopo, mentre il log continuava a mostrare l'``override_set``
+come se fosse ancora in vigore.
+
+Dove la persistenza non c'è il comportamento resta quello di prima, ma
+**dichiarato**: se lo store non è configurato — o se la scrittura non riesce —
+l'innalzamento vale per la connessione, ``override_scope`` lo dice, e il log
+registra un ``override_not_persisted``. Un controllo che decade in silenzio è
+peggio di un controllo assente; uno che decade dichiarandolo è un limite noto.
+
+Un ``override_tier`` più basso del tier dichiarato non fa fallire l'avvio: è
+inerte per costruzione, e l'esito è il tier dichiarato, cioè il **più
+stretto** dei due. Viene registrato come rifiuto e il server parte, perché far
+cadere l'intera toolbox per un override che non allenta nulla sarebbe una
+reazione sproporzionata. Un ``override_tier`` con un **valore inventato** fa
+invece fallire l'avvio: lì l'operatore crede di aver alzato un tier e non l'ha
+alzato, e quello è un controllo che manca.
 
 Registrazione: append-only, costruita all'avvio
 -----------------------------------------------
@@ -118,7 +131,14 @@ from pydantic import ValidationError
 
 from mcp_server.audit import AuditLog, LogAction
 from mcp_server.contracts import CallOutcome, OwnerAgent, RiskTier, ToolSpec
+from mcp_server.overrides import OverrideScope, OverrideStore
 from mcp_server.tiers import ConfirmationPolicy, derive_policy_for
+
+#: Chiave che, in un payload ``[[tool]]``, innalza il tier in modo versionato.
+#: Non è un campo di :class:`ToolSpec`: la spec deve restare esattamente come
+#: l'ha dichiarata l'integratore, altrimenti in audit non si distingue più
+#: «era rischioso» da «l'ho alzato io».
+CHIAVE_OVERRIDE = "override_tier"
 
 # --------------------------------------------------------------------------- #
 # Errori
@@ -167,13 +187,37 @@ class ToolRegistry:
         di agente — tipicamente il popolamento all'avvio. Se omesso ne viene
         generato uno per istanza, così gli eventi di startup restano
         raggruppabili.
+    store:
+        Store append-only degli innalzamenti. ``None`` significa nessuna
+        persistenza: gli override valgono per la connessione, come prima di
+        questa patch, e la cosa viene dichiarata invece di essere presunta.
+
+    Raises
+    ------
+    mcp_server.overrides.OverrideStoreError
+        Se lo store esiste ma non è leggibile. Non si prosegue: applicare tier
+        più bassi di quelli registrati perché un file non si apriva sarebbe
+        allentare dei controlli per un guasto di I/O.
     """
 
-    def __init__(self, audit: AuditLog, *, correlation_id: uuid.UUID | None = None) -> None:
+    def __init__(
+        self,
+        audit: AuditLog,
+        *,
+        correlation_id: uuid.UUID | None = None,
+        store: OverrideStore | None = None,
+    ) -> None:
         self._audit = audit
         self._correlation_id = correlation_id or uuid.uuid4()
         self._specs: dict[str, ToolSpec] = {}
-        self._overrides: dict[str, RiskTier] = {}
+        self._store = store
+        # Tre dizionari e non uno: il tier effettivo è il massimo, ma la
+        # *provenienza* serve per dire quanto dura l'innalzamento, e un
+        # dizionario unico la perderebbe.
+        self._config_tiers: dict[str, RiskTier] = {}
+        self._store_tiers: dict[str, RiskTier] = {}
+        self._session_tiers: dict[str, RiskTier] = {}
+        self._carica_store()
 
     # -- introspezione ------------------------------------------------------ #
 
@@ -188,8 +232,35 @@ class ToolRegistry:
 
     @property
     def overrides(self) -> Mapping[str, RiskTier]:
-        """Vista in sola lettura degli override attivi."""
-        return MappingProxyType(self._overrides)
+        """Override attivi per tool: il massimo fra le fonti, spec esclusa.
+
+        Un tool assente da questa vista è al proprio tier dichiarato. La vista
+        non dice da *dove* venga l'innalzamento: per quello c'è
+        :meth:`override_scope`.
+        """
+        combinati: dict[str, RiskTier] = {}
+        for fonte in (self._config_tiers, self._store_tiers, self._session_tiers):
+            for tool_id, tier in fonte.items():
+                precedente = combinati.get(tool_id)
+                if precedente is None or tier.rank > precedente.rank:
+                    combinati[tool_id] = tier
+        return MappingProxyType(combinati)
+
+    def override_scope(self, tool_id: str) -> OverrideScope:
+        """Da dove viene l'override attivo, e quindi se sopravvive.
+
+        È la domanda che si pone chi ha appena alzato un tier dopo un
+        incidente: *resta alzato?* Una risposta sbagliata qui è peggio di
+        nessuna risposta, perché induce a non ricontrollare.
+        """
+        massimo = self.overrides.get(tool_id)
+        if massimo is None:
+            return OverrideScope.NONE
+        if self._config_tiers.get(tool_id) is massimo:
+            return OverrideScope.CONFIG
+        if self._store_tiers.get(tool_id) is massimo:
+            return OverrideScope.PERSISTENT
+        return OverrideScope.SESSION
 
     def __contains__(self, tool_id: object) -> bool:
         return tool_id in self._specs
@@ -251,9 +322,19 @@ class ToolRegistry:
         **registrato nel log** prima di essere respinto: un tool che prova a
         entrare senza i metadati richiesti è un evento che l'audit deve
         conservare, non un errore da far evaporare.
+
+        La chiave ``override_tier`` viene estratta dal payload prima di
+        costruire la spec, e applicata dopo la registrazione: la spec deve
+        restare quella dichiarata dall'integratore.
         """
+        grezzo = dict(payload)
+        richiesto = grezzo.pop(CHIAVE_OVERRIDE, None)
+        # Prima il valore dell'override, poi la spec: un valore inventato va
+        # scoperto senza aver già registrato il tool.
+        override = self._override_da_config(payload, richiesto)
+
         try:
-            spec = ToolSpec(**payload)
+            spec = ToolSpec(**grezzo)
         except ValidationError as err:
             self._log(
                 LogAction.TOOL_REGISTRATION_REJECTED,
@@ -262,21 +343,130 @@ class ToolRegistry:
                 detail=f"spec non conforme al contratto: {_compatta(err)}",
             )
             raise ToolSpecRejected(f"spec non conforme: {err}") from err
-        return self.register(spec)
+
+        self.register(spec)
+        if override is not None:
+            self._applica_override_di_config(spec, override)
+        return spec
+
+    def _override_da_config(
+        self, payload: Mapping[str, object], valore: object
+    ) -> RiskTier | None:
+        """Converte ``override_tier``, o fa fallire la registrazione.
+
+        Un valore inventato **non** può essere ignorato: l'operatore crede di
+        aver innalzato un tier e non l'ha innalzato, quindi il controllo che
+        pensa di avere non esiste. È il caso in cui è giusto che il server non
+        parta.
+        """
+        if valore is None:
+            return None
+        try:
+            return RiskTier(valore)  # type: ignore[arg-type]
+        except ValueError as err:
+            ammessi = ", ".join(t.value for t in RiskTier)
+            dettaglio = (
+                f"{CHIAVE_OVERRIDE} non valido: {valore!r}. Ammessi: {ammessi}"
+            )
+            self._log(
+                LogAction.TOOL_REGISTRATION_REJECTED,
+                CallOutcome.DENIED,
+                tool_id=_tool_id_dal_payload(payload),
+                detail=dettaglio,
+            )
+            raise ToolSpecRejected(dettaglio) from err
+
+    def _applica_override_di_config(self, spec: ToolSpec, tier: RiskTier) -> None:
+        """Registra un innalzamento versionato, se innalza qualcosa.
+
+        Un override pari o inferiore al tier dichiarato è inerte per
+        costruzione, perché il tier effettivo è un massimo. Non viene
+        memorizzato — comparirebbe come «override attivo» senza cambiare
+        nulla — ma viene registrato: di solito è un refuso, e un refuso in una
+        configurazione di sicurezza va visto.
+
+        Non fa fallire l'avvio, a differenza di un valore inventato: l'esito è
+        il tier dichiarato, cioè il più stretto dei due, e far cadere l'intera
+        toolbox per un override che non allenta nulla sarebbe sproporzionato.
+        """
+        if tier.rank < spec.default_tier.rank:
+            self._log(
+                LogAction.OVERRIDE_REJECTED,
+                CallOutcome.DENIED,
+                agent=spec.owner_agent,
+                tool_id=spec.tool_id,
+                tier_effective=spec.default_tier,
+                detail=(
+                    f"{CHIAVE_OVERRIDE}='{tier}' in configurazione è inferiore "
+                    f"al tier dichiarato '{spec.default_tier}': inerte, vale il "
+                    f"dichiarato. L'override può solo innalzare."
+                ),
+            )
+            return
+
+        if tier.rank == spec.default_tier.rank:
+            self._log(
+                LogAction.OVERRIDE_REJECTED,
+                CallOutcome.OK,
+                agent=spec.owner_agent,
+                tool_id=spec.tool_id,
+                tier_effective=spec.default_tier,
+                detail=(
+                    f"{CHIAVE_OVERRIDE}='{tier}' coincide col tier dichiarato: "
+                    f"ridondante, nessun override registrato"
+                ),
+            )
+            return
+
+        self._config_tiers[spec.tool_id] = tier
+        self._log(
+            LogAction.OVERRIDE_SET,
+            CallOutcome.OK,
+            agent=spec.owner_agent,
+            tool_id=spec.tool_id,
+            tier_effective=tier,
+            detail=(
+                f"override da configurazione versionata: '{spec.default_tier}' "
+                f"-> '{tier}'; durata: {OverrideScope.CONFIG.descrizione}"
+            ),
+        )
+
+    def _carica_store(self) -> None:
+        """Rilegge lo store degli innalzamenti e registra l'esito.
+
+        Le righe scartate vengono **contate e registrate**: ciascuna potrebbe
+        essere un innalzamento perduto, e scoprirlo leggendo il log è l'unico
+        modo per accorgersene.
+        """
+        if self._store is None:
+            return
+        esito = self._store.carica()  # OverrideStoreError risale: fail-closed
+        self._store_tiers.update(esito.tiers)
+        self._log(
+            LogAction.OVERRIDE_STORE_LOADED,
+            CallOutcome.ERROR if esito.scartate else CallOutcome.OK,
+            detail=(
+                f"store {self._store.path}: {esito.righe} righe, "
+                f"{len(esito.tiers)} tool con innalzamento attivo, "
+                f"{esito.scartate} righe illeggibili scartate"
+            ),
+        )
 
     # -- tier effettivo e override ------------------------------------------ #
 
     def effective_tier(self, tool_id: str) -> RiskTier:
-        """Tier applicato al tool: ``max(default, override)``.
+        """Tier applicato al tool: il massimo fra spec, config e store.
 
-        Il massimo è il secondo presidio: anche se nello store finisse un
-        override più basso del default, resterebbe inerte.
+        Il massimo è il secondo presidio: anche se in una delle fonti finisse
+        un override più basso del tier dichiarato, resterebbe inerte.
         """
         spec = self.spec(tool_id)
-        override = self._overrides.get(tool_id)
-        if override is None:
-            return spec.default_tier
-        return max(spec.default_tier, override, key=lambda t: t.rank)
+        candidati = [spec.default_tier]
+        for fonte in (self._config_tiers, self._store_tiers, self._session_tiers):
+            tier = fonte.get(tool_id)
+            if tier is not None:
+                candidati.append(tier)
+        return max(candidati, key=lambda t: t.rank)
 
     def set_override(
         self,
@@ -305,8 +495,14 @@ class ToolRegistry:
         L'attribuzione a una persona sarà possibile solo quando la conferma
         passerà dall'host, con l'elicitation.
 
-        Un tier uguale a quello effettivo è accettato ed è idempotente. Uno
-        inferiore viene rifiutato e registrato come evento di sicurezza:
+        Un tier uguale a quello effettivo è accettato ed è idempotente, e
+        **non scrive nulla**: è ciò che dà allo store il suo tetto
+        strutturale. Solo un incremento reale produce una riga, quindi
+        diecimila richieste di 'rosso' su un tool già Rosso lasciano una sola
+        riga nello store — e diecimilauno nel log d'audit, dove è giusto che
+        si vedano, perché in audit conta sapere che qualcuno ha insistito.
+
+        Uno inferiore viene rifiutato e registrato come evento di sicurezza:
         abbassare un tier equivarrebbe a disattivare un controllo.
 
         Returns
@@ -333,7 +529,26 @@ class ToolRegistry:
                 f"effettivo {corrente!r}"
             )
 
-        self._overrides[tool_id] = tier
+        if tier.rank == corrente.rank:
+            # Idempotente: niente da innalzare, quindi niente da persistere.
+            self._log(
+                LogAction.OVERRIDE_SET,
+                CallOutcome.OK,
+                agent=agent,
+                tool_id=tool_id,
+                tier_effective=corrente,
+                detail=(
+                    f"override richiesto dal client MCP: già a '{corrente}', "
+                    f"nessun cambiamento (durata: "
+                    f"{self.override_scope(tool_id).descrizione})"
+                ),
+                correlation_id=correlation_id,
+            )
+            return corrente
+
+        durata = self._persisti(
+            tool_id, tier, agent=agent, correlation_id=correlation_id
+        )
         risultante = self.effective_tier(tool_id)
         self._log(
             LogAction.OVERRIDE_SET,
@@ -344,12 +559,57 @@ class ToolRegistry:
             detail=(
                 f"override richiesto dal client MCP: '{corrente}' -> "
                 f"'{risultante}' (dichiarato "
-                f"'{self.spec(tool_id).default_tier}'); vale per questa "
-                f"connessione"
+                f"'{self.spec(tool_id).default_tier}'); durata: {durata.descrizione}"
             ),
             correlation_id=correlation_id,
         )
         return risultante
+
+    def _persisti(
+        self,
+        tool_id: str,
+        tier: RiskTier,
+        *,
+        agent: OwnerAgent | None,
+        correlation_id: uuid.UUID | None,
+    ) -> OverrideScope:
+        """Registra l'innalzamento dove può, e dice dove è finito.
+
+        L'innalzamento **vale in ogni caso**: se la scrittura non riesce, il
+        tier sale comunque in memoria. Il contrario — rifiutare di alzare un
+        tier perché non si è riusciti a scriverlo su disco — lascerebbe il
+        tool al tier più basso proprio nel momento in cui qualcuno sta
+        chiedendo di trattarlo come più rischioso.
+
+        Ciò che non si può fare è **tacere** che non durerà.
+        """
+        if self._store is None:
+            self._session_tiers[tool_id] = tier
+            return OverrideScope.SESSION
+
+        try:
+            self._store.registra(
+                tool_id, tier, agent=agent, correlation_id=correlation_id
+            )
+        except OSError as err:
+            self._session_tiers[tool_id] = tier
+            self._log(
+                LogAction.OVERRIDE_NOT_PERSISTED,
+                CallOutcome.ERROR,
+                agent=agent,
+                tool_id=tool_id,
+                tier_effective=tier,
+                detail=(
+                    f"innalzamento applicato ma non scritto su "
+                    f"{self._store.path}: {err}. Vale per questa connessione; "
+                    f"alla prossima il tool torna al tier dichiarato."
+                ),
+                correlation_id=correlation_id,
+            )
+            return OverrideScope.SESSION
+
+        self._store_tiers[tool_id] = tier
+        return OverrideScope.PERSISTENT
 
     def policy_for(self, tool_id: str) -> ConfirmationPolicy:
         """Policy di conferma calcolata sul tier **effettivo**."""
@@ -506,6 +766,7 @@ def _compatta(err: ValidationError) -> str:
 
 
 __all__ = [
+    "CHIAVE_OVERRIDE",
     "InvocationRefused",
     "OverrideRefused",
     "RegistryError",
