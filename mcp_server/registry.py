@@ -25,12 +25,30 @@ Semantica dell'override: solo in salita
 ---------------------------------------
 
 ``set_override`` accetta un tier maggiore o uguale a quello effettivo e
-**rifiuta** qualunque declassamento. L'invariante che ne risulta è che il tier
-effettivo di un tool è monotòno non decrescente per tutta la vita del
-registro. Permettere all'utente di abbassare un tier sarebbe un modo di
-disattivare i controlli, cosa che il documento di scope vieta: l'override è
-consenso a eseguire qualcosa di rischioso, non licenza di dichiararlo meno
-rischioso di quanto sia.
+**rifiuta** qualunque declassamento. Permettere di abbassare un tier sarebbe
+un modo di disattivare i controlli, cosa che il documento di scope vieta:
+l'override è consenso a eseguire qualcosa di rischioso, non licenza di
+dichiararlo meno rischioso di quanto sia.
+
+L'invariante che ne risulta è che il tier effettivo è monotòno non
+decrescente — **per la durata di questo processo**, non oltre.
+
+Gli override non sopravvivono alla connessione
+----------------------------------------------
+
+Lo store degli override è un dizionario in memoria, e l'host MCP avvia un
+processo server **nuovo a ogni connessione**, a ogni ``/reload-mcp`` e a ogni
+sessione. Un tool innalzato a Rosso torna quindi al proprio tier dichiarato
+alla connessione successiva.
+
+È un limite da conoscere, non una proprietà: chi alza un tier dopo un
+incidente si aspetta che resti alzato, e il log continua a mostrare
+l'``override_set`` anche quando non è più in vigore. Per questo la durata
+viene **dichiarata** nelle risposte di ``raise_tool_tier`` e
+``describe_tool`` (``override_scope``) invece di essere lasciata presumere, e
+la persistenza è registrata in ``docs/debito-sicurezza.md`` come lavoro da
+fare — insieme al limite di concorrenza, perché richiedono lo stesso stato
+condiviso fra processi.
 
 Registrazione: append-only, costruita all'avvio
 -----------------------------------------------
@@ -276,6 +294,17 @@ class ToolRegistry:
         Senza, la riga di log dice che il tier è cambiato ma non per mano di
         chi.
 
+        Attenzione a cosa significa quella provenienza: ``raise_tool_tier`` è
+        un tool MCP, quindi lo chiama il **modello**, eventualmente spinto da
+        un'iniezione nel suo contesto. L'istanza registrata dice da quale
+        server è arrivata la richiesta, non che un essere umano l'abbia
+        voluta. Il log lo scrive come «richiesto dal client MCP» invece di
+        «override utente», perché la seconda formulazione farebbe credere a
+        chi legge che dietro ci fosse una persona.
+
+        L'attribuzione a una persona sarà possibile solo quando la conferma
+        passerà dall'host, con l'elicitation.
+
         Un tier uguale a quello effettivo è accettato ed è idempotente. Uno
         inferiore viene rifiutato e registrato come evento di sicurezza:
         abbassare un tier equivarrebbe a disattivare un controllo.
@@ -293,8 +322,9 @@ class ToolRegistry:
                 tool_id=tool_id,
                 tier_effective=corrente,
                 detail=(
-                    f"declassamento rifiutato: richiesto '{tier}' su effettivo "
-                    f"'{corrente}'; l'override può solo innalzare"
+                    f"declassamento rifiutato, richiesto dal client MCP: "
+                    f"'{tier}' su effettivo '{corrente}'; l'override può solo "
+                    f"innalzare"
                 ),
                 correlation_id=correlation_id,
             )
@@ -312,8 +342,10 @@ class ToolRegistry:
             tool_id=tool_id,
             tier_effective=risultante,
             detail=(
-                f"override utente: '{corrente}' -> '{risultante}' "
-                f"(dichiarato '{self.spec(tool_id).default_tier}')"
+                f"override richiesto dal client MCP: '{corrente}' -> "
+                f"'{risultante}' (dichiarato "
+                f"'{self.spec(tool_id).default_tier}'); vale per questa "
+                f"connessione"
             ),
             correlation_id=correlation_id,
         )

@@ -616,13 +616,94 @@ async def test_elenco_attraverso_il_protocollo(server: HermesServer):
 
 def test_innalzamento_tier(server: HermesServer):
     r = server._raise_tool_tier("echo.ping", "rosso")
-    assert r == {
-        "ok": True,
-        "tool_id": "echo.ping",
-        "effective_tier": "rosso",
-        "declared_tier": "verde",
-    }
+    assert r["ok"] is True
+    assert r["tool_id"] == "echo.ping"
+    assert r["effective_tier"] == "rosso"
+    assert r["declared_tier"] == "verde"
     assert server.registry.effective_tier("echo.ping") is RiskTier.ROSSO
+
+
+def test_innalzamento_dichiara_la_propria_durata(server: HermesServer):
+    """Un controllo che decade in silenzio e' peggio di un controllo assente.
+
+    L'host avvia un processo server nuovo a ogni connessione, quindi
+    l'innalzamento non sopravvive. Chi lo imposta dopo un incidente si aspetta
+    il contrario, e il log continua a mostrare l'override anche quando non e'
+    piu' in vigore: la durata va dichiarata, non lasciata presumere.
+    """
+    r = server._raise_tool_tier("echo.ping", "rosso")
+    assert r["override_scope"] == "session"
+    assert "questa connessione" in r["override_note"]
+
+
+def test_describe_tool_dichiara_override_attivo(server: HermesServer):
+    prima = server._describe_tool("echo.ping")
+    assert prima["override_active"] is False
+    assert prima["override_scope"] is None
+
+    server._raise_tool_tier("echo.ping", "rosso")
+    dopo = server._describe_tool("echo.ping")
+    assert dopo["override_active"] is True
+    assert dopo["override_scope"] == "session"
+
+
+def test_override_loggato_come_richiesto_dal_client(server: HermesServer):
+    """`raise_tool_tier` e' un tool MCP: lo chiama il modello, non l'utente.
+
+    Scriverlo come "override utente" farebbe credere a chi legge il log che
+    dietro ci fosse una persona.
+    """
+    server._raise_tool_tier("echo.ping", "rosso")
+    riga = [
+        r for r in server.audit.read_all() if r.action is LogAction.OVERRIDE_SET
+    ][0]
+    assert "client MCP" in riga.detail
+    assert "utente" not in riga.detail.replace("client MCP", "")
+    assert "questa connessione" in riga.detail
+
+
+def test_correlation_id_generato_dal_server(server: HermesServer):
+    """Il client non puo' imporre l'identita' della catena.
+
+    Prima poteva dichiarare il correlation_id di un'altra invocazione e
+    scriverci dentro le proprie righe, rendendo ambigua la ricostruzione.
+    """
+    dichiarato = "11111111-1111-1111-1111-111111111111"
+    r = server._invoke_tool("echo.ping", correlation_id=dichiarato)
+
+    assegnato = r["result"]["correlation_id"]
+    assert assegnato != dichiarato, "la catena non e' quella dichiarata dal client"
+
+    righe = [
+        x for x in server.audit.read_all() if str(x.correlation_id) == assegnato
+    ]
+    assert righe, "le righe stanno sotto la catena del server"
+    assert righe[0].peer_correlation_id == dichiarato, "il collegamento resta"
+
+
+def test_correlation_id_del_client_malformato_registrato_comunque(
+    server: HermesServer,
+):
+    """Registrare «il client ha dichiarato questo» informa piu' che scartarlo."""
+    r = server._invoke_tool("echo.ping", correlation_id="non-un-uuid")
+    righe = [
+        x
+        for x in server.audit.read_all()
+        if str(x.correlation_id) == r["result"]["correlation_id"]
+    ]
+    assert righe[0].peer_correlation_id == "non-un-uuid"
+
+
+def test_correlation_id_del_client_non_fidato(server: HermesServer):
+    """Input non fidato: solo stringhe, troncate alla lunghezza del campo."""
+    r = server._invoke_tool("echo.ping", correlation_id="x" * 500)
+    righe = [
+        x
+        for x in server.audit.read_all()
+        if str(x.correlation_id) == r["result"]["correlation_id"]
+    ]
+    assert righe[0].peer_correlation_id is not None
+    assert len(righe[0].peer_correlation_id) <= 128
 
 
 def test_innalzamento_attribuito_all_istanza(server: HermesServer):
