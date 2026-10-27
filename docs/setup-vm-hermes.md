@@ -250,21 +250,31 @@ propria chiave con il proprio comando vincolato — lo schema regge.
 
 ## 5. Verificare dalla VM
 
-```sh
-cd /opt/hermes-core
-.venv/bin/python -m mcp_server.doctor config/hermes.toml
-```
-
-Rispetto alla VM di sviluppo, due avvisi dovrebbero essere **scomparsi** se i
-permessi sono giusti: la scrivibilità del repo (eseguendolo come `hermes`) e,
-dopo il punto seguente, l'append-only del log.
-
-Per vederlo dal punto di vista del servizio:
+Il preflight va eseguito **come l'utente di servizio**, sempre:
 
 ```sh
 sudo -u hermes /opt/hermes-core/.venv/bin/python \
      -m mcp_server.doctor /opt/hermes-core/config/hermes.toml
 ```
+
+Non è un dettaglio di comodità. Il preflight risponde alla domanda «il server
+funzionerà?», e il server gira come `hermes`: lanciarlo dal proprio account
+risponde a una domanda diversa, e le due risposte divergono proprio dove
+conta.
+
+Due esempi visti sul campo:
+
+* `/var/log/hermes` è `0700` di `hermes`, quindi dal proprio account il log
+  risulta **non scrivibile** e il preflight dà ERRORE su un dispiegamento che
+  funziona benissimo;
+* il controllo sulla *scrivibilità del codice* — la mitigazione reale del
+  TOCTOU — dal proprietario del repo non può rispondere e si dichiara non
+  applicabile. Solo eseguito come `hermes` verifica davvero che il servizio
+  non possa riscrivere gli script che esegue.
+
+La seconda è la ragione per cui vale la pena fare così anche quando il primo
+modo sembra funzionare: un verde ottenuto dall'utente sbagliato è un verde su
+meno controlli.
 
 ### Rendere log e store non riscrivibili
 
@@ -285,6 +295,49 @@ privilegiato può troncarli o riscriverli, incluso il nostro. Entrambi gli
 scrittori lo tollerano per costruzione — scrivono in `O_APPEND` e non
 insistono sulla `chmod`, che un file append-only rifiuta anche al
 proprietario.
+
+### Annullare un innalzamento di tier
+
+Da sapere **prima** di alzare un tier in produzione: il tier può solo salire,
+e con lo store persistente resta salito. Un tool portato a Rosso richiede
+conferma, e finché il canale di conferma non è collegato quel tool **non è più
+invocabile e non torna da solo**. Prima della persistenza si curava
+riconnettendosi; ora no.
+
+Si torna indietro solo da qui, con i privilegi della macchina. È voluto: un
+declassamento è un atto deliberato di chi amministra, non una chiamata che il
+modello possa fare.
+
+```sh
+# 1. togliere l'append-only, se è stato messo
+sudo chattr -a /var/lib/hermes/state/overrides.jsonl
+
+# 2. riscrivere il file senza le righe del tool da riportare giù
+sudo -u hermes grep -v '"tool_id": "echo.ping"' \
+     /var/lib/hermes/state/overrides.jsonl > /tmp/overrides.new
+sudo -u hermes cp /tmp/overrides.new /var/lib/hermes/state/overrides.jsonl
+rm /tmp/overrides.new
+
+# 3. rimetterlo, se lo si vuole
+sudo chattr +a /var/lib/hermes/state/overrides.jsonl
+```
+
+Poi `/reload-mcp` in Hermes: il server rilegge lo store all'avvio, quindi
+finché il processo è vivo continua ad applicare il tier vecchio.
+
+Per azzerare **tutti** gli override in un colpo — utile in laboratorio, da non
+fare a cuor leggero altrove, perché cancella anche innalzamenti decisi
+apposta:
+
+```sh
+sudo -u hermes truncate -s 0 /var/lib/hermes/state/overrides.jsonl
+```
+
+In nessuno dei due casi si può scendere sotto il tier **dichiarato** in
+configurazione: quello è un pavimento, e rimuovere righe non lo tocca.
+
+Un `override_tier` scritto in `[[tool]]` non si rimuove da qui: si toglie
+dalla configurazione versionata, che è il posto in cui è stato messo.
 
 ---
 

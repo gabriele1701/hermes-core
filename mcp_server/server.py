@@ -95,11 +95,14 @@ VERSIONE = "0.0.1"
 NOTE_DURATA = {
     OverrideScope.CONFIG: (
         "l'innalzamento è scritto nella configurazione versionata: resta fino "
-        "a quando non viene rimosso da lì"
+        "a quando non viene rimosso da lì, cosa che richiede una modifica al "
+        "repository"
     ),
     OverrideScope.PERSISTENT: (
         "l'innalzamento è registrato nello store ed è stato scritto su disco: "
-        "resta valido anche alle prossime connessioni"
+        "resta valido anche alle prossime connessioni, e non è annullabile da "
+        "questa interfaccia — per riportarlo giù serve un intervento manuale "
+        "di un amministratore sulla macchina"
     ),
     OverrideScope.SESSION: (
         "l'innalzamento vale solo per questa connessione: lo store degli "
@@ -246,7 +249,12 @@ class HermesServer:
             name="raise_tool_tier",
             description=(
                 "Innalza il risk tier di un tool. Il tier può solo salire: "
-                "ogni declassamento viene rifiutato."
+                "ogni declassamento viene rifiutato, e l'innalzamento NON è "
+                "annullabile da questa interfaccia. Se l'innalzamento è "
+                "persistente, portare un tool a 'rosso' lo rende non "
+                "invocabile finché un amministratore non interviene sulla "
+                "macchina. Da usare quando serve più severità, non per "
+                "provare."
             ),
         )
         return mcp

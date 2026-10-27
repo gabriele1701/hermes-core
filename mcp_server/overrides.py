@@ -22,6 +22,31 @@ Nessuna fonte può abbassare le altre, e cancellare una riga dello store non
 declassa nulla: resta il massimo delle rimanenti, con il tier dichiarato come
 pavimento.
 
+Un innalzamento non si annulla da qui
+-------------------------------------
+
+Il tier può solo salire, e da quando queste righe sopravvivono alla
+connessione **resta salito**. Un tool portato a Rosso richiede conferma, e
+finché il canale di conferma non è collegato quel tool non è più invocabile.
+
+Prima della persistenza c'era una valvola di sfogo accidentale — gli override
+morivano con la connessione, quindi uno sbagliato si curava riconnettendosi.
+Questo modulo l'ha tolta, ed è una conseguenza di cui tener conto: un modello
+in ciclo, o spinto da un'iniezione, può bloccare la toolbox in modo permanente
+chiedendo *più* severità, che è l'unica direzione che nessun controllo
+impedisce.
+
+Si accetta perché è un attacco alla disponibilità e non all'integrità: il
+risultato è una toolbox ferma, non una che esegue cose rischiose con i
+controlli allentati. Fra i due, il primo si recupera in un minuto da chi ha
+accesso alla macchina.
+
+Per la stessa ragione **non esiste** un'API di rimozione, qui o altrove: una
+sarebbe un declassamento con un'interfaccia comoda, e una volta che esiste
+finisce per essere chiamata da qualcosa di automatico. La procedura manuale e
+privilegiata è in ``docs/setup-vm-hermes.md``, e il ragionamento per esteso in
+``docs/debito-sicurezza.md``.
+
 Perché non serve ruotarlo
 -------------------------
 

@@ -240,6 +240,61 @@ esterna, che non tocca il percorso di scrittura.
 
 ---
 
+## ACCETTATA — un innalzamento è irreversibile dall'interfaccia, e può bloccare la toolbox
+
+**Dove:** `mcp_server/overrides.py`, `mcp_server/registry.py` (`set_override`).
+
+Il tier può solo salire, e da quando lo store è persistente **resta salito**.
+Un tool portato a Rosso richiede conferma, e nessun canale di conferma è
+collegato (voce sopra): quel tool non è più invocabile, e non torna da solo.
+
+Prima di questa patch esisteva una valvola di sfogo accidentale: gli override
+morivano con la connessione, quindi un innalzamento sbagliato si curava
+riconnettendosi. Persistendoli l'abbiamo tolta, e va detto apertamente —
+**è una conseguenza della patch, non una proprietà che c'era già.**
+
+**Lo scenario che ne deriva:** `raise_tool_tier` lo chiama il modello. Un
+modello in ciclo, o spinto da un'iniezione nel contesto, può innalzare a Rosso
+ogni tool dell'agente e rendere la toolbox inutilizzabile in modo permanente,
+senza che nessun controllo lo fermi — perché dal punto di vista del registro
+sta chiedendo *più* severità, non meno.
+
+**Perché si accetta.** È un attacco alla disponibilità, non all'integrità, e
+la direzione del guasto è quella giusta: il risultato è una toolbox ferma, non
+una toolbox che esegue cose rischiose con controlli allentati. Fra i due, il
+primo è recuperabile in un minuto da chi ha accesso alla macchina; il secondo
+no. Dare al modello un modo di abbassare un tier per uscire da questa
+situazione annullerebbe l'intera regola.
+
+**Mitigazioni in essere:**
+
+* ogni innalzamento è nel log d'audit con `agent` e `correlation_id`, quindi
+  si vede *quando* è successo e dentro quale catena;
+* lo store contiene gli stessi dati, in poche righe leggibili a occhio;
+* il tier dichiarato resta un pavimento: rimuovere una riga non può portare un
+  tool **sotto** ciò che l'integratore ha dichiarato.
+
+**Come si torna indietro** (richiede privilegi sulla macchina, di proposito —
+la procedura è in `docs/setup-vm-hermes.md`):
+
+```sh
+sudo chattr -a /var/lib/hermes/state/overrides.jsonl   # solo se irrigidito
+sudo -u hermes grep -v '"tool_id": "<tool>"' \
+     /var/lib/hermes/state/overrides.jsonl > /tmp/o.new
+sudo -u hermes cp /tmp/o.new /var/lib/hermes/state/overrides.jsonl
+sudo chattr +a /var/lib/hermes/state/overrides.jsonl   # se lo si vuole di nuovo
+```
+
+**Deliberatamente non fatto:** un sottocomando che rimuova un override. Sarebbe
+un declassamento con un'interfaccia comoda, e una volta che esiste finisce per
+essere chiamato da qualcosa di automatico. La scomodità qui è il controllo.
+
+**Da rivalutare se:** i tool diventeranno molti e l'innalzamento accidentale
+sarà frequente, oppure quando il canale di conferma sarà collegato — a quel
+punto un tool Rosso resta usabile, e l'innalzamento smette di essere un blocco.
+
+---
+
 ## ACCETTATA — il registro si fida della propria configurazione
 
 **Dove:** `mcp_server/registry.py`.

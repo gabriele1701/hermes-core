@@ -339,3 +339,28 @@ def test_store_append_only_reale(tmp_path):
     finally:
         subprocess.run(["chattr", "-a", str(store.path)], capture_output=True, timeout=10)
         os.chmod(store.path, 0o600)
+
+
+def test_nessuna_api_di_rimozione(store: OverrideStore):
+    """Una rimozione comoda sarebbe un declassamento con un bel nome.
+
+    Il test fissa un'assenza deliberata: una volta che un metodo del genere
+    esiste, finisce per essere chiamato da qualcosa di automatico. Il
+    declassamento resta una procedura manuale e privilegiata, documentata in
+    ``docs/setup-vm-hermes.md``.
+    """
+    vietati = {"rimuovi", "remove", "cancella", "delete", "abbassa", "reset"}
+    assert vietati.isdisjoint(dir(store))
+
+
+def test_nota_persistente_dice_che_non_si_torna_indietro(audit: AuditLog, store):
+    """Chi alza un tier deve sapere subito che non lo annulla da lì.
+
+    È la valvola di sfogo che la persistenza ha tolto: prima un innalzamento
+    sbagliato si curava riconnettendosi.
+    """
+    from mcp_server.server import NOTE_DURATA
+
+    nota = NOTE_DURATA[OverrideScope.PERSISTENT]
+    assert "non è annullabile da questa interfaccia" in nota
+    assert "amministratore" in nota

@@ -49,6 +49,13 @@ log_path = "../logs/hermes-audit.jsonl"
 # per la connessione — ma lo DICHIARA, nel campo override_scope delle
 # risposte e nel log. Il preflight lo segnala come avviso.
 #
+# DA SAPERE PRIMA DI USARLA: con la persistenza attiva, un tier alzato RESTA
+# alzato. Un tool portato a "rosso" richiede conferma, e finché il canale di
+# conferma non è collegato quel tool non è più invocabile e non torna da solo.
+# Si scende solo rimuovendo le righe dallo store, a mano e da privilegiato:
+# la procedura è in docs/setup-vm-hermes.md. È voluto — un declassamento è un
+# atto di chi amministra, non una chiamata che il modello possa fare.
+#
 # ATTENZIONE AL PERCORSO, come per log_path: un valore relativo è risolto
 # rispetto alla directory di QUESTO file e finirebbe dentro il repo, dove un
 # checkout o una pulizia lo cancellerebbero. Uno stato di sicurezza non va
