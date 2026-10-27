@@ -60,6 +60,15 @@ Un modello che chiama ``raise_tool_tier("rosso")`` diecimila volte produce
 **una** riga, non diecimila. Le altre 9999 richieste restano nel log d'audit,
 dove è giusto che si vedano: in audit conta sapere che qualcuno ha insistito.
 
+Il tetto vale **in sequenza**, ed è bene essere precisi su quanto: ogni
+processo rilegge lo store all'avvio, quindi può scrivere solo sopra il massimo
+già registrato, e processi che si succedono non duplicano nulla. Due
+connessioni **concorrenti** possono invece innalzare lo stesso tool prima di
+vedersi a vicenda, e produrre due righe dello stesso tier. Il limite diventa
+allora ``2 × tool × connessioni contemporanee``, che resta un numero piccolo e
+noto — e che non cambia il risultato, perché la lettura prende il massimo e
+una riga duplicata è idempotente.
+
 Questo elimina il problema che una rotazione avrebbe dovuto gestire — e che
 una rotazione fatta male creerebbe, perché troncare questo file significherebbe
 **perdere dei tier innalzati**, cioè provocare un declassamento silenzioso
@@ -200,7 +209,7 @@ class OverrideStore:
         tiers: dict[str, RiskTier] = {}
         righe = scartate = 0
 
-        if not self._path.exists():
+        if not self._esiste():
             return CaricamentoOverride()
 
         try:
@@ -227,6 +236,35 @@ class OverrideStore:
                 tiers[tool_id] = tier
 
         return CaricamentoOverride(tiers=tiers, righe=righe, scartate=scartate)
+
+    def _esiste(self) -> bool:
+        """Se lo store c'è. Solleva :class:`OverrideStoreError` se non si sa.
+
+        ``Path.exists()`` **solleva** ``PermissionError`` quando una directory
+        del percorso non è attraversabile, invece di rispondere ``False``: su
+        una ``state_dir`` con i permessi sbagliati — il caso realistico, già
+        visto sul campo per la directory del log — il chiamante riceverebbe un
+        ``PermissionError`` grezzo al posto del nostro errore, e il preflight
+        morirebbe con un traceback invece di spiegare cosa fare.
+
+        Solo ``ENOENT`` e ``ENOTDIR`` sono risposte vere: il kernel sta dicendo
+        che a quel percorso non c'è alcun file, quindi non c'è nulla da
+        perdere. Qualunque altro errore significa **non lo so**, e lì vale la
+        regola di questo modulo: illeggibile non è vuoto.
+        """
+        try:
+            self._path.stat()
+        except FileNotFoundError:
+            return False
+        except NotADirectoryError:
+            return False
+        except OSError as err:
+            raise OverrideStoreError(
+                f"store degli override non ispezionabile: {self._path}: {err}. "
+                f"Non si riesce a sapere se contenga innalzamenti di tier, e "
+                f"ignorarlo significherebbe applicarne di più bassi."
+            ) from err
+        return True
 
     # -- scrittura ---------------------------------------------------------- #
 

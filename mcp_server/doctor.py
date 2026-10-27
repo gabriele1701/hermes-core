@@ -194,18 +194,29 @@ def _stato(
 
     # Illeggibile non è vuoto: se il file c'è e non si apre, il server non
     # parte di proposito, perché potrebbe contenere innalzamenti da applicare.
-    if percorso.exists():
-        try:
-            OverrideStore(percorso).carica()
-        except OverrideStoreError as err:
-            referto.aggiungi(
-                "store degli override",
-                Esito.ERRORE,
-                str(err),
-                f"Verificare permessi e proprietario di {percorso}: il server "
-                f"non parte finché lo store esiste e non è leggibile.",
-            )
-            return
+    # Si prova a caricarlo sempre, senza chiedere prima se esista: la domanda
+    # «esiste?» è a sua volta rispondibile solo se la directory è
+    # attraversabile, e su una state_dir con i permessi sbagliati morirebbe
+    # qui — proprio nel controllo che dovrebbe diagnosticarla.
+    try:
+        OverrideStore(percorso).carica()
+    except OverrideStoreError as err:
+        referto.aggiungi(
+            "store degli override",
+            Esito.ERRORE,
+            str(err),
+            f"Il server non parte finché lo store esiste e non è leggibile.\n"
+            "             " + _perche_non_scrivibile(percorso, cfg, percorso_config),
+        )
+        return
+    except OSError as err:  # pragma: no cover - rete di sicurezza
+        referto.aggiungi(
+            "store degli override",
+            Esito.ERRORE,
+            f"non ispezionabile: {err}",
+            "             " + _perche_non_scrivibile(percorso, cfg, percorso_config),
+        )
+        return
 
     try:
         cfg.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -237,8 +248,39 @@ def _stato(
             "lo segnala nessuno. Spostarlo fuori (es. /var/lib/hermes).",
         )
 
-    esito = OverrideStore(percorso).carica()
-    modo = stat.S_IMODE(percorso.stat().st_mode)
+    try:
+        esito = OverrideStore(percorso).carica()
+        st = percorso.stat()
+    except (OverrideStoreError, OSError) as err:  # pragma: no cover
+        referto.aggiungi(
+            "store degli override",
+            Esito.ERRORE,
+            f"creato ma non rileggibile: {err}",
+            "             " + _perche_non_scrivibile(percorso, cfg, percorso_config),
+        )
+        return
+
+    modo = stat.S_IMODE(st.st_mode)
+    proprietario = _utente(st.st_uid)
+    servizio = _utente_di_servizio(cfg)
+    if servizio is not None and proprietario != servizio:
+        # Il file viene creato da chi lancia il preflight. Lanciato dall'utente
+        # sbagliato — da root, tipicamente — lo crea intestato a lui, e il
+        # servizio poi non ci scrive: il preflight direbbe «ok» su una
+        # persistenza che non funziona. Un falso verde è il guasto peggiore
+        # che un preflight possa produrre.
+        referto.aggiungi(
+            "proprietario dello store",
+            Esito.ERRORE,
+            f"appartiene a {proprietario}, ma il server gira come {servizio}: "
+            f"gli innalzamenti non verranno persistiti",
+            f"sudo chattr -a {percorso} 2>/dev/null; "
+            f"sudo chown {servizio}: {percorso}\n"
+            f"             Poi rilanciare il preflight come {servizio}, non "
+            f"come root: è l'esecuzione dall'utente sbagliato ad aver creato "
+            f"il file così.",
+        )
+
     if modo & 0o077:
         referto.aggiungi(
             "permessi dello store",

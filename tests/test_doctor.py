@@ -741,3 +741,45 @@ def test_rimedio_store_nomina_l_utente_di_servizio(tmp_path: Path, radice: Path)
     )
     assert "$(id -un)" not in controllo.rimedio
     assert "non chi lancia il preflight" in controllo.rimedio
+
+
+def test_store_non_ispezionabile_non_uccide_il_preflight(
+    tmp_path: Path, radice: Path
+):
+    """Il controllo che deve diagnosticare i permessi non può morirci dentro.
+
+    Prima `_stato` chiedeva `percorso.exists()` fuori dal try, e quella
+    domanda solleva PermissionError su una directory non attraversabile: il
+    preflight finiva con un traceback invece che con un referto.
+    """
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=tmp_path / "a"))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.ERRORE
+    assert referto.pronto is False
+    assert "In esecuzione come" in controllo.rimedio
+
+
+def test_store_di_un_altro_utente_e_errore_non_falso_verde(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Il file lo crea chi lancia il preflight: dall'utente sbagliato è un falso verde.
+
+    Lanciato da root, il preflight crea lo store intestato a root; il servizio
+    poi non ci scrive, ma il preflight direbbe «ok» su una persistenza che non
+    funziona. Un falso verde è il guasto peggiore che un preflight possa
+    produrre, quindi la discrepanza di proprietario è un ERRORE.
+    """
+    from mcp_server import doctor as mod
+
+    stato = tmp_path / "stato"
+    # Il servizio dedotto è il proprietario della dir del log: lo si finge
+    # diverso da chi sta eseguendo, che è ciò che accade su una VM vera.
+    monkeypatch.setattr(mod, "_utente_di_servizio", lambda cfg: "un-altro-utente")
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=stato))
+
+    controllo = _controllo(referto, "proprietario dello store")
+    assert controllo.esito is Esito.ERRORE
+    assert referto.pronto is False
+    assert "non verranno persistiti" in controllo.messaggio

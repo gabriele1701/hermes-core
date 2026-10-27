@@ -364,3 +364,53 @@ def test_nota_persistente_dice_che_non_si_torna_indietro(audit: AuditLog, store)
     nota = NOTE_DURATA[OverrideScope.PERSISTENT]
     assert "non è annullabile da questa interfaccia" in nota
     assert "amministratore" in nota
+
+
+def test_directory_non_attraversabile_non_diventa_store_vuoto(tmp_path):
+    """``Path.exists()`` solleva invece di rispondere ``False``.
+
+    Su una ``state_dir`` con i permessi sbagliati il chiamante riceveva un
+    ``PermissionError`` grezzo al posto di :class:`OverrideStoreError`, e il
+    preflight — che è il posto da cui si diagnostica quel guasto — moriva con
+    un traceback.
+
+    Il guasto è provocato con un **ciclo di symlink** (``ELOOP``) invece che
+    con ``chmod 000``, perché i permessi non fermano root e un test che si
+    salta in CI non difende nulla.
+    """
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    store = OverrideStore(tmp_path / "a" / NOME_FILE)
+    with pytest.raises(OverrideStoreError, match="non ispezionabile"):
+        store.carica()
+
+
+def test_percorso_senza_directory_e_store_assente(tmp_path):
+    """ENOTDIR è una risposta vera: a quel percorso non c'è alcun file.
+
+    Diverso da «non lo so»: qui non c'è nulla da perdere, quindi non si fa
+    fallire l'avvio. Le scritture poi falliranno, e lo diranno.
+    """
+    finta = tmp_path / "stato"
+    finta.write_text("non sono una directory\n", encoding="utf-8")
+    assert OverrideStore.in_directory(finta).carica().tiers == {}
+
+
+def test_due_processi_concorrenti_non_declassano(audit: AuditLog, store: OverrideStore):
+    """Due connessioni che si innalzano senza vedersi: il max() le riconcilia.
+
+    È il caso che rende il tetto `2 righe per tool` vero in sequenza ma non
+    sotto concorrenza. Ciò che conta è che nessuna delle due possa far
+    scendere il risultato: una riga duplicata o più bassa è idempotente.
+    """
+    a = ToolRegistry(audit, store=store)
+    b = ToolRegistry(audit, store=store)  # avviato prima che A scrivesse
+    a.register(_spec())
+    b.register(_spec())
+
+    a.set_override("echo.ping", RiskTier.ROSSO)
+    b.set_override("echo.ping", RiskTier.GIALLO)  # B non ha visto il rosso di A
+
+    terzo = ToolRegistry(audit, store=store)
+    terzo.register(_spec())
+    assert terzo.effective_tier("echo.ping") is RiskTier.ROSSO
