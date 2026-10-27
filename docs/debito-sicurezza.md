@@ -23,6 +23,8 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | Lo stdin dei tool era il canale MCP del server | patch sic. 3 | `stdin=DEVNULL`. Trovato verificando il report, non era fra i suoi finding: un tool poteva leggere e consumare i byte del protocollo. |
 | HC-08 — `valida_nome_segreto` accettava un newline finale | patch sic. 4 | `fullmatch` invece di `match`: in `re` il `$` combacia anche prima di un `\n` finale. Si rifiuta, non si normalizza. |
 | HC-07 — provenienza nel log controllata dal client | patch sic. 5 | `correlation_id` generato dal server, quello del client registrato come `peer_correlation_id` e collegato da entrambi i lati. Etichetta onesta: «richiesto dal client MCP», non «override utente». |
+| Gli override di tier non sopravvivevano alla connessione | patch sic. 6a | Tre fonti e un solo `max()`: tier dichiarato (pavimento), `override_tier` in `[[tool]]`, store append-only in `state_dir`. Scrive **solo gli incrementi reali**, quindi ha un tetto strutturale di due righe per tool (`2 × tool × connessioni contemporanee` nel caso concorrente) e non va ruotato. `state_dir` assente o non scrivibile → innalzamento valido per la connessione, **dichiarato** in `override_scope` e registrato come `override_not_persisted`. |
+| Il `detail` diceva «in attesa di conferma dell'utente» | patch sic. 6a | Non c'era nessuna attesa: nessun canale di conferma è collegato. Un modello che legge «in attesa» conclude che qualcuno risponderà e riprova — o cerca un'altra via per lo stesso effetto. Ora il testo dice che il tool non è stato eseguito e che riprovare non cambia l'esito. Il flusso resta aperto qui sotto. |
 | HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che e' la protezione vera, e' documentato in `docs/dipendenze.md` e resta da generare. |
 
 ---
@@ -101,32 +103,39 @@ argomenti**, cioè all'ingresso dei primi tool reali in Milestone 1.
 
 ---
 
-## MEDIA — gli override di tier non sopravvivono alla connessione
+## MEDIA — il log d'audit cresce senza tetto e non è ruotabile
 
-**Dove:** `mcp_server/registry.py` (store in memoria), `mcp_server/server.py`
-(`OVERRIDE_SCOPE`).
+**Dove:** `mcp_server/audit.py`, `docs/setup-vm-hermes.md`.
 
-L'host avvia un processo server nuovo a ogni connessione, a ogni
-`/reload-mcp` e a ogni sessione, quindi un tool innalzato a Rosso torna al
-proprio tier dichiarato alla connessione successiva. Chi alza un tier dopo un
-incidente si aspetta il contrario, e il log continua a mostrare
-l'`override_set` anche quando non è più in vigore.
+Il log cresce di tre righe per invocazione e non ha né tetto né rotazione. Con
+`chattr +a` non è nemmeno ruotabile senza un `chattr -a` privilegiato, perché
+un file append-only non si può rinominare né troncare — che è esattamente la
+proprietà per cui lo abbiamo irrigidito.
 
-**Mitigazione in essere:** la durata è **dichiarata** e non lasciata
-presumere — `override_scope: "session"` nelle risposte di `raise_tool_tier` e
-`describe_tool`, `override_active` in quest'ultima, e la riga di log dice «vale
-per questa connessione». Un controllo che decade in silenzio è peggio di un
-controllo assente, perché chi legge crede che sia attivo.
+Il punto che morde prima non è il disco: è che un file molto grande rende
+lenta ogni operazione che lo rilegge, e `read_all` è usato in diagnostica.
 
-**Condizione di chiusura:** due strade, non esclusive. Un campo
-`override_tier` in `[[tool]]`, versionato e applicato all'avvio con la stessa
-regola `max()`, per gli innalzamenti che devono restare. E uno store
-append-only a runtime — per esempio `/var/lib/hermes/overrides.jsonl` con
-`chattr +a`, ricaricato all'avvio, con il tier effettivo pari al `max()` di
-tutte le righe, così che cancellarne una non possa abbassare nulla.
+**Come ci siamo arrivati.** La voce nasce da una domanda su un'altra cosa.
+Avevo proposto di rimandare la rotazione dello *store degli override*,
+trattandola come lavoro di progettazione; alla domanda se fosse una falla
+effettiva o un accorgimento, è emerso che per gli override il problema **si
+elimina invece di gestirlo** — lo store registra solo gli incrementi reali, e
+un tier può salire al massimo due volte per tool, quindi ha un tetto
+strutturale. Ragionando su quel confronto è diventato evidente che la crescita
+illimitata resta vera, e non registrata, per il log d'audit: lì ogni
+invocazione scrive, comprese le richieste ripetute che lo store non memorizza.
 
-Da affrontare **insieme al limite di concorrenza**: richiedono lo stesso stato
-condiviso fra processi, e inventarne due meccanismi separati sarebbe un errore.
+**Perché non si risolve con una rotazione locale.** Ruotare il log in locale
+significa poter perdere righe, cioè perdere la traccia che il log esiste per
+conservare. Il problema e la soluzione sono gli stessi della tamper-evidence:
+serve una **copia fuori dall'host**.
+
+**Condizione di chiusura:** spedizione a un collector esterno (già prevista in
+`docs/setup-vm-hermes.md`). Con la copia remota al sicuro, la rotazione della
+copia locale diventa un'operazione ordinaria e non una perdita di prove.
+
+**Mitigazione intanto:** sorvegliare lo spazio e, quando serve, ruotare a mano
+con `chattr -a`, copia, troncamento, `chattr +a` — annotando l'intervento.
 
 ---
 
@@ -139,17 +148,22 @@ server, e Hermes avvia **un processo per connessione**. Contiene quindi un
 modello in ciclo dentro una sessione, non la somma di più sessioni o
 connessioni aperte in parallelo.
 
-**Perché rimandata:** un limite complessivo richiede uno stato condiviso fra
-processi — un file di lock o un contatore in `/var/lib/hermes` — e lo stesso
-problema si presenta per gli override durevoli. Conviene risolverli insieme,
-con un solo meccanismo di stato condiviso, invece di inventarne due.
-
 **Mitigazione:** il limite per processo copre il caso realistico di oggi, cioè
 un agente che invoca in ciclo nella sessione in cui sta lavorando. Ogni
 rifiuto è tracciato, quindi una saturazione si vede nel log.
 
-**Condizione di chiusura:** insieme alla persistenza degli override, con lo
-stesso store append-only.
+**Condizione di chiusura:** `server.state_dir` esiste ora (introdotta con lo
+store degli override) ed è la directory in cui mettere i file di lock dei
+posti. Lo *store* non si riusa: gli override sono un registro append-only di
+fatti avvenuti, i posti sono un conteggio di risorse occupate che devono
+liberarsi anche se il processo muore, e sono due meccanismi diversi — un
+contatore su file append-only non saprebbe mai che un processo è sparito.
+Serve un lock per posto (`flock` su `state_dir/slots/N`), che il kernel
+rilascia alla morte del processo. È il passo 6b.
+
+**Nota sulla mitigazione precedente:** questa voce diceva di risolverla
+«insieme agli override, con lo stesso store». Era vero per la *directory*,
+non per il meccanismo: condividono dove stanno, non come funzionano.
 
 ---
 
@@ -166,6 +180,16 @@ attraverso il server: l'invocazione ritorna `needs_confirmation` con la
 chiamata in `pending`, e lì si ferma. È fail-closed, quindi il difetto è di
 funzionalità e non di sicurezza — ma va chiuso perché altrimenti tutto ciò che
 non è Verde resta inutilizzabile.
+
+**Corretto nel frattempo (patch sic. 6a):** il `detail` della chiamata diceva
+«in attesa di conferma dell'utente», che non era vero — non c'è nessuna
+attesa, perché non esiste un canale su cui la conferma possa arrivare. La
+differenza non è di stile: un modello che legge «in attesa» conclude che
+qualcuno risponderà, e il comportamento ragionevole diventa riprovare, o
+cercare un'altra strada per ottenere lo stesso effetto, che è esattamente ciò
+che la conferma doveva impedire. Ora il testo dice che il tool **non** è stato
+eseguito, che riprovare non cambia l'esito e che serve un'autorizzazione fuori
+banda. Il flusso resta da collegare.
 
 **Condizione di chiusura:** collegare il meccanismo di *elicitation* di MCP,
 con cui il server chiede all'host di interpellare l'utente e riceve la
@@ -213,6 +237,61 @@ una manomissione locale.
 **Da rivalutare se:** il log dovrà reggere da solo come prova davanti a
 terzi. In quel caso la strada è un digest periodico firmato con chiave
 esterna, che non tocca il percorso di scrittura.
+
+---
+
+## ACCETTATA — un innalzamento è irreversibile dall'interfaccia, e può bloccare la toolbox
+
+**Dove:** `mcp_server/overrides.py`, `mcp_server/registry.py` (`set_override`).
+
+Il tier può solo salire, e da quando lo store è persistente **resta salito**.
+Un tool portato a Rosso richiede conferma, e nessun canale di conferma è
+collegato (voce sopra): quel tool non è più invocabile, e non torna da solo.
+
+Prima di questa patch esisteva una valvola di sfogo accidentale: gli override
+morivano con la connessione, quindi un innalzamento sbagliato si curava
+riconnettendosi. Persistendoli l'abbiamo tolta, e va detto apertamente —
+**è una conseguenza della patch, non una proprietà che c'era già.**
+
+**Lo scenario che ne deriva:** `raise_tool_tier` lo chiama il modello. Un
+modello in ciclo, o spinto da un'iniezione nel contesto, può innalzare a Rosso
+ogni tool dell'agente e rendere la toolbox inutilizzabile in modo permanente,
+senza che nessun controllo lo fermi — perché dal punto di vista del registro
+sta chiedendo *più* severità, non meno.
+
+**Perché si accetta.** È un attacco alla disponibilità, non all'integrità, e
+la direzione del guasto è quella giusta: il risultato è una toolbox ferma, non
+una toolbox che esegue cose rischiose con controlli allentati. Fra i due, il
+primo è recuperabile in un minuto da chi ha accesso alla macchina; il secondo
+no. Dare al modello un modo di abbassare un tier per uscire da questa
+situazione annullerebbe l'intera regola.
+
+**Mitigazioni in essere:**
+
+* ogni innalzamento è nel log d'audit con `agent` e `correlation_id`, quindi
+  si vede *quando* è successo e dentro quale catena;
+* lo store contiene gli stessi dati, in poche righe leggibili a occhio;
+* il tier dichiarato resta un pavimento: rimuovere una riga non può portare un
+  tool **sotto** ciò che l'integratore ha dichiarato.
+
+**Come si torna indietro** (richiede privilegi sulla macchina, di proposito —
+la procedura è in `docs/setup-vm-hermes.md`):
+
+```sh
+sudo chattr -a /var/lib/hermes/state/overrides.jsonl   # solo se irrigidito
+sudo -u hermes grep -v '"tool_id": "<tool>"' \
+     /var/lib/hermes/state/overrides.jsonl > /tmp/o.new
+sudo -u hermes cp /tmp/o.new /var/lib/hermes/state/overrides.jsonl
+sudo chattr +a /var/lib/hermes/state/overrides.jsonl   # se lo si vuole di nuovo
+```
+
+**Deliberatamente non fatto:** un sottocomando che rimuova un override. Sarebbe
+un declassamento con un'interfaccia comoda, e una volta che esiste finisce per
+essere chiamato da qualcosa di automatico. La scomodità qui è il controllo.
+
+**Da rivalutare se:** i tool diventeranno molti e l'innalzamento accidentale
+sarà frequente, oppure quando il canale di conferma sarà collegato — a quel
+punto un tool Rosso resta usabile, e l'innalzamento smette di essere un blocco.
 
 ---
 

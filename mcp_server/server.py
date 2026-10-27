@@ -73,6 +73,7 @@ from mcp_server.executor import (
     IntegrityMismatch,
     ToolExecutor,
 )
+from mcp_server.overrides import OverrideScope, OverrideStore
 from mcp_server.registry import (
     InvocationRefused,
     OverrideRefused,
@@ -84,21 +85,57 @@ from mcp_server.vault import StubBackend, Vault, VaultBackend
 
 NOME_SERVER = "hermes-core"
 
-#: Durata di un override di tier impostato a runtime. L'host avvia un
-#: processo server per connessione, quindi lo store in memoria del registro
-#: vive quanto la connessione. Dichiarato nelle risposte perché un
-#: controllo che decade in silenzio è peggio di un controllo assente: chi
-#: legge il log vede l'override e crede che sia ancora in vigore.
-OVERRIDE_SCOPE = "session"
 VERSIONE = "0.0.1"
+
+#: Cosa dire, per ciascuna durata, a chi ha appena innalzato un tier. La
+#: durata va **dichiarata**, non lasciata presumere: l'host avvia un processo
+#: server nuovo a ogni connessione, e un innalzamento non persistito sparisce
+#: senza che nulla lo segnali. Chi alza un tier dopo un incidente si aspetta
+#: il contrario.
+NOTE_DURATA = {
+    OverrideScope.CONFIG: (
+        "l'innalzamento è scritto nella configurazione versionata: resta fino "
+        "a quando non viene rimosso da lì, cosa che richiede una modifica al "
+        "repository"
+    ),
+    OverrideScope.PERSISTENT: (
+        "l'innalzamento è registrato nello store ed è stato scritto su disco: "
+        "resta valido anche alle prossime connessioni, e non è annullabile da "
+        "questa interfaccia — per riportarlo giù serve un intervento manuale "
+        "di un amministratore sulla macchina"
+    ),
+    OverrideScope.SESSION: (
+        "l'innalzamento vale solo per questa connessione: lo store degli "
+        "override non è configurato o non è scrivibile, quindi alla prossima "
+        "connessione il tool torna al tier dichiarato"
+    ),
+    OverrideScope.NONE: "nessun override attivo: vale il tier dichiarato",
+}
+
+#: Cosa si registra e si restituisce quando la policy richiede una conferma.
+#: Non "in attesa": non c'è nulla in attesa, perché nessun canale di conferma
+#: è collegato. Vedere :meth:`HermesServer._risultato_in_attesa`.
+MOTIVO_CONFERMA_NON_COLLEGATA = (
+    "conferma richiesta e non fornibile: nessun canale di conferma è "
+    "collegato (l'elicitation MCP non è implementata in questa milestone). "
+    "Il tool NON è stato eseguito e non verrà eseguito riprovando: serve "
+    "un'autorizzazione fuori banda."
+)
 
 _ISTRUZIONI = """\
 Toolbox difensiva Hermes. I tool elencati appartengono all'agente di questa
 istanza e operano solo su host di proprietà o espressamente autorizzati.
 
 Ogni tool porta un risk tier (verde/giallo/rosso) e un flag sui dati
-personali, da cui derivano le conferme richieste. Un tool che richiede
-conferma non viene eseguito: l'invocazione ritorna needs_confirmation.
+personali, da cui derivano le conferme richieste.
+
+Un tool che richiede conferma NON viene eseguito: l'invocazione ritorna
+needs_confirmation. In questa milestone non esiste alcun canale su cui una
+conferma possa arrivare, quindi riprovare non cambia l'esito: va chiesta
+un'autorizzazione a una persona, fuori da questa interfaccia.
+
+Il tier di un tool può essere innalzato con raise_tool_tier, mai abbassato.
+La risposta dichiara in override_scope quanto dura l'innalzamento.
 """
 
 
@@ -113,7 +150,12 @@ class HermesServer:
     def __init__(self, config: ServerConfig, *, backend: VaultBackend | None = None) -> None:
         self._config = config
         self._audit = AuditLog(config.log_path)
-        self._registry = ToolRegistry(self._audit)
+        self._store = (
+            OverrideStore.in_directory(config.state_dir)
+            if config.state_dir is not None
+            else None
+        )
+        self._registry = ToolRegistry(self._audit, store=self._store)
         self._vault = Vault(
             backend or _costruisci_backend(config),
             self._audit,
@@ -207,7 +249,12 @@ class HermesServer:
             name="raise_tool_tier",
             description=(
                 "Innalza il risk tier di un tool. Il tier può solo salire: "
-                "ogni declassamento viene rifiutato."
+                "ogni declassamento viene rifiutato, e l'innalzamento NON è "
+                "annullabile da questa interfaccia. Se l'innalzamento è "
+                "persistente, portare un tool a 'rosso' lo rende non "
+                "invocabile finché un amministratore non interviene sulla "
+                "macchina. Da usare quando serve più severità, non per "
+                "provare."
             ),
         )
         return mcp
@@ -364,20 +411,18 @@ class HermesServer:
         except OverrideRefused as err:
             return {"ok": False, "error": str(err)}
 
+        durata = self._registry.override_scope(tool_id)
         return {
             "ok": True,
             "tool_id": tool_id,
             "effective_tier": risultante.value,
             "declared_tier": self._registry.spec(tool_id).default_tier.value,
-            # La durata va dichiarata, non lasciata presumere: l'host avvia un
-            # processo server nuovo a ogni connessione, quindi l'innalzamento
-            # non sopravvive. Chi alza un tier dopo un incidente si aspetta il
-            # contrario.
-            "override_scope": OVERRIDE_SCOPE,
-            "override_note": (
-                "l'innalzamento vale per questa connessione; a una nuova "
-                "connessione il tool torna al tier dichiarato"
-            ),
+            # La durata è quella reale, non una costante: dipende da dove
+            # l'innalzamento è finito, e una scrittura su disco può non essere
+            # riuscita. Dichiararla «persistente» in quel caso sarebbe la
+            # bugia peggiore delle due, perché induce a non ricontrollare.
+            "override_scope": durata.value,
+            "override_note": NOTE_DURATA[durata],
         }
 
     # -- riassunti e risultati ---------------------------------------------- #
@@ -404,9 +449,11 @@ class HermesServer:
             base["shares_script_with"] = list(
                 self._registry.tools_sharing_exec(tool_id)
             )
-            attivo = tool_id in self._registry.overrides
+            durata = self._registry.override_scope(tool_id)
+            attivo = durata is not OverrideScope.NONE
             base["override_active"] = attivo
-            base["override_scope"] = OVERRIDE_SCOPE if attivo else None
+            base["override_scope"] = durata.value if attivo else None
+            base["override_note"] = NOTE_DURATA[durata] if attivo else None
         return base
 
     def _log_risultato(self, risultato: AgentResult) -> None:
@@ -433,7 +480,20 @@ class HermesServer:
     def _risultato_in_attesa(
         self, correlation_id: uuid.UUID, tool_id: str, target: str | None, motivo: str
     ) -> dict[str, Any]:
-        """Risultato di un tool che richiede conferma: sospeso, non eseguito."""
+        """Risultato di un tool che richiede conferma: **non** eseguito.
+
+        Il ``detail`` diceva "in attesa di conferma dell'utente", e non è
+        vero: non c'è nessuna attesa, perché non esiste un canale su cui la
+        conferma possa arrivare. Il canale reale è l'elicitation di MCP, che
+        non è ancora collegata.
+
+        La differenza non è di stile. Un modello che legge "in attesa"
+        conclude che qualcuno gli risponderà, e il comportamento ragionevole
+        diventa riprovare — o peggio, cercare un'altra via per ottenere lo
+        stesso effetto, che è esattamente ciò che la conferma doveva
+        impedire. Un modello che legge "nessun canale collegato" sa che deve
+        chiedere a una persona fuori banda.
+        """
         risultato = AgentResult(
             correlation_id=correlation_id,
             agent=self._config.agent,
@@ -446,7 +506,7 @@ class HermesServer:
                     tier_effective=self._registry.effective_tier(tool_id),
                     authorized_by=AuthorizedBy.NONE,
                     outcome=CallOutcome.PENDING,
-                    detail="in attesa di conferma dell'utente",
+                    detail=MOTIVO_CONFERMA_NON_COLLEGATA,
                 )
             ],
         )

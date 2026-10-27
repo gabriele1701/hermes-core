@@ -41,7 +41,9 @@ def scrivi_config(
     backend: str = "stub",
     senza_tool: bool = False,
     agent: str = "echo_dummy",
+    state_dir: Path | str | None = None,
 ) -> Path:
+    riga_stato = f'state_dir = "{state_dir}"\n' if state_dir is not None else ""
     sha = sha if sha is not None else sha256_file(radice / SCRIPT)
     blocco_tool = (
         ""
@@ -67,6 +69,7 @@ def scrivi_config(
             log_path = "{tmp_path}/audit.jsonl"
             container_available = false
 
+            {riga_stato}
             [vault]
             backend = "{backend}"
             stub_secrets = ["ssh/lab-kali"]
@@ -574,3 +577,209 @@ def test_wrapper_segnala_config_assente(radice: Path, tmp_path: Path):
     # relativo a una directory che l'operatore potrebbe non avere.
     assert "hermes.example.toml" in esito.stderr
     assert "/opt" in esito.stderr or str(radice) in esito.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Store degli override: due esiti negativi diversi per due cose diverse
+# --------------------------------------------------------------------------- #
+
+
+def test_store_non_configurato_e_avviso_non_errore(tmp_path: Path, radice: Path):
+    """Manca una proprietà, non un pezzo: il server funziona e lo dichiara."""
+    referto = esegui(scrivi_config(tmp_path, radice))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.AVVISO
+    assert referto.pronto is True
+    assert "state_dir" in controllo.messaggio
+    assert "install -d" in controllo.rimedio
+
+
+def test_store_configurato_e_scrivibile(tmp_path: Path, radice: Path):
+    referto = esegui(
+        scrivi_config(tmp_path, radice, state_dir=tmp_path / "stato")
+    )
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.OK
+    assert referto.pronto is True
+
+
+def test_store_configurato_ma_non_utilizzabile_e_errore(
+    tmp_path: Path, radice: Path
+):
+    """Qui l'operatore ha chiesto la persistenza e non la sta ottenendo.
+
+    È il caso peggiore dei due — un controllo che si crede di avere e non c'è —
+    ed è la ragione per cui questo preflight esiste.
+    """
+    finta = tmp_path / "stato"
+    finta.write_text("non sono una directory\n", encoding="utf-8")
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=finta))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.ERRORE
+    assert referto.pronto is False
+
+
+def test_store_illeggibile_e_errore(tmp_path: Path, radice: Path):
+    stato = tmp_path / "stato"
+    stato.mkdir()
+    (stato / "overrides.jsonl").mkdir()  # esiste ma non si apre in lettura
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=stato))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.ERRORE
+    assert "non leggibile" in controllo.messaggio
+
+
+def test_righe_scartate_segnalate(tmp_path: Path, radice: Path):
+    """Ogni riga scartata può essere un innalzamento perduto."""
+    stato = tmp_path / "stato"
+    stato.mkdir()
+    (stato / "overrides.jsonl").write_text("{rotta\n", encoding="utf-8")
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=stato))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.AVVISO
+    assert "innalzamento perduto" in controllo.messaggio
+
+
+def test_store_dentro_il_repo_segnalato(tmp_path: Path, radice: Path):
+    """Uno stato di sicurezza nell'albero di lavoro sparisce a un checkout."""
+    referto = esegui(
+        scrivi_config(tmp_path, radice, state_dir=radice / "var-stato-test")
+    )
+    try:
+        controllo = _controllo(referto, "store fuori dal repo")
+        assert controllo.esito is Esito.AVVISO
+    finally:
+        percorso = radice / "var-stato-test"
+        if percorso.exists():
+            for figlio in percorso.iterdir():
+                figlio.unlink()
+            percorso.rmdir()
+
+
+# --------------------------------------------------------------------------- #
+# Perché un percorso non è scrivibile: la causa giusta, non una plausibile
+# --------------------------------------------------------------------------- #
+
+
+def test_log_non_scrivibile_non_accusa_il_percorso_relativo(
+    tmp_path: Path, radice: Path
+):
+    """Il rimedio nominava **sempre** la trappola del percorso relativo.
+
+    Su un percorso assoluto e corretto, bloccato da un problema di
+    proprietario, quel testo manda a cercare dalla parte sbagliata. Un
+    diagnostico che indica una causa plausibile ma falsa è peggio di uno che
+    dice solo «non riesco», perché viene creduto.
+    """
+    blocco = tmp_path / "non-sono-una-directory"
+    blocco.write_text("x\n", encoding="utf-8")
+    percorso = scrivi_config(tmp_path, radice)
+    percorso.write_text(
+        percorso.read_text(encoding="utf-8").replace(
+            f'log_path = "{tmp_path}/audit.jsonl"',
+            f'log_path = "{blocco}/audit.jsonl"',
+        ),
+        encoding="utf-8",
+    )
+
+    controllo = _controllo(esegui(percorso), "log d'audit")
+    assert controllo.esito is Esito.ERRORE
+    assert "relativo" not in controllo.rimedio
+    # I fatti che servono per capire: chi esegue e cosa c'è sul percorso.
+    assert "In esecuzione come" in controllo.rimedio
+    assert "uid" in controllo.rimedio
+    assert str(blocco) in controllo.rimedio
+
+
+def test_log_dentro_il_repo_nomina_la_trappola(tmp_path: Path, radice: Path):
+    """La trappola si nomina quando il sintomo c'è davvero."""
+    from mcp_server.config import load_config
+    from mcp_server.doctor import _perche_non_scrivibile
+
+    cfg = load_config(scrivi_config(tmp_path, radice))
+    testo = _perche_non_scrivibile(radice / "logs" / "audit.jsonl", cfg)
+    assert "DENTRO repo_root" in testo
+
+
+def test_stat_non_solleva_su_percorso_non_ispezionabile(tmp_path: Path):
+    """``Path.exists()`` solleva PermissionError su una dir non attraversabile.
+
+    È il guasto che questo codice deve descrivere, quindi non può usarlo.
+    Trovato riproducendo il caso di Gabriele invece di immaginarlo.
+    """
+    from mcp_server.doctor import _descrivi, _stat
+
+    blocco = tmp_path / "file-non-dir"
+    blocco.write_text("x\n", encoding="utf-8")
+    assert _stat(blocco / "sotto" / "audit.jsonl") is None
+    assert "non ispezionabile" in _descrivi(blocco / "sotto" / "audit.jsonl")
+
+
+def test_utente_di_servizio_dedotto_dal_proprietario_del_log(
+    tmp_path: Path, radice: Path
+):
+    """I rimedi dicevano `$(id -un)`: giusti per la persona sbagliata.
+
+    Su una VM fatta come documentata il server gira come utente di servizio
+    via comando forzato SSH, mentre il preflight lo lancia a mano
+    l'amministratore. Il proprietario della directory del log è il testimone
+    più affidabile di chi sia il primo.
+    """
+    import os as _os
+
+    from mcp_server.config import load_config
+    from mcp_server.doctor import _utente, _utente_di_servizio
+
+    cfg = load_config(scrivi_config(tmp_path, radice))
+    atteso = _utente(_os.stat(cfg.log_path.parent).st_uid)
+    assert _utente_di_servizio(cfg) == atteso
+
+
+def test_rimedio_store_nomina_l_utente_di_servizio(tmp_path: Path, radice: Path):
+    controllo = _controllo(
+        esegui(scrivi_config(tmp_path, radice)), "store degli override"
+    )
+    assert "$(id -un)" not in controllo.rimedio
+    assert "non chi lancia il preflight" in controllo.rimedio
+
+
+def test_store_non_ispezionabile_non_uccide_il_preflight(
+    tmp_path: Path, radice: Path
+):
+    """Il controllo che deve diagnosticare i permessi non può morirci dentro.
+
+    Prima `_stato` chiedeva `percorso.exists()` fuori dal try, e quella
+    domanda solleva PermissionError su una directory non attraversabile: il
+    preflight finiva con un traceback invece che con un referto.
+    """
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=tmp_path / "a"))
+    controllo = _controllo(referto, "store degli override")
+    assert controllo.esito is Esito.ERRORE
+    assert referto.pronto is False
+    assert "In esecuzione come" in controllo.rimedio
+
+
+def test_store_di_un_altro_utente_e_errore_non_falso_verde(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Il file lo crea chi lancia il preflight: dall'utente sbagliato è un falso verde.
+
+    Lanciato da root, il preflight crea lo store intestato a root; il servizio
+    poi non ci scrive, ma il preflight direbbe «ok» su una persistenza che non
+    funziona. Un falso verde è il guasto peggiore che un preflight possa
+    produrre, quindi la discrepanza di proprietario è un ERRORE.
+    """
+    from mcp_server import doctor as mod
+
+    stato = tmp_path / "stato"
+    # Il servizio dedotto è il proprietario della dir del log: lo si finge
+    # diverso da chi sta eseguendo, che è ciò che accade su una VM vera.
+    monkeypatch.setattr(mod, "_utente_di_servizio", lambda cfg: "un-altro-utente")
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=stato))
+
+    controllo = _controllo(referto, "proprietario dello store")
+    assert controllo.esito is Esito.ERRORE
+    assert referto.pronto is False
+    assert "non verranno persistiti" in controllo.messaggio

@@ -37,6 +37,34 @@ repo_root = ".."
 # Da proteggere poi con `sudo chattr +a`, dopo il primo avvio.
 log_path = "../logs/hermes-audit.jsonl"
 
+# Directory dello stato che deve sopravvivere alla connessione: oggi lo store
+# append-only degli innalzamenti di tier (overrides.jsonl).
+#
+# Hermes avvia un processo server NUOVO a ogni connessione, a ogni
+# /reload-mcp e a ogni sessione. Senza questa directory un tool innalzato a
+# "rosso" torna al proprio tier dichiarato poco dopo, e nessuno lo segnala:
+# chi alza un tier dopo un incidente si aspetta il contrario.
+#
+# Se la riga è assente, il server parte comunque e gli innalzamenti valgono
+# per la connessione — ma lo DICHIARA, nel campo override_scope delle
+# risposte e nel log. Il preflight lo segnala come avviso.
+#
+# DA SAPERE PRIMA DI USARLA: con la persistenza attiva, un tier alzato RESTA
+# alzato. Un tool portato a "rosso" richiede conferma, e finché il canale di
+# conferma non è collegato quel tool non è più invocabile e non torna da solo.
+# Si scende solo rimuovendo le righe dallo store, a mano e da privilegiato:
+# la procedura è in docs/setup-vm-hermes.md. È voluto — un declassamento è un
+# atto di chi amministra, non una chiamata che il modello possa fare.
+#
+# ATTENZIONE AL PERCORSO, come per log_path: un valore relativo è risolto
+# rispetto alla directory di QUESTO file e finirebbe dentro il repo, dove un
+# checkout o una pulizia lo cancellerebbero. Uno stato di sicurezza non va
+# nell'albero di lavoro. Da creare prima:
+#
+#     sudo install -d -o hermes -g hermes -m 700 /var/lib/hermes
+#
+# state_dir = "/var/lib/hermes"
+
 # Disponibilità del runtime isolato. A false, i tool che dichiarano
 # requires_container vengono NEGATI, non eseguiti sull'host.
 container_available = false
@@ -94,6 +122,13 @@ stub_secrets = ["ssh/lab-kali"]
 # default_tier è obbligatorio: la sua assenza fa fallire la registrazione,
 # non ricade su un default permissivo. Il tier non è modificabile dopo la
 # registrazione; un override può solo innalzarlo.
+#
+# override_tier (opzionale) innalza il tier in modo VERSIONATO: resta scritto
+# qui, si vede in review e sopravvive a tutto. È la via da preferire per un
+# innalzamento che deve durare, mentre raise_tool_tier via MCP serve a reagire
+# subito. Può solo innalzare: un valore pari o inferiore a default_tier è
+# inerte e viene registrato nel log come refuso; un valore inventato fa
+# FALLIRE l'avvio, perché chi l'ha scritto crede di aver alzato un tier.
 #
 # exec_sha256 deve corrispondere allo SHA-256 effettivo dello script: viene
 # verificato prima di OGNI esecuzione. Per calcolarlo:

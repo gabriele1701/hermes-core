@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import stat
 import subprocess
 import sys
@@ -28,6 +29,8 @@ from pathlib import Path
 from mcp_server.config import ConfigError, ServerConfig, load_config
 from mcp_server.contracts import RiskTier, ToolSpec
 from mcp_server.executor import risolvi_script, sha256_file
+from mcp_server.overrides import NOME_FILE as NOME_FILE_OVERRIDE
+from mcp_server.overrides import OverrideStore, OverrideStoreError
 from mcp_server.tiers import derive_policy_for
 
 _TIMEOUT_HANDSHAKE = 30
@@ -113,7 +116,9 @@ def _radice(referto: Referto, cfg: ServerConfig) -> None:
     referto.aggiungi("repo_root", Esito.OK, str(cfg.repo_root))
 
 
-def _log(referto: Referto, cfg: ServerConfig) -> None:
+def _log(
+    referto: Referto, cfg: ServerConfig, percorso_config: Path | None = None
+) -> None:
     percorso = cfg.log_path
     try:
         percorso.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -124,12 +129,7 @@ def _log(referto: Referto, cfg: ServerConfig) -> None:
             "log d'audit",
             Esito.ERRORE,
             f"non scrivibile: {err}",
-            "Verificare permessi e percorso di server.log_path. "
-            "Attenzione: un percorso **relativo** viene risolto rispetto alla "
-            "cartella della configurazione, quindi\n"
-            "             'var/log/...' finisce dentro il repo mentre "
-            "'/var/log/...' è assoluto.\n"
-            f"             Percorso risolto: {percorso}",
+            _perche_non_scrivibile(percorso, cfg, percorso_config),
         )
         return
 
@@ -155,8 +155,166 @@ def _log(referto: Referto, cfg: ServerConfig) -> None:
         referto.aggiungi("log append-only", Esito.OK, "attributo +a impostato")
 
 
-def _append_only(percorso: Path) -> bool:
-    """Legge l'attributo append-only con ``lsattr``, se disponibile."""
+def _stato(
+    referto: Referto, cfg: ServerConfig, percorso_config: Path | None = None
+) -> None:
+    """Verifica lo store che fa sopravvivere gli innalzamenti di tier.
+
+    Due esiti negativi diversi, per due cose diverse:
+
+    * ``state_dir`` **non configurata** è un AVVISO. Il server funziona, e il
+      comportamento — innalzamenti validi per la connessione — è quello di
+      sempre e viene dichiarato nelle risposte. Manca una proprietà, non un
+      pezzo.
+    * ``state_dir`` configurata e **non utilizzabile** è un ERRORE. Qui
+      l'operatore ha chiesto la persistenza e non la sta ottenendo: è un
+      controllo che si crede di avere e non c'è, che è il caso peggiore dei
+      due e la ragione per cui questo preflight esiste.
+    """
+    if cfg.state_dir is None:
+        servizio = _utente_di_servizio(cfg) or "<utente-di-servizio>"
+        referto.aggiungi(
+            "store degli override",
+            Esito.AVVISO,
+            "server.state_dir non configurata: gli innalzamenti di tier "
+            "valgono solo per la connessione",
+            f"Per renderli persistenti (l'utente dev'essere quello che esegue "
+            f"il SERVER, non chi lancia il preflight):\n"
+            f"             sudo install -d -o {servizio} -g {servizio} -m 700 "
+            f"/var/lib/hermes/state\n"
+            f"             poi in [server]: "
+            f"state_dir = \"/var/lib/hermes/state\"\n"
+            f"             Attenzione: un percorso relativo viene risolto "
+            f"rispetto alla cartella della configurazione, quindi finirebbe "
+            f"dentro il repo.",
+        )
+        return
+
+    percorso = cfg.state_dir / NOME_FILE_OVERRIDE
+
+    # Illeggibile non è vuoto: se il file c'è e non si apre, il server non
+    # parte di proposito, perché potrebbe contenere innalzamenti da applicare.
+    # Si prova a caricarlo sempre, senza chiedere prima se esista: la domanda
+    # «esiste?» è a sua volta rispondibile solo se la directory è
+    # attraversabile, e su una state_dir con i permessi sbagliati morirebbe
+    # qui — proprio nel controllo che dovrebbe diagnosticarla.
+    try:
+        OverrideStore(percorso).carica()
+    except OverrideStoreError as err:
+        referto.aggiungi(
+            "store degli override",
+            Esito.ERRORE,
+            str(err),
+            f"Il server non parte finché lo store esiste e non è leggibile.\n"
+            "             " + _perche_non_scrivibile(percorso, cfg, percorso_config),
+        )
+        return
+    except OSError as err:  # pragma: no cover - rete di sicurezza
+        referto.aggiungi(
+            "store degli override",
+            Esito.ERRORE,
+            f"non ispezionabile: {err}",
+            "             " + _perche_non_scrivibile(percorso, cfg, percorso_config),
+        )
+        return
+
+    try:
+        cfg.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(percorso, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        os.close(fd)
+    except OSError as err:
+        referto.aggiungi(
+            "store degli override",
+            Esito.ERRORE,
+            f"configurata ma non scrivibile: {err}",
+            f"sudo install -d -o {_utente_di_servizio(cfg) or '<utente-di-servizio>'} "
+            f"-g {_utente_di_servizio(cfg) or '<utente-di-servizio>'} -m 700 "
+            f"{cfg.state_dir}\n"
+            "             " + _perche_non_scrivibile(percorso, cfg, percorso_config),
+        )
+        return
+
+    try:
+        dentro = cfg.state_dir.resolve().is_relative_to(cfg.repo_root.resolve())
+    except (OSError, ValueError):  # pragma: no cover
+        dentro = False
+    if dentro:
+        referto.aggiungi(
+            "store fuori dal repo",
+            Esito.AVVISO,
+            f"state_dir sta dentro repo_root: {cfg.state_dir}",
+            "Uno stato di sicurezza dentro l'albero di lavoro sparisce a un "
+            "checkout o a una pulizia, e un innalzamento di tier perso non "
+            "lo segnala nessuno. Spostarlo fuori (es. /var/lib/hermes).",
+        )
+
+    try:
+        esito = OverrideStore(percorso).carica()
+        st = percorso.stat()
+    except (OverrideStoreError, OSError) as err:  # pragma: no cover
+        referto.aggiungi(
+            "store degli override",
+            Esito.ERRORE,
+            f"creato ma non rileggibile: {err}",
+            "             " + _perche_non_scrivibile(percorso, cfg, percorso_config),
+        )
+        return
+
+    modo = stat.S_IMODE(st.st_mode)
+    proprietario = _utente(st.st_uid)
+    servizio = _utente_di_servizio(cfg)
+    if servizio is not None and proprietario != servizio:
+        # Il file viene creato da chi lancia il preflight. Lanciato dall'utente
+        # sbagliato — da root, tipicamente — lo crea intestato a lui, e il
+        # servizio poi non ci scrive: il preflight direbbe «ok» su una
+        # persistenza che non funziona. Un falso verde è il guasto peggiore
+        # che un preflight possa produrre.
+        referto.aggiungi(
+            "proprietario dello store",
+            Esito.ERRORE,
+            f"appartiene a {proprietario}, ma il server gira come {servizio}: "
+            f"gli innalzamenti non verranno persistiti",
+            f"sudo chattr -a {percorso} 2>/dev/null; "
+            f"sudo chown {servizio}: {percorso}\n"
+            f"             Poi rilanciare il preflight come {servizio}, non "
+            f"come root: è l'esecuzione dall'utente sbagliato ad aver creato "
+            f"il file così.",
+        )
+
+    if modo & 0o077:
+        referto.aggiungi(
+            "permessi dello store",
+            Esito.AVVISO,
+            f"permessi {modo:04o}: leggibile da altri utenti",
+            f"chmod 600 {percorso}",
+        )
+
+    if esito.scartate:
+        referto.aggiungi(
+            "store degli override",
+            Esito.AVVISO,
+            f"{esito.scartate} righe illeggibili su {esito.righe}: ciascuna "
+            f"potrebbe essere un innalzamento perduto",
+            f"Ispezionare {percorso} e ripristinare a mano i tier che "
+            f"risultassero mancanti con raise_tool_tier.",
+        )
+    else:
+        referto.aggiungi(
+            "store degli override",
+            Esito.OK,
+            f"{percorso}: {esito.righe} righe, "
+            f"{len(esito.tiers)} tool con innalzamento persistente "
+            f"(permessi {modo:04o})",
+        )
+
+
+def _attributi(percorso: Path) -> str | None:
+    """Flag di ``lsattr -d``, o ``None`` se non si riescono a leggere.
+
+    ``None`` significa «non lo so» — ``lsattr`` assente, filesystem che non li
+    supporta, permessi — e non «nessun attributo». Chi legge deve poter
+    distinguere le due cose.
+    """
     try:
         esito = subprocess.run(
             ["lsattr", "-d", str(percorso)],
@@ -166,10 +324,165 @@ def _append_only(percorso: Path) -> bool:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    if esito.returncode != 0:
-        return False
-    return "a" in esito.stdout.split()[0] if esito.stdout.split() else False
+        return None
+    if esito.returncode != 0 or not esito.stdout.split():
+        return None
+    return esito.stdout.split()[0]
+
+
+def _append_only(percorso: Path) -> bool:
+    """Se il percorso ha l'attributo append-only."""
+    flag = _attributi(percorso)
+    return flag is not None and "a" in flag
+
+
+def _descrivi(percorso: Path) -> str:
+    """Proprietario, permessi e attributi di un percorso, in una riga.
+
+    Non solleva mai: è un aiuto alla diagnosi, e un aiuto alla diagnosi che
+    muore trasforma un errore riportato in un traceback. Dire «non
+    ispezionabile» è già un'informazione utile, perché di solito significa che
+    il livello che blocca è più in alto.
+    """
+    st = _stat(percorso)
+    if st is None:
+        return f"{percorso}: non ispezionabile"
+    flag = _attributi(percorso)
+    attributi = f" · attributi '{flag}'" if flag and flag.strip("-") else ""
+    tipo = "dir " if stat.S_ISDIR(st.st_mode) else ""
+    return (
+        f"{tipo}{percorso}: {_utente(st.st_uid)} (uid {st.st_uid}), "
+        f"gid {st.st_gid}, modo {stat.S_IMODE(st.st_mode):04o}{attributi}"
+    )
+
+
+def _utente(uid: int) -> str:
+    """Nome dell'utente, o il numero se non risolvibile."""
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:  # pragma: no cover
+        return str(uid)
+
+
+def _utente_di_servizio(cfg: ServerConfig) -> str | None:
+    """Chi eseguirà davvero il server, dedotto dai fatti del dispiegamento.
+
+    Non è chi sta lanciando il preflight. Su una VM fatta come documentata il
+    server gira come utente di servizio via comando forzato SSH, mentre il
+    preflight lo lancia a mano l'amministratore: due utenti diversi, e i
+    rimedi che dicono ``$(id -un)`` producono comandi giusti per la persona
+    sbagliata.
+
+    Il proprietario della directory del log è il testimone più affidabile che
+    abbiamo: è l'unico posto, insieme a ``state_dir``, in cui il servizio deve
+    poter scrivere, e viene creato apposta per lui. ``None`` significa che non
+    si riesce a dedurlo, e allora il rimedio resta generico invece di
+    inventare un nome.
+    """
+    st = _stat(cfg.log_path.parent)
+    if st is None:
+        return None
+    nome = _utente(st.st_uid)
+    return nome if nome != str(st.st_uid) else None
+
+
+def _proprietario(percorso: Path) -> str | None:
+    """Nome del proprietario di un percorso, o ``None`` se non si vede."""
+    st = _stat(percorso)
+    return _utente(st.st_uid) if st is not None else None
+
+
+def _stat(percorso: Path) -> os.stat_result | None:
+    """``stat`` che non solleva: ``None`` significa «non si riesce a guardare».
+
+    Serve perché ``Path.exists()`` **solleva** ``PermissionError`` quando una
+    directory del percorso non è attraversabile — ed è esattamente la
+    situazione che questo codice deve descrivere. Trovato riproducendo il
+    guasto invece di immaginarlo.
+    """
+    try:
+        return percorso.stat()
+    except OSError:
+        return None
+
+
+def _perche_non_scrivibile(
+    percorso: Path, cfg: ServerConfig, percorso_config: Path | None = None
+) -> str:
+    """Spiega perché un percorso non si lascia scrivere, con i fatti sotto.
+
+    Il rimedio precedente nominava **sempre** la trappola del percorso
+    relativo. Su un percorso assoluto e corretto, bloccato da un banale
+    problema di proprietario, quel testo manda a cercare dalla parte sbagliata:
+    un diagnostico che indica una causa plausibile ma falsa è peggio di uno che
+    dice solo «non riesco», perché viene creduto.
+
+    Qui si riportano i fatti — chi sta eseguendo, chi possiede cosa, con quali
+    permessi e attributi — e la trappola si nomina solo quando il sintomo c'è
+    davvero, cioè quando il percorso risolto è finito dentro il repo.
+    """
+    righe: list[str] = []
+
+    try:
+        gruppi = ",".join(str(g) for g in os.getgroups()) or "nessuno"
+    except OSError:  # pragma: no cover
+        gruppi = "non leggibili"
+    io_sono = _utente(os.geteuid())
+    righe.append(
+        f"In esecuzione come {io_sono} (uid {os.geteuid()}), gruppi {gruppi}."
+    )
+    righe.append(f"Percorso risolto: {percorso}")
+
+    # Il livello che blocca davvero è il primo antenato ispezionabile: se una
+    # directory non è attraversabile, i permessi di ciò che sta sotto non si
+    # vedono nemmeno, e descriverli sarebbe impossibile oltre che inutile.
+    righe.append(_descrivi(percorso))
+    esistente = percorso
+    while _stat(esistente) is None and esistente != esistente.parent:
+        esistente = esistente.parent
+        righe.append(_descrivi(esistente))
+    if esistente == percorso and esistente.parent != esistente:
+        righe.append(_descrivi(esistente.parent))
+
+    flag = _attributi(esistente) or ""
+    if "i" in flag:
+        righe.append(
+            f"Causa probabile: attributo IMMUTABILE. Per il log serve 'a' "
+            f"(append-only), non 'i': sudo chattr -i {esistente} && "
+            f"sudo chattr +a {esistente}"
+        )
+    elif not os.access(esistente, os.W_OK):
+        proprietario = _proprietario(esistente)
+        servizio = _utente_di_servizio(cfg) or proprietario or "<utente-di-servizio>"
+        if proprietario and proprietario != io_sono:
+            righe.append(
+                f"Causa probabile: appartiene a {proprietario}, tu sei "
+                f"{io_sono}. Se {proprietario} è l'utente che esegue il "
+                f"server, NON cambiare i permessi: è il preflight a essere "
+                f"lanciato dall'utente sbagliato. Rilanciarlo così:"
+            )
+        else:
+            righe.append(
+                "Causa probabile: proprietario o permessi. Il preflight va "
+                "eseguito come l'utente che eseguirà il server:"
+            )
+        righe.append(
+            f"    sudo -u {servizio} {sys.executable} -m mcp_server.doctor "
+            f"{percorso_config or '<config>'}"
+        )
+
+    try:
+        if percorso.resolve().is_relative_to(cfg.repo_root.resolve()):
+            righe.append(
+                "Attenzione: il percorso risolto sta DENTRO repo_root. Un "
+                "valore relativo in server.log_path viene risolto rispetto "
+                "alla cartella della configurazione: 'var/log/...' finisce nel "
+                "repo, '/var/log/...' no. Uno slash di differenza."
+            )
+    except (OSError, ValueError):  # pragma: no cover
+        pass
+
+    return "\n             ".join(righe)
 
 
 def _interprete(referto: Referto, cfg: ServerConfig) -> None:
@@ -648,7 +961,8 @@ def esegui(percorso_config: str | Path) -> Referto:
         return referto
 
     _radice(referto, cfg)
-    _log(referto, cfg)
+    _log(referto, cfg, percorso)
+    _stato(referto, cfg, percorso)
     _interprete(referto, cfg)
     _limiti(referto, cfg)
     _scrivibilita(referto, cfg)

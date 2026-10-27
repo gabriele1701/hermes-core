@@ -100,6 +100,8 @@ class LogAction(StrEnum):
     TOOL_ALIAS_DETECTED = "tool_alias_detected"
     OVERRIDE_SET = "override_set"
     OVERRIDE_REJECTED = "override_rejected"
+    OVERRIDE_STORE_LOADED = "override_store_loaded"
+    OVERRIDE_NOT_PERSISTED = "override_not_persisted"
     TOOL_CALL = "tool_call"
     SECRET_ACCESS = "secret_access"
 
