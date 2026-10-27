@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import stat
 import subprocess
 import sys
@@ -115,7 +116,9 @@ def _radice(referto: Referto, cfg: ServerConfig) -> None:
     referto.aggiungi("repo_root", Esito.OK, str(cfg.repo_root))
 
 
-def _log(referto: Referto, cfg: ServerConfig) -> None:
+def _log(
+    referto: Referto, cfg: ServerConfig, percorso_config: Path | None = None
+) -> None:
     percorso = cfg.log_path
     try:
         percorso.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -126,7 +129,7 @@ def _log(referto: Referto, cfg: ServerConfig) -> None:
             "log d'audit",
             Esito.ERRORE,
             f"non scrivibile: {err}",
-            _perche_non_scrivibile(percorso, cfg),
+            _perche_non_scrivibile(percorso, cfg, percorso_config),
         )
         return
 
@@ -152,7 +155,9 @@ def _log(referto: Referto, cfg: ServerConfig) -> None:
         referto.aggiungi("log append-only", Esito.OK, "attributo +a impostato")
 
 
-def _stato(referto: Referto, cfg: ServerConfig) -> None:
+def _stato(
+    referto: Referto, cfg: ServerConfig, percorso_config: Path | None = None
+) -> None:
     """Verifica lo store che fa sopravvivere gli innalzamenti di tier.
 
     Due esiti negativi diversi, per due cose diverse:
@@ -167,18 +172,21 @@ def _stato(referto: Referto, cfg: ServerConfig) -> None:
       due e la ragione per cui questo preflight esiste.
     """
     if cfg.state_dir is None:
+        servizio = _utente_di_servizio(cfg) or "<utente-di-servizio>"
         referto.aggiungi(
             "store degli override",
             Esito.AVVISO,
             "server.state_dir non configurata: gli innalzamenti di tier "
             "valgono solo per la connessione",
-            "Per renderli persistenti:\n"
-            "             sudo install -d -o $(id -un) -g $(id -gn) -m 700 "
-            "/var/lib/hermes\n"
-            "             poi in [server]: state_dir = \"/var/lib/hermes\"\n"
-            "             Attenzione: un percorso relativo viene risolto "
-            "rispetto alla cartella della configurazione, quindi finirebbe "
-            "dentro il repo.",
+            f"Per renderli persistenti (l'utente dev'essere quello che esegue "
+            f"il SERVER, non chi lancia il preflight):\n"
+            f"             sudo install -d -o {servizio} -g {servizio} -m 700 "
+            f"/var/lib/hermes/state\n"
+            f"             poi in [server]: "
+            f"state_dir = \"/var/lib/hermes/state\"\n"
+            f"             Attenzione: un percorso relativo viene risolto "
+            f"rispetto alla cartella della configurazione, quindi finirebbe "
+            f"dentro il repo.",
         )
         return
 
@@ -208,8 +216,10 @@ def _stato(referto: Referto, cfg: ServerConfig) -> None:
             "store degli override",
             Esito.ERRORE,
             f"configurata ma non scrivibile: {err}",
-            f"sudo install -d -o $(id -un) -g $(id -gn) -m 700 {cfg.state_dir}\n"
-            "             " + _perche_non_scrivibile(percorso, cfg),
+            f"sudo install -d -o {_utente_di_servizio(cfg) or '<utente-di-servizio>'} "
+            f"-g {_utente_di_servizio(cfg) or '<utente-di-servizio>'} -m 700 "
+            f"{cfg.state_dir}\n"
+            "             " + _perche_non_scrivibile(percorso, cfg, percorso_config),
         )
         return
 
@@ -299,9 +309,45 @@ def _descrivi(percorso: Path) -> str:
     attributi = f" · attributi '{flag}'" if flag and flag.strip("-") else ""
     tipo = "dir " if stat.S_ISDIR(st.st_mode) else ""
     return (
-        f"{tipo}{percorso}: uid {st.st_uid}, gid {st.st_gid}, "
-        f"modo {stat.S_IMODE(st.st_mode):04o}{attributi}"
+        f"{tipo}{percorso}: {_utente(st.st_uid)} (uid {st.st_uid}), "
+        f"gid {st.st_gid}, modo {stat.S_IMODE(st.st_mode):04o}{attributi}"
     )
+
+
+def _utente(uid: int) -> str:
+    """Nome dell'utente, o il numero se non risolvibile."""
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:  # pragma: no cover
+        return str(uid)
+
+
+def _utente_di_servizio(cfg: ServerConfig) -> str | None:
+    """Chi eseguirà davvero il server, dedotto dai fatti del dispiegamento.
+
+    Non è chi sta lanciando il preflight. Su una VM fatta come documentata il
+    server gira come utente di servizio via comando forzato SSH, mentre il
+    preflight lo lancia a mano l'amministratore: due utenti diversi, e i
+    rimedi che dicono ``$(id -un)`` producono comandi giusti per la persona
+    sbagliata.
+
+    Il proprietario della directory del log è il testimone più affidabile che
+    abbiamo: è l'unico posto, insieme a ``state_dir``, in cui il servizio deve
+    poter scrivere, e viene creato apposta per lui. ``None`` significa che non
+    si riesce a dedurlo, e allora il rimedio resta generico invece di
+    inventare un nome.
+    """
+    st = _stat(cfg.log_path.parent)
+    if st is None:
+        return None
+    nome = _utente(st.st_uid)
+    return nome if nome != str(st.st_uid) else None
+
+
+def _proprietario(percorso: Path) -> str | None:
+    """Nome del proprietario di un percorso, o ``None`` se non si vede."""
+    st = _stat(percorso)
+    return _utente(st.st_uid) if st is not None else None
 
 
 def _stat(percorso: Path) -> os.stat_result | None:
@@ -318,7 +364,9 @@ def _stat(percorso: Path) -> os.stat_result | None:
         return None
 
 
-def _perche_non_scrivibile(percorso: Path, cfg: ServerConfig) -> str:
+def _perche_non_scrivibile(
+    percorso: Path, cfg: ServerConfig, percorso_config: Path | None = None
+) -> str:
     """Spiega perché un percorso non si lascia scrivere, con i fatti sotto.
 
     Il rimedio precedente nominava **sempre** la trappola del percorso
@@ -337,7 +385,10 @@ def _perche_non_scrivibile(percorso: Path, cfg: ServerConfig) -> str:
         gruppi = ",".join(str(g) for g in os.getgroups()) or "nessuno"
     except OSError:  # pragma: no cover
         gruppi = "non leggibili"
-    righe.append(f"In esecuzione come uid {os.geteuid()}, gruppi {gruppi}.")
+    io_sono = _utente(os.geteuid())
+    righe.append(
+        f"In esecuzione come {io_sono} (uid {os.geteuid()}), gruppi {gruppi}."
+    )
     righe.append(f"Percorso risolto: {percorso}")
 
     # Il livello che blocca davvero è il primo antenato ispezionabile: se una
@@ -359,13 +410,23 @@ def _perche_non_scrivibile(percorso: Path, cfg: ServerConfig) -> str:
             f"sudo chattr +a {esistente}"
         )
     elif not os.access(esistente, os.W_OK):
+        proprietario = _proprietario(esistente)
+        servizio = _utente_di_servizio(cfg) or proprietario or "<utente-di-servizio>"
+        if proprietario and proprietario != io_sono:
+            righe.append(
+                f"Causa probabile: appartiene a {proprietario}, tu sei "
+                f"{io_sono}. Se {proprietario} è l'utente che esegue il "
+                f"server, NON cambiare i permessi: è il preflight a essere "
+                f"lanciato dall'utente sbagliato. Rilanciarlo così:"
+            )
+        else:
+            righe.append(
+                "Causa probabile: proprietario o permessi. Il preflight va "
+                "eseguito come l'utente che eseguirà il server:"
+            )
         righe.append(
-            "Causa probabile: proprietario o permessi. Due strade: eseguire "
-            "come l'utente di servizio\n"
-            f"             sudo -u <utente> {sys.executable} -m "
-            f"mcp_server.doctor <config>\n"
-            "             oppure dare accesso a chi esegue ora, per esempio\n"
-            f"             sudo chown -R <utente>: {esistente}"
+            f"    sudo -u {servizio} {sys.executable} -m mcp_server.doctor "
+            f"{percorso_config or '<config>'}"
         )
 
     try:
@@ -858,8 +919,8 @@ def esegui(percorso_config: str | Path) -> Referto:
         return referto
 
     _radice(referto, cfg)
-    _log(referto, cfg)
-    _stato(referto, cfg)
+    _log(referto, cfg, percorso)
+    _stato(referto, cfg, percorso)
     _interprete(referto, cfg)
     _limiti(referto, cfg)
     _scrivibilita(referto, cfg)

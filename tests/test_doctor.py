@@ -686,7 +686,8 @@ def test_log_non_scrivibile_non_accusa_il_percorso_relativo(
     assert controllo.esito is Esito.ERRORE
     assert "relativo" not in controllo.rimedio
     # I fatti che servono per capire: chi esegue e cosa c'è sul percorso.
-    assert "In esecuzione come uid" in controllo.rimedio
+    assert "In esecuzione come" in controllo.rimedio
+    assert "uid" in controllo.rimedio
     assert str(blocco) in controllo.rimedio
 
 
@@ -712,3 +713,31 @@ def test_stat_non_solleva_su_percorso_non_ispezionabile(tmp_path: Path):
     blocco.write_text("x\n", encoding="utf-8")
     assert _stat(blocco / "sotto" / "audit.jsonl") is None
     assert "non ispezionabile" in _descrivi(blocco / "sotto" / "audit.jsonl")
+
+
+def test_utente_di_servizio_dedotto_dal_proprietario_del_log(
+    tmp_path: Path, radice: Path
+):
+    """I rimedi dicevano `$(id -un)`: giusti per la persona sbagliata.
+
+    Su una VM fatta come documentata il server gira come utente di servizio
+    via comando forzato SSH, mentre il preflight lo lancia a mano
+    l'amministratore. Il proprietario della directory del log è il testimone
+    più affidabile di chi sia il primo.
+    """
+    import os as _os
+
+    from mcp_server.config import load_config
+    from mcp_server.doctor import _utente, _utente_di_servizio
+
+    cfg = load_config(scrivi_config(tmp_path, radice))
+    atteso = _utente(_os.stat(cfg.log_path.parent).st_uid)
+    assert _utente_di_servizio(cfg) == atteso
+
+
+def test_rimedio_store_nomina_l_utente_di_servizio(tmp_path: Path, radice: Path):
+    controllo = _controllo(
+        esegui(scrivi_config(tmp_path, radice)), "store degli override"
+    )
+    assert "$(id -un)" not in controllo.rimedio
+    assert "non chi lancia il preflight" in controllo.rimedio
