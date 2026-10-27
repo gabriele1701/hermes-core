@@ -108,6 +108,7 @@ from mcp_server.contracts import (
     ToolSpec,
 )
 from mcp_server.registry import ToolRegistry
+from mcp_server.slots import Posto, SlotPool, SlotUnavailable
 from mcp_server.tiers import ConfirmationPolicy
 
 #: Timeout di default di un'esecuzione. Un tool che non termina è un tool che
@@ -409,6 +410,7 @@ class ToolExecutor:
         tool_python_flags: Sequence[str] = TOOL_PYTHON_FLAGS_DEFAULT,
         max_output_bytes: int = MAX_OUTPUT_BYTES_DEFAULT,
         max_concurrent: int = MAX_CONCURRENT_DEFAULT,
+        slots: SlotPool | None = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
@@ -422,6 +424,10 @@ class ToolExecutor:
         # I tool sincroni girano nel thread pool del framework MCP, quindi le
         # invocazioni concorrenti sono thread reali dello stesso processo.
         self._posti = threading.BoundedSemaphore(max_concurrent)
+        # Il semaforo resta anche quando c'è il pool condiviso: è il percorso
+        # veloce, non costa I/O, e due limiti dello stesso numero non si
+        # contraddicono — il più stretto vince e sono uguali.
+        self._slots = slots
 
     @property
     def container_available(self) -> bool:
@@ -443,6 +449,40 @@ class ToolExecutor:
     @property
     def max_concurrent(self) -> int:
         return self._max_concurrent
+
+    @property
+    def concorrenza_condivisa(self) -> bool:
+        """Se il limite vale fra le connessioni dell'agente o solo qui dentro."""
+        return self._slots is not None
+
+    def _prendi_posto_condiviso(self) -> Posto | None:
+        """Occupa un posto nel pool fra processi, se c'è.
+
+        Un guasto della directory dei posti **non** blocca l'esecuzione: il
+        limite di processo è già stato applicato, e fermare il lavoro perché
+        un lock non si crea trasformerebbe un problema di filesystem in
+        un'interruzione del servizio. Degrada al limite di processo e lo
+        registra: tacerlo lascerebbe credere a un tetto complessivo che non
+        c'è.
+        """
+        if self._slots is None:
+            return None
+        try:
+            return self._slots.acquire()
+        except SlotUnavailable:
+            raise
+        except OSError as err:
+            self._audit.log(
+                correlation_id=self._registry.correlation_id,
+                action=LogAction.CONCURRENCY_NOT_SHARED,
+                outcome=CallOutcome.ERROR,
+                detail=(
+                    f"posti condivisi non utilizzabili in "
+                    f"{self._slots.directory}: {err}. Il limite di "
+                    f"{self._max_concurrent} vale solo per questo processo."
+                ),
+            )
+            return None
 
     # -- preparazione -------------------------------------------------------- #
 
@@ -599,6 +639,29 @@ class ToolExecutor:
                 f"già {self._max_concurrent} esecuzioni in corso in questo processo"
             )
 
+        # Secondo posto, quello condiviso fra i processi dell'agente. Si
+        # prende dopo il semaforo e si rilascia per primo, come ogni coppia di
+        # lock annidati: l'ordine inverso fra due esecuzioni produrrebbe uno
+        # stallo.
+        try:
+            posto = self._prendi_posto_condiviso()
+        except SlotUnavailable:
+            self._posti.release()
+            self._nega(
+                pronta.spec,
+                agent,
+                pronta.effective_tier,
+                correlation_id,
+                target,
+                f"limite di esecuzioni contemporanee raggiunto fra le "
+                f"connessioni dell'agente ({self._max_concurrent}): "
+                f"invocazione rifiutata",
+            )
+            raise ConcurrencyLimitReached(
+                f"già {self._max_concurrent} esecuzioni in corso fra le "
+                f"connessioni di questo agente"
+            ) from None
+
         argv = [str(self._tool_python), *self._tool_python_flags, str(pronta.script)]
         try:
             esito = self._runner.run(
@@ -624,6 +687,8 @@ class ToolExecutor:
                 raise
             return call, risultato
         finally:
+            if posto is not None:
+                posto.release()
             self._posti.release()
 
         outcome = CallOutcome.OK if esito.returncode == 0 else CallOutcome.ERROR

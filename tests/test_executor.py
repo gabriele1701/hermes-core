@@ -823,3 +823,138 @@ def test_runner_reale_esegue_davvero(repo, registry, audit):
     call, esito = ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
     assert call.outcome is CallOutcome.OK
     assert esito.stdout.strip() == "ok"
+
+
+# --------------------------------------------------------------------------- #
+# Posti condivisi fra processi (patch di sicurezza, passo 6b)
+# --------------------------------------------------------------------------- #
+
+
+def test_posto_occupato_da_un_altro_processo_rifiuta(repo, registry, audit, tmp_path):
+    """Il limite ora vale anche fra le connessioni, non solo nel processo.
+
+    Il posto viene occupato da un processo **vero**, perché è esattamente ciò
+    che il semaforo in memoria non poteva vedere.
+    """
+    import subprocess as sp
+    import sys as _sys
+
+    from mcp_server.slots import SlotPool
+
+    pool = SlotPool(tmp_path / "slots", 1)
+    pool.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    occupante = sp.Popen(
+        [
+            _sys.executable,
+            "-c",
+            "import fcntl,os,sys,time\n"
+            "fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "sys.stdout.write('preso\\n'); sys.stdout.flush()\n"
+            "time.sleep(300)\n",
+            str(pool.percorso(0)),
+        ],
+        stdout=sp.PIPE,
+        text=True,
+    )
+    assert occupante.stdout.readline().strip() == "preso"
+
+    try:
+        registry.register(_spec(repo))
+        ex = ToolExecutor(
+            registry,
+            audit,
+            repo_root=repo,
+            runner=RunnerFinto(),
+            max_concurrent=1,
+            slots=pool,
+        )
+        assert ex.concorrenza_condivisa is True
+        with pytest.raises(ConcurrencyLimitReached, match="connessioni di questo agente"):
+            ex.execute(
+                "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+            )
+    finally:
+        occupante.kill()
+        occupante.wait(timeout=10)
+
+    negate = [
+        r
+        for r in audit.read_all()
+        if r.outcome is CallOutcome.DENIED and "connessioni dell'agente" in r.detail
+    ]
+    assert len(negate) == 1
+
+
+def test_rifiuto_condiviso_restituisce_il_posto_di_processo(
+    repo, registry, audit, tmp_path
+):
+    """Il semaforo va rilasciato anche quando a negare è il lock condiviso.
+
+    Senza, ogni rifiuto consumerebbe un posto in memoria per sempre: dopo N
+    rifiuti il processo non eseguirebbe più nulla, cioè un controllo che si
+    auto-esaurisce.
+    """
+    from mcp_server.slots import SlotPool
+
+    pool = SlotPool(tmp_path / "slots", 1)
+    registry.register(_spec(repo))
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        runner=RunnerFinto(),
+        max_concurrent=1,
+        slots=pool,
+    )
+
+    with pool.acquire():
+        for _ in range(3):
+            with pytest.raises(ConcurrencyLimitReached):
+                ex.execute(
+                    "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+                )
+
+    # Liberato il posto condiviso, il processo deve poter ancora eseguire.
+    call, _ = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.OK
+
+
+def test_pool_inutilizzabile_degrada_e_lo_registra(repo, registry, audit, tmp_path):
+    """Un guasto del filesystem non deve fermare il lavoro, ma va dichiarato.
+
+    Fermare l'esecuzione perché un lock non si crea trasformerebbe un problema
+    di permessi in un'interruzione del servizio; tacerlo lascerebbe credere a
+    un tetto complessivo che non c'è.
+    """
+    from mcp_server.slots import SlotPool
+
+    blocco = tmp_path / "slots"
+    blocco.write_text("non sono una directory\n", encoding="utf-8")
+
+    registry.register(_spec(repo))
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        runner=RunnerFinto(),
+        max_concurrent=1,
+        slots=SlotPool(blocco, 1),
+    )
+    call, _ = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.OK
+
+    righe = [
+        r for r in audit.read_all() if r.action is LogAction.CONCURRENCY_NOT_SHARED
+    ]
+    assert len(righe) == 1
+    assert "vale solo per questo processo" in righe[0].detail
+
+
+def test_senza_pool_resta_il_limite_di_processo(repo, registry, audit):
+    ex = ToolExecutor(registry, audit, repo_root=repo, runner=RunnerFinto())
+    assert ex.concorrenza_condivisa is False

@@ -783,3 +783,25 @@ def test_store_di_un_altro_utente_e_errore_non_falso_verde(
     assert controllo.esito is Esito.ERRORE
     assert referto.pronto is False
     assert "non verranno persistiti" in controllo.messaggio
+
+
+def test_senza_state_dir_il_tetto_e_per_processo(tmp_path: Path, radice: Path):
+    referto = esegui(scrivi_config(tmp_path, radice))
+    limiti = _controllo(referto, "limiti di esecuzione")
+    assert "solo in questo processo" in limiti.messaggio
+    posti = _controllo(referto, "posti condivisi")
+    assert posti.esito is Esito.AVVISO
+    assert "un processo per connessione" in posti.messaggio
+
+
+def test_con_state_dir_il_tetto_e_condiviso(tmp_path: Path, radice: Path):
+    referto = esegui(
+        scrivi_config(tmp_path, radice, state_dir=tmp_path / "stato")
+    )
+    limiti = _controllo(referto, "limiti di esecuzione")
+    assert "fra le connessioni dell'agente" in limiti.messaggio
+    posti = _controllo(referto, "posti condivisi")
+    assert posti.esito is Esito.OK
+    # La conseguenza della scelta per-agente va dichiarata, non nascosta.
+    assert "× agenti attivi" in posti.messaggio
+    assert "slots/echo_dummy" in posti.messaggio

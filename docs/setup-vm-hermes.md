@@ -190,8 +190,12 @@ Sono gli unici due posti in cui il servizio ha bisogno di scrivere, e stanno
 fuori dal repo di proposito: il repo è in sola lettura per l'utente che
 esegue, ed è la mitigazione del TOCTOU fra verifica dello SHA ed esecuzione.
 
-`/var/lib/hermes/state` tiene lo **store degli innalzamenti di tier**
-(`overrides.jsonl`). Senza, un tool alzato a Rosso dopo un incidente torna al
+`/var/lib/hermes/state` tiene due cose: lo **store degli innalzamenti di
+tier** (`overrides.jsonl`) e i **posti di esecuzione** (`slots/<agente>/`), i
+file di lock con cui il limite di esecuzioni contemporanee vale fra le
+connessioni dello stesso agente invece che dentro un solo processo. I posti non
+vanno irrigiditi né ripuliti a mano: sono file vuoti il cui unico contenuto
+informativo è il lock, che il kernel rilascia alla morte del processo. Senza, un tool alzato a Rosso dopo un incidente torna al
 tier dichiarato alla connessione successiva, perché Hermes avvia un processo
 nuovo ogni volta. Il server parte lo stesso e lo dichiara nelle risposte, ma
 la persistenza è il comportamento che serve.

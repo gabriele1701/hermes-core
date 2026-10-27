@@ -870,3 +870,15 @@ def test_conferma_non_dice_di_essere_in_attesa(repo: Path):
     assert "nessun canale di conferma" in chiamata["detail"]
     assert "NON è stato eseguito" in chiamata["detail"]
     assert "riprovando" in chiamata["detail"]
+
+
+def test_server_collega_i_posti_condivisi(repo: Path, tmp_path: Path):
+    """Con state_dir il tetto diventa comune alle connessioni dell'agente."""
+    stato = tmp_path / "stato"
+    srv = crea_server(scrivi_config(repo, righe_server=f'state_dir = "{stato}"'))
+    assert srv._executor.concorrenza_condivisa is True
+    assert srv._executor._slots.directory == stato / "slots" / "echo_dummy"
+
+
+def test_server_senza_state_dir_resta_per_processo(server: HermesServer):
+    assert server._executor.concorrenza_condivisa is False
