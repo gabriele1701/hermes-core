@@ -958,3 +958,44 @@ def test_pool_inutilizzabile_degrada_e_lo_registra(repo, registry, audit, tmp_pa
 def test_senza_pool_resta_il_limite_di_processo(repo, registry, audit):
     ex = ToolExecutor(registry, audit, repo_root=repo, runner=RunnerFinto())
     assert ex.concorrenza_condivisa is False
+
+
+def test_guasto_imprevisto_nel_pool_non_perde_il_posto_in_memoria(
+    repo, registry, audit, monkeypatch
+):
+    """Un semaforo perso riduce la capacità del processo per sempre.
+
+    È lo stesso controllo-che-si-auto-esaurisce per cui i posti condivisi sono
+    lock e non contatori: vale anche per il semaforo in memoria, e un'eccezione
+    inattesa nel codice dei posti non deve provocarlo.
+    """
+    from mcp_server.slots import SlotPool
+
+    registry.register(_spec(repo))
+    pool = SlotPool(repo / "slots", 1)
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        runner=RunnerFinto(),
+        max_concurrent=1,
+        slots=pool,
+    )
+
+    def esplode():
+        raise RuntimeError("guasto inatteso nel pool")
+
+    monkeypatch.setattr(ex, "_prendi_posto_condiviso", esplode)
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            ex.execute(
+                "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+            )
+
+    # Il processo deve avere ancora il suo posto: senza il rilascio, al
+    # secondo tentativo il semaforo sarebbe gia' esaurito.
+    monkeypatch.undo()
+    call, _ = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.OK

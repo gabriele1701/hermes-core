@@ -661,6 +661,13 @@ class ToolExecutor:
                 f"già {self._max_concurrent} esecuzioni in corso fra le "
                 f"connessioni di questo agente"
             ) from None
+        except BaseException:
+            # Qualunque altra cosa vada storta qui deve comunque restituire il
+            # posto in memoria prima di risalire. Un semaforo perso riduce la
+            # capacità del processo per sempre: è esattamente il controllo che
+            # si auto-esaurisce che questo modulo esiste per evitare.
+            self._posti.release()
+            raise
 
         argv = [str(self._tool_python), *self._tool_python_flags, str(pronta.script)]
         try:

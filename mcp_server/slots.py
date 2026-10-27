@@ -147,23 +147,30 @@ class SlotPool:
         )
 
     def occupati(self) -> int:
-        """Quanti posti risultano occupati ora. Per diagnostica, non per decidere.
+        """Quanti posti risultano occupati ora. **Solo per diagnostica.**
+
+        Due avvertenze, entrambe serie.
 
         È una fotografia: fra la lettura e qualunque azione il numero può
-        cambiare. Usarla per autorizzare un'esecuzione reintrodurrebbe la
+        cambiare, e usarla per autorizzare un'esecuzione reintrodurrebbe la
         corsa che ``flock`` elimina.
+
+        E non è innocua: per sapere se un posto è libero bisogna **provare a
+        prenderlo**, quindi per una frazione di istante questo metodo occupa i
+        posti liberi che incontra. Su un pool in uso può far rifiutare
+        un'esecuzione legittima. Va chiamata in test e in ispezione manuale,
+        mai da un percorso che gira in produzione.
+
+        Non usa ``Path.exists()``: quella solleva su una directory non
+        attraversabile invece di rispondere ``False``, e un metodo di
+        diagnostica che muore non diagnostica niente.
         """
-        if not self._directory.is_dir():
-            return 0
         conteggio = 0
         for indice in range(self._posti):
-            percorso = self.percorso(indice)
-            if not percorso.exists():
-                continue
             try:
-                fd = os.open(percorso, os.O_RDWR)
+                fd = os.open(self.percorso(indice), os.O_RDWR)
             except OSError:
-                continue
+                continue  # inesistente, o non ispezionabile: non è occupato da noi
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 fcntl.flock(fd, fcntl.LOCK_UN)
