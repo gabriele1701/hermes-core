@@ -126,12 +126,7 @@ def _log(referto: Referto, cfg: ServerConfig) -> None:
             "log d'audit",
             Esito.ERRORE,
             f"non scrivibile: {err}",
-            "Verificare permessi e percorso di server.log_path. "
-            "Attenzione: un percorso **relativo** viene risolto rispetto alla "
-            "cartella della configurazione, quindi\n"
-            "             'var/log/...' finisce dentro il repo mentre "
-            "'/var/log/...' è assoluto.\n"
-            f"             Percorso risolto: {percorso}",
+            _perche_non_scrivibile(percorso, cfg),
         )
         return
 
@@ -214,7 +209,7 @@ def _stato(referto: Referto, cfg: ServerConfig) -> None:
             Esito.ERRORE,
             f"configurata ma non scrivibile: {err}",
             f"sudo install -d -o $(id -un) -g $(id -gn) -m 700 {cfg.state_dir}\n"
-            f"             Percorso risolto: {percorso}",
+            "             " + _perche_non_scrivibile(percorso, cfg),
         )
         return
 
@@ -261,8 +256,13 @@ def _stato(referto: Referto, cfg: ServerConfig) -> None:
         )
 
 
-def _append_only(percorso: Path) -> bool:
-    """Legge l'attributo append-only con ``lsattr``, se disponibile."""
+def _attributi(percorso: Path) -> str | None:
+    """Flag di ``lsattr -d``, o ``None`` se non si riescono a leggere.
+
+    ``None`` significa «non lo so» — ``lsattr`` assente, filesystem che non li
+    supporta, permessi — e non «nessun attributo». Chi legge deve poter
+    distinguere le due cose.
+    """
     try:
         esito = subprocess.run(
             ["lsattr", "-d", str(percorso)],
@@ -272,10 +272,114 @@ def _append_only(percorso: Path) -> bool:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    if esito.returncode != 0:
-        return False
-    return "a" in esito.stdout.split()[0] if esito.stdout.split() else False
+        return None
+    if esito.returncode != 0 or not esito.stdout.split():
+        return None
+    return esito.stdout.split()[0]
+
+
+def _append_only(percorso: Path) -> bool:
+    """Se il percorso ha l'attributo append-only."""
+    flag = _attributi(percorso)
+    return flag is not None and "a" in flag
+
+
+def _descrivi(percorso: Path) -> str:
+    """Proprietario, permessi e attributi di un percorso, in una riga.
+
+    Non solleva mai: è un aiuto alla diagnosi, e un aiuto alla diagnosi che
+    muore trasforma un errore riportato in un traceback. Dire «non
+    ispezionabile» è già un'informazione utile, perché di solito significa che
+    il livello che blocca è più in alto.
+    """
+    st = _stat(percorso)
+    if st is None:
+        return f"{percorso}: non ispezionabile"
+    flag = _attributi(percorso)
+    attributi = f" · attributi '{flag}'" if flag and flag.strip("-") else ""
+    tipo = "dir " if stat.S_ISDIR(st.st_mode) else ""
+    return (
+        f"{tipo}{percorso}: uid {st.st_uid}, gid {st.st_gid}, "
+        f"modo {stat.S_IMODE(st.st_mode):04o}{attributi}"
+    )
+
+
+def _stat(percorso: Path) -> os.stat_result | None:
+    """``stat`` che non solleva: ``None`` significa «non si riesce a guardare».
+
+    Serve perché ``Path.exists()`` **solleva** ``PermissionError`` quando una
+    directory del percorso non è attraversabile — ed è esattamente la
+    situazione che questo codice deve descrivere. Trovato riproducendo il
+    guasto invece di immaginarlo.
+    """
+    try:
+        return percorso.stat()
+    except OSError:
+        return None
+
+
+def _perche_non_scrivibile(percorso: Path, cfg: ServerConfig) -> str:
+    """Spiega perché un percorso non si lascia scrivere, con i fatti sotto.
+
+    Il rimedio precedente nominava **sempre** la trappola del percorso
+    relativo. Su un percorso assoluto e corretto, bloccato da un banale
+    problema di proprietario, quel testo manda a cercare dalla parte sbagliata:
+    un diagnostico che indica una causa plausibile ma falsa è peggio di uno che
+    dice solo «non riesco», perché viene creduto.
+
+    Qui si riportano i fatti — chi sta eseguendo, chi possiede cosa, con quali
+    permessi e attributi — e la trappola si nomina solo quando il sintomo c'è
+    davvero, cioè quando il percorso risolto è finito dentro il repo.
+    """
+    righe: list[str] = []
+
+    try:
+        gruppi = ",".join(str(g) for g in os.getgroups()) or "nessuno"
+    except OSError:  # pragma: no cover
+        gruppi = "non leggibili"
+    righe.append(f"In esecuzione come uid {os.geteuid()}, gruppi {gruppi}.")
+    righe.append(f"Percorso risolto: {percorso}")
+
+    # Il livello che blocca davvero è il primo antenato ispezionabile: se una
+    # directory non è attraversabile, i permessi di ciò che sta sotto non si
+    # vedono nemmeno, e descriverli sarebbe impossibile oltre che inutile.
+    righe.append(_descrivi(percorso))
+    esistente = percorso
+    while _stat(esistente) is None and esistente != esistente.parent:
+        esistente = esistente.parent
+        righe.append(_descrivi(esistente))
+    if esistente == percorso and esistente.parent != esistente:
+        righe.append(_descrivi(esistente.parent))
+
+    flag = _attributi(esistente) or ""
+    if "i" in flag:
+        righe.append(
+            f"Causa probabile: attributo IMMUTABILE. Per il log serve 'a' "
+            f"(append-only), non 'i': sudo chattr -i {esistente} && "
+            f"sudo chattr +a {esistente}"
+        )
+    elif not os.access(esistente, os.W_OK):
+        righe.append(
+            "Causa probabile: proprietario o permessi. Due strade: eseguire "
+            "come l'utente di servizio\n"
+            f"             sudo -u <utente> {sys.executable} -m "
+            f"mcp_server.doctor <config>\n"
+            "             oppure dare accesso a chi esegue ora, per esempio\n"
+            f"             sudo chown -R <utente>: {esistente}"
+        )
+
+    try:
+        if percorso.resolve().is_relative_to(cfg.repo_root.resolve()):
+            righe.append(
+                "Attenzione: il percorso risolto sta DENTRO repo_root. Un "
+                "valore relativo in server.log_path viene risolto rispetto "
+                "alla cartella della configurazione: 'var/log/...' finisce nel "
+                "repo, '/var/log/...' no. Uno slash di differenza."
+            )
+    except (OSError, ValueError):  # pragma: no cover
+        pass
+
+    return "\n             ".join(righe)
 
 
 def _interprete(referto: Referto, cfg: ServerConfig) -> None:

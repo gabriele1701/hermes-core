@@ -654,3 +654,61 @@ def test_store_dentro_il_repo_segnalato(tmp_path: Path, radice: Path):
             for figlio in percorso.iterdir():
                 figlio.unlink()
             percorso.rmdir()
+
+
+# --------------------------------------------------------------------------- #
+# Perché un percorso non è scrivibile: la causa giusta, non una plausibile
+# --------------------------------------------------------------------------- #
+
+
+def test_log_non_scrivibile_non_accusa_il_percorso_relativo(
+    tmp_path: Path, radice: Path
+):
+    """Il rimedio nominava **sempre** la trappola del percorso relativo.
+
+    Su un percorso assoluto e corretto, bloccato da un problema di
+    proprietario, quel testo manda a cercare dalla parte sbagliata. Un
+    diagnostico che indica una causa plausibile ma falsa è peggio di uno che
+    dice solo «non riesco», perché viene creduto.
+    """
+    blocco = tmp_path / "non-sono-una-directory"
+    blocco.write_text("x\n", encoding="utf-8")
+    percorso = scrivi_config(tmp_path, radice)
+    percorso.write_text(
+        percorso.read_text(encoding="utf-8").replace(
+            f'log_path = "{tmp_path}/audit.jsonl"',
+            f'log_path = "{blocco}/audit.jsonl"',
+        ),
+        encoding="utf-8",
+    )
+
+    controllo = _controllo(esegui(percorso), "log d'audit")
+    assert controllo.esito is Esito.ERRORE
+    assert "relativo" not in controllo.rimedio
+    # I fatti che servono per capire: chi esegue e cosa c'è sul percorso.
+    assert "In esecuzione come uid" in controllo.rimedio
+    assert str(blocco) in controllo.rimedio
+
+
+def test_log_dentro_il_repo_nomina_la_trappola(tmp_path: Path, radice: Path):
+    """La trappola si nomina quando il sintomo c'è davvero."""
+    from mcp_server.config import load_config
+    from mcp_server.doctor import _perche_non_scrivibile
+
+    cfg = load_config(scrivi_config(tmp_path, radice))
+    testo = _perche_non_scrivibile(radice / "logs" / "audit.jsonl", cfg)
+    assert "DENTRO repo_root" in testo
+
+
+def test_stat_non_solleva_su_percorso_non_ispezionabile(tmp_path: Path):
+    """``Path.exists()`` solleva PermissionError su una dir non attraversabile.
+
+    È il guasto che questo codice deve descrivere, quindi non può usarlo.
+    Trovato riproducendo il caso di Gabriele invece di immaginarlo.
+    """
+    from mcp_server.doctor import _descrivi, _stat
+
+    blocco = tmp_path / "file-non-dir"
+    blocco.write_text("x\n", encoding="utf-8")
+    assert _stat(blocco / "sotto" / "audit.jsonl") is None
+    assert "non ispezionabile" in _descrivi(blocco / "sotto" / "audit.jsonl")
