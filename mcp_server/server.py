@@ -67,10 +67,12 @@ from mcp_server.contracts import (
     ToolCall,
 )
 from mcp_server.executor import (
+    ConcurrencyLimitReached,
     ConfirmationRequired,
     ContainerUnavailable,
     ExecutionError,
     IntegrityMismatch,
+    SharedSlotsUnusable,
     ToolExecutor,
 )
 from mcp_server.overrides import OverrideScope, OverrideStore
@@ -366,7 +368,18 @@ class HermesServer:
             )
         except ConfirmationRequired as err:
             return self._risultato_in_attesa(correlation_id, tool_id, target, str(err))
-        except (ContainerUnavailable, IntegrityMismatch) as err:
+        except (
+            ContainerUnavailable,
+            IntegrityMismatch,
+            ConcurrencyLimitReached,
+            SharedSlotsUnusable,
+        ) as err:
+            # Tutte decisioni del gate, non guasti dell'invocazione: il gate
+            # ha già scritto la sua riga `denied`, e un risultato di tipo
+            # «errore» la contraddirebbe nella stessa catena. I due limiti di
+            # concorrenza stanno qui per lo stesso motivo del container
+            # assente: un presidio che non si può applicare nega, e negare è
+            # una decisione, non un incidente.
             return self._risultato_negato(correlation_id, tool_id, target, str(err))
         except (InvocationRefused, ToolNotRegistered) as err:
             return self._risultato_errore(correlation_id, str(err))

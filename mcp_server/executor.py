@@ -628,18 +628,26 @@ class ToolExecutor:
         # Posto libero, o rifiuto tracciato. Il gate è l'unico punto in cui
         # passano le esecuzioni, quindi è il punto in cui si contano.
         if not self._posti.acquire(timeout=ATTESA_POSTO_LIBERO):
+            # Un solo testo per la riga di log e per l'eccezione. Tenerli
+            # separati aveva prodotto esattamente il difetto del `pending`:
+            # la formulazione che dice se riprovare ha senso finiva nel log,
+            # che legge una persona, mentre al modello arrivava il messaggio
+            # corto — e chi decide se riprovare è il modello.
+            motivo = (
+                f"limite di esecuzioni contemporanee raggiunto in questo "
+                f"processo ({self._max_concurrent}): invocazione rifiutata, "
+                f"non eseguita. Riprovare ha senso quando una delle "
+                f"esecuzioni in corso sarà terminata."
+            )
             self._nega(
                 pronta.spec,
                 agent,
                 pronta.effective_tier,
                 correlation_id,
                 target,
-                f"limite di esecuzioni contemporanee raggiunto "
-                f"({self._max_concurrent}): invocazione rifiutata",
+                motivo,
             )
-            raise ConcurrencyLimitReached(
-                f"già {self._max_concurrent} esecuzioni in corso in questo processo"
-            )
+            raise ConcurrencyLimitReached(motivo)
 
         # Secondo posto, quello condiviso fra i processi dell'agente. Si
         # prende dopo il semaforo e si rilascia per primo, come ogni coppia di
@@ -649,42 +657,44 @@ class ToolExecutor:
             posto = self._prendi_posto_condiviso()
         except SlotUnavailable:
             self._posti.release()
-            self._nega(
-                pronta.spec,
-                agent,
-                pronta.effective_tier,
-                correlation_id,
-                target,
+            motivo = (
                 f"limite di esecuzioni contemporanee raggiunto fra le "
                 f"connessioni dell'agente ({self._max_concurrent}): "
-                f"invocazione rifiutata",
+                f"invocazione rifiutata, non eseguita. Riprovare ha senso "
+                f"quando una delle esecuzioni in corso sarà terminata."
             )
-            raise ConcurrencyLimitReached(
-                f"già {self._max_concurrent} esecuzioni in corso fra le "
-                f"connessioni di questo agente"
-            ) from None
-        except OSError as err:
-            # Posti configurati e non utilizzabili: il limite dichiarato non
-            # è applicabile, quindi non si esegue. Il detail dice che non è
-            # partito nulla e che riprovare non serve — distinzione che conta,
-            # perché il rifiuto qui sopra è l'opposto: lì riprovare ha senso.
-            self._posti.release()
             self._nega(
                 pronta.spec,
                 agent,
                 pronta.effective_tier,
                 correlation_id,
                 target,
+                motivo,
+            )
+            raise ConcurrencyLimitReached(motivo) from None
+        except OSError as err:
+            # Posti configurati e non utilizzabili: il limite dichiarato non
+            # è applicabile, quindi non si esegue. Qui riprovare NON ha senso,
+            # ed è l'opposto del rifiuto qui sopra: due cause che il testo
+            # deve distinguere, perché portano a due comportamenti diversi.
+            self._posti.release()
+            motivo = (
                 f"posti condivisi non utilizzabili in "
                 f"{self._slots.directory if self._slots else '?'}: {err}. "
                 f"Il limite fra le connessioni dell'agente è configurato ma "
                 f"non applicabile: invocazione rifiutata, non eseguita. "
                 f"Riprovare non cambia l'esito finché la directory di stato "
-                f"non è riparata.",
+                f"non è riparata."
             )
-            raise SharedSlotsUnusable(
-                f"posti condivisi non utilizzabili: {err}"
-            ) from err
+            self._nega(
+                pronta.spec,
+                agent,
+                pronta.effective_tier,
+                correlation_id,
+                target,
+                motivo,
+            )
+            raise SharedSlotsUnusable(motivo) from err
         except BaseException:
             # Qualunque altra cosa vada storta qui deve comunque restituire il
             # posto in memoria prima di risalire. Un semaforo perso riduce la

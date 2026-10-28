@@ -871,7 +871,9 @@ def test_posto_occupato_da_un_altro_processo_rifiuta(repo, registry, audit, tmp_
             slots=pool,
         )
         assert ex.concorrenza_condivisa is True
-        with pytest.raises(ConcurrencyLimitReached, match="connessioni di questo agente"):
+        # Il messaggio dell'eccezione è quello che arriva al modello, e deve
+        # dire che qui riprovare ha senso — all'opposto dei posti rotti.
+        with pytest.raises(ConcurrencyLimitReached, match="Riprovare ha senso"):
             ex.execute(
                 "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
             )
@@ -949,8 +951,13 @@ def test_pool_inutilizzabile_nega_e_non_esegue(repo, registry, audit, tmp_path):
         max_concurrent=1,
         slots=SlotPool(blocco, 1),
     )
-    with pytest.raises(SharedSlotsUnusable):
+    with pytest.raises(SharedSlotsUnusable) as sollevata:
         ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=correlation_id)
+
+    # Il messaggio dell'eccezione è ciò che legge il modello: la frase che gli
+    # impedisce di riprovare in ciclo deve stare lì, non solo nel log.
+    assert "non eseguita" in str(sollevata.value)
+    assert "Riprovare non cambia l'esito" in str(sollevata.value)
 
     # Nulla è partito: è la differenza fra un rifiuto e un degrado.
     assert runner.chiamate == []
