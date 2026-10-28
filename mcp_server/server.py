@@ -81,6 +81,7 @@ from mcp_server.registry import (
     ToolRegistry,
     ToolSpecRejected,
 )
+from mcp_server.slots import SlotPool
 from mcp_server.vault import StubBackend, Vault, VaultBackend
 
 NOME_SERVER = "hermes-core"
@@ -170,6 +171,16 @@ class HermesServer:
             tool_python_flags=config.tool_python_flags,
             max_output_bytes=config.max_output_bytes,
             max_concurrent=config.max_concurrent_tools,
+            # Senza state_dir il limite resta per processo, come prima. Non
+            # si inventa una directory: l'assenza ha una conseguenza precisa
+            # che il preflight dichiara.
+            slots=(
+                SlotPool.per_agente(
+                    config.state_dir, config.agent, config.max_concurrent_tools
+                )
+                if config.state_dir is not None
+                else None
+            ),
         )
         self._carica_tool()
         self._mcp = self._costruisci_mcp()

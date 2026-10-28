@@ -102,6 +102,7 @@ class LogAction(StrEnum):
     OVERRIDE_REJECTED = "override_rejected"
     OVERRIDE_STORE_LOADED = "override_store_loaded"
     OVERRIDE_NOT_PERSISTED = "override_not_persisted"
+    CONCURRENCY_NOT_SHARED = "concurrency_not_shared"
     TOOL_CALL = "tool_call"
     SECRET_ACCESS = "secret_access"
 

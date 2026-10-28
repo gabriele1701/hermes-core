@@ -31,6 +31,7 @@ from mcp_server.contracts import RiskTier, ToolSpec
 from mcp_server.executor import risolvi_script, sha256_file
 from mcp_server.overrides import NOME_FILE as NOME_FILE_OVERRIDE
 from mcp_server.overrides import OverrideStore, OverrideStoreError
+from mcp_server.slots import SlotPool
 from mcp_server.tiers import derive_policy_for
 
 _TIMEOUT_HANDSHAKE = 30
@@ -585,13 +586,38 @@ def _limiti(referto: Referto, cfg: ServerConfig) -> None:
     operatore che non sa qual è il tetto sull'output non sa interpretare un
     risultato troncato.
     """
+    ambito = (
+        "fra le connessioni dell'agente"
+        if cfg.state_dir is not None
+        else "solo in questo processo"
+    )
     referto.aggiungi(
         "limiti di esecuzione",
         Esito.OK,
         f"output max {cfg.max_output_bytes // 1024} KiB per stream · "
-        f"{cfg.max_concurrent_tools} esecuzioni contemporanee · "
+        f"{cfg.max_concurrent_tools} esecuzioni contemporanee ({ambito}) · "
         f"stdin dei tool su /dev/null · discendenza terminata al timeout",
     )
+    if cfg.state_dir is None:
+        referto.aggiungi(
+            "posti condivisi",
+            Esito.AVVISO,
+            "senza server.state_dir il tetto vale per processo, e l'host "
+            "avvia un processo per connessione: più connessioni aperte "
+            "possono superarlo",
+            "Stessa state_dir dello store degli override: configurandola, il "
+            "limite diventa comune alle connessioni dello stesso agente.",
+        )
+    else:
+        pool = SlotPool.per_agente(
+            cfg.state_dir, cfg.agent, cfg.max_concurrent_tools
+        )
+        referto.aggiungi(
+            "posti condivisi",
+            Esito.OK,
+            f"{pool.directory} · i posti sono per agente, quindi il tetto di "
+            f"macchina è {cfg.max_concurrent_tools} × agenti attivi",
+        )
 
 
 #: Quanti file esaminare al massimo nel controllo di scrivibilità. Serve a non

@@ -37,8 +37,9 @@ repo_root = ".."
 # Da proteggere poi con `sudo chattr +a`, dopo il primo avvio.
 log_path = "../logs/hermes-audit.jsonl"
 
-# Directory dello stato che deve sopravvivere alla connessione: oggi lo store
-# append-only degli innalzamenti di tier (overrides.jsonl).
+# Directory dello stato condiviso fra i processi del server:
+#   - overrides.jsonl   store append-only degli innalzamenti di tier
+#   - slots/<agente>/   posti di esecuzione, per il limite di concorrenza
 #
 # Hermes avvia un processo server NUOVO a ogni connessione, a ogni
 # /reload-mcp e a ogni sessione. Senza questa directory un tool innalzato a
@@ -61,9 +62,12 @@ log_path = "../logs/hermes-audit.jsonl"
 # checkout o una pulizia lo cancellerebbero. Uno stato di sicurezza non va
 # nell'albero di lavoro. Da creare prima:
 #
-#     sudo install -d -o hermes -g hermes -m 700 /var/lib/hermes
+#     sudo install -d -o hermes -g hermes -m 700 /var/lib/hermes/state
 #
-# state_dir = "/var/lib/hermes"
+# Sottodirectory e non /var/lib/hermes: lì vive anche la .ssh del
+# servizio, e stato e credenziali non condividono una cartella.
+#
+# state_dir = "/var/lib/hermes/state"
 
 # Disponibilità del runtime isolato. A false, i tool che dichiarano
 # requires_container vengono NEGATI, non eseguiti sull'host.
@@ -102,8 +106,16 @@ max_output_bytes = 1048576
 # ciclo può invocare senza fermarsi: oltre il limite l'invocazione viene
 # rifiutata e la riga finisce nel log, invece di accumularsi.
 #
-# Il limite è PER PROCESSO, e Hermes avvia un processo per connessione:
-# contiene un ciclo dentro una sessione, non la somma di piu' sessioni.
+# Con state_dir configurata il limite è comune alle connessioni dello STESSO
+# agente, tramite un file di lock per posto in state_dir/slots/<agente>/.
+# Senza state_dir resta per processo, e Hermes avvia un processo per
+# connessione: contiene un ciclo dentro una sessione, non la somma di più
+# sessioni. Il preflight dice quale dei due vale.
+#
+# I posti sono per agente di proposito: un pool unico permetterebbe a un
+# agente in ciclo di affamare gli altri. Il tetto di macchina è quindi
+# max_concurrent_tools × agenti attivi; per un tetto di macchina vero servono
+# una slice systemd o un cgroup, che contano risorse e non esecuzioni.
 max_concurrent_tools = 2
 
 [vault]
