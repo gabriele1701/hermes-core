@@ -8,6 +8,7 @@ ingiustificata. I test verificano soprattutto che i guasti vengano
 from __future__ import annotations
 
 import io
+import shutil
 import textwrap
 from pathlib import Path
 
@@ -649,11 +650,9 @@ def test_store_dentro_il_repo_segnalato(tmp_path: Path, radice: Path):
         controllo = _controllo(referto, "store fuori dal repo")
         assert controllo.esito is Esito.AVVISO
     finally:
-        percorso = radice / "var-stato-test"
-        if percorso.exists():
-            for figlio in percorso.iterdir():
-                figlio.unlink()
-            percorso.rmdir()
+        # rmtree e non una passata di unlink: da quando il preflight verifica
+        # i posti provandoci davvero, sotto state_dir c'è anche slots/<agente>.
+        shutil.rmtree(radice / "var-stato-test", ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -805,3 +804,41 @@ def test_con_state_dir_il_tetto_e_condiviso(tmp_path: Path, radice: Path):
     # La conseguenza della scelta per-agente va dichiarata, non nascosta.
     assert "× agenti attivi" in posti.messaggio
     assert "slots/echo_dummy" in posti.messaggio
+
+
+def test_posti_verificati_davvero_non_solo_stampati(
+    tmp_path: Path, radice: Path
+):
+    """Il verde deve costare un tentativo, non una formattazione di stringa.
+
+    La directory dei posti nasce alla prima esecuzione, quindi la sua assenza
+    non è un guasto: l'unica domanda utile prima è se nascerà, e si risponde
+    solo provando.
+    """
+    stato = tmp_path / "stato"
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=stato))
+    assert _controllo(referto, "posti condivisi").esito is Esito.OK
+    assert (stato / "slots" / "echo_dummy").is_dir()
+    # Il file di prova non resta: un `slot-NN` creato qui, se il preflight
+    # girasse da root, sarebbe un posto che il servizio non può più aprire.
+    assert list((stato / "slots" / "echo_dummy").iterdir()) == []
+
+
+def test_posti_configurati_ma_non_creabili_e_errore(
+    tmp_path: Path, radice: Path
+):
+    """Il tetto condiviso è promesso e non applicabile: il gate rifiuterà.
+
+    Stesso caso peggiore dello store degli override — un controllo che si
+    crede di avere e non c'è — e qui il preflight è l'unico punto in cui si
+    vede prima di un'invocazione.
+    """
+    stato = tmp_path / "stato"
+    stato.mkdir()
+    # `slots` esiste ma non è una directory: il mkdir dei posti fallirà.
+    (stato / "slots").write_text("non sono una directory\n", encoding="utf-8")
+    referto = esegui(scrivi_config(tmp_path, radice, state_dir=stato))
+    posti = _controllo(referto, "posti condivisi")
+    assert posti.esito is Esito.ERRORE
+    assert "non utilizzabile" in posti.messaggio
+    assert referto.pronto is False

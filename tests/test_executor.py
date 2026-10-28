@@ -24,6 +24,7 @@ from mcp_server.executor import (
     ContainerUnavailable,
     IntegrityMismatch,
     RunResult,
+    SharedSlotsUnusable,
     SubprocessRunner,
     ToolExecutor,
     ambiente_minimo,
@@ -922,12 +923,15 @@ def test_rifiuto_condiviso_restituisce_il_posto_di_processo(
     assert call.outcome is CallOutcome.OK
 
 
-def test_pool_inutilizzabile_degrada_e_lo_registra(repo, registry, audit, tmp_path):
-    """Un guasto del filesystem non deve fermare il lavoro, ma va dichiarato.
+def test_pool_inutilizzabile_nega_e_non_esegue(repo, registry, audit, tmp_path):
+    """Posti configurati e rotti: si rifiuta, non si degrada.
 
-    Fermare l'esecuzione perché un lock non si crea trasformerebbe un problema
-    di permessi in un'interruzione del servizio; tacerlo lascerebbe credere a
-    un tetto complessivo che non c'è.
+    Degradare avrebbe fatto girare il tool oltre il tetto che la
+    configurazione dichiara, e l'avrebbe fatto proprio quando la macchina ha
+    già un guasto — con una risposta che non dà a nessuno motivo di
+    sospettarlo. Il rifiuto è una riga del gate come le altre, correlata
+    all'invocazione: la prova che non basta che l'evento sia registrato, deve
+    essere anche ricollegabile.
     """
     from mcp_server.slots import SlotPool
 
@@ -935,24 +939,37 @@ def test_pool_inutilizzabile_degrada_e_lo_registra(repo, registry, audit, tmp_pa
     blocco.write_text("non sono una directory\n", encoding="utf-8")
 
     registry.register(_spec(repo))
+    runner = RunnerFinto()
+    correlation_id = uuid.uuid4()
     ex = ToolExecutor(
         registry,
         audit,
         repo_root=repo,
-        runner=RunnerFinto(),
+        runner=runner,
         max_concurrent=1,
         slots=SlotPool(blocco, 1),
     )
-    call, _ = ex.execute(
-        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
-    )
-    assert call.outcome is CallOutcome.OK
+    with pytest.raises(SharedSlotsUnusable):
+        ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=correlation_id)
+
+    # Nulla è partito: è la differenza fra un rifiuto e un degrado.
+    assert runner.chiamate == []
 
     righe = [
-        r for r in audit.read_all() if r.action is LogAction.CONCURRENCY_NOT_SHARED
+        r
+        for r in audit.read_all()
+        if r.action is LogAction.TOOL_CALL and r.outcome is CallOutcome.DENIED
     ]
     assert len(righe) == 1
-    assert "vale solo per questo processo" in righe[0].detail
+    assert righe[0].correlation_id == correlation_id
+    assert righe[0].tool_id == "echo.ping"
+    assert righe[0].agent is OwnerAgent.ECHO_DUMMY
+    assert "non eseguita" in righe[0].detail
+    assert "Riprovare non cambia l'esito" in righe[0].detail
+
+    # Il posto in memoria è tornato: un rifiuto non deve consumare capacità.
+    assert ex._posti.acquire(blocking=False) is True
+    ex._posti.release()
 
 
 def test_senza_pool_resta_il_limite_di_processo(repo, registry, audit):

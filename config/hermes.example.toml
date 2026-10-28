@@ -110,7 +110,13 @@ max_output_bytes = 1048576
 # agente, tramite un file di lock per posto in state_dir/slots/<agente>/.
 # Senza state_dir resta per processo, e Hermes avvia un processo per
 # connessione: contiene un ciclo dentro una sessione, non la somma di più
-# sessioni. Il preflight dice quale dei due vale.
+# sessioni. Il preflight dice quale dei due vale, e il catalogo lo dichiara
+# in concurrency_shared_across_connections.
+#
+# Attenzione: configurare state_dir è una promessa. Se poi la directory dei
+# posti non è utilizzabile (permessi, disco pieno), il gate RIFIUTA ogni
+# invocazione invece di ricadere sul limite per processo: un tetto dichiarato
+# e non applicato è peggio di un tetto che non c'è, perché nessuno lo sa.
 #
 # I posti sono per agente di proposito: un pool unico permetterebbe a un
 # agente in ciclo di affamare gli altri. Il tetto di macchina è quindi

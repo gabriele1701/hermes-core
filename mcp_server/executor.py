@@ -151,6 +151,16 @@ class ConcurrencyLimitReached(ExecutionError):
     """Troppe esecuzioni contemporanee in questo processo."""
 
 
+class SharedSlotsUnusable(ExecutionError):
+    """I posti condivisi sono configurati, ma la loro directory non è usabile.
+
+    Distinta da :class:`ConcurrencyLimitReached` di proposito: là la macchina
+    è occupata e riprovare fra poco ha senso, qui è rotta e riprovare no. Due
+    cause con rimedi opposti dietro la stessa eccezione costringerebbero chi
+    legge — persona o modello — a indovinare quale delle due ha incontrato.
+    """
+
+
 class ConfirmationRequired(ExecutionError):
     """La policy richiede una conferma che non è stata fornita."""
 
@@ -456,33 +466,25 @@ class ToolExecutor:
         return self._slots is not None
 
     def _prendi_posto_condiviso(self) -> Posto | None:
-        """Occupa un posto nel pool fra processi, se c'è.
+        """Occupa un posto nel pool fra processi, se configurato.
 
-        Un guasto della directory dei posti **non** blocca l'esecuzione: il
-        limite di processo è già stato applicato, e fermare il lavoro perché
-        un lock non si crea trasformerebbe un problema di filesystem in
-        un'interruzione del servizio. Degrada al limite di processo e lo
-        registra: tacerlo lascerebbe credere a un tetto complessivo che non
-        c'è.
+        Qui non si decide nulla: o il pool non è configurato — e allora il
+        limite per processo è tutto ciò che è stato promesso — o è
+        configurato, e un suo guasto risale al gate.
+
+        Degradare sarebbe stato il riflesso comodo: il semaforo di processo ha
+        già fatto il suo lavoro, e un lock che non si crea somiglia a un
+        problema di filesystem più che a un problema di sicurezza. Ma se i
+        posti sono configurati, il tetto che la configurazione dichiara è
+        quello condiviso: eseguire senza avrebbe significato girare oltre il
+        limite dichiarato proprio nel momento in cui la macchina ha già un
+        guasto — e senza che nessuno, leggendo la risposta, avesse motivo di
+        sospettarlo. È la stessa forma del container, che assente nega invece
+        di ricadere sull'ambiente meno isolato.
         """
         if self._slots is None:
             return None
-        try:
-            return self._slots.acquire()
-        except SlotUnavailable:
-            raise
-        except OSError as err:
-            self._audit.log(
-                correlation_id=self._registry.correlation_id,
-                action=LogAction.CONCURRENCY_NOT_SHARED,
-                outcome=CallOutcome.ERROR,
-                detail=(
-                    f"posti condivisi non utilizzabili in "
-                    f"{self._slots.directory}: {err}. Il limite di "
-                    f"{self._max_concurrent} vale solo per questo processo."
-                ),
-            )
-            return None
+        return self._slots.acquire()
 
     # -- preparazione -------------------------------------------------------- #
 
@@ -661,6 +663,28 @@ class ToolExecutor:
                 f"già {self._max_concurrent} esecuzioni in corso fra le "
                 f"connessioni di questo agente"
             ) from None
+        except OSError as err:
+            # Posti configurati e non utilizzabili: il limite dichiarato non
+            # è applicabile, quindi non si esegue. Il detail dice che non è
+            # partito nulla e che riprovare non serve — distinzione che conta,
+            # perché il rifiuto qui sopra è l'opposto: lì riprovare ha senso.
+            self._posti.release()
+            self._nega(
+                pronta.spec,
+                agent,
+                pronta.effective_tier,
+                correlation_id,
+                target,
+                f"posti condivisi non utilizzabili in "
+                f"{self._slots.directory if self._slots else '?'}: {err}. "
+                f"Il limite fra le connessioni dell'agente è configurato ma "
+                f"non applicabile: invocazione rifiutata, non eseguita. "
+                f"Riprovare non cambia l'esito finché la directory di stato "
+                f"non è riparata.",
+            )
+            raise SharedSlotsUnusable(
+                f"posti condivisi non utilizzabili: {err}"
+            ) from err
         except BaseException:
             # Qualunque altra cosa vada storta qui deve comunque restituire il
             # posto in memoria prima di risalire. Un semaforo perso riduce la

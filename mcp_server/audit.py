@@ -102,6 +102,11 @@ class LogAction(StrEnum):
     OVERRIDE_REJECTED = "override_rejected"
     OVERRIDE_STORE_LOADED = "override_store_loaded"
     OVERRIDE_NOT_PERSISTED = "override_not_persisted"
+    # Non più emessa: i posti condivisi configurati e non utilizzabili ora
+    # negano l'esecuzione, e il rifiuto è una riga `tool_call`/`denied` come
+    # ogni altra decisione del gate. Il valore resta nel vocabolario perché i
+    # log scritti prima lo contengono, e un log append-only non si rilegge se
+    # si toglie un'azione che vi compare.
     CONCURRENCY_NOT_SHARED = "concurrency_not_shared"
     TOOL_CALL = "tool_call"
     SECRET_ACCESS = "secret_access"

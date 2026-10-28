@@ -878,7 +878,19 @@ def test_server_collega_i_posti_condivisi(repo: Path, tmp_path: Path):
     srv = crea_server(scrivi_config(repo, righe_server=f'state_dir = "{stato}"'))
     assert srv._executor.concorrenza_condivisa is True
     assert srv._executor._slots.directory == stato / "slots" / "echo_dummy"
+    assert srv._list_available_tools()["concurrency_shared_across_connections"] is True
 
 
 def test_server_senza_state_dir_resta_per_processo(server: HermesServer):
     assert server._executor.concorrenza_condivisa is False
+
+
+def test_catalogo_dichiara_il_tetto_non_condiviso(server: HermesServer):
+    """Un presidio assente si dichiara dove lo si legge, non solo nel preflight.
+
+    `container_available` e `vault_is_stub` arrivano già al modello; il tetto
+    sulle esecuzioni è l'unico che non arrivava, ed è quello che decide se più
+    connessioni possono superarlo.
+    """
+    catalogo = server._list_available_tools()
+    assert catalogo["concurrency_shared_across_connections"] is False

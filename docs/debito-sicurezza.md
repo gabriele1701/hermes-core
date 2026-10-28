@@ -25,7 +25,7 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | HC-07 — provenienza nel log controllata dal client | patch sic. 5 | `correlation_id` generato dal server, quello del client registrato come `peer_correlation_id` e collegato da entrambi i lati. Etichetta onesta: «richiesto dal client MCP», non «override utente». |
 | Gli override di tier non sopravvivevano alla connessione | patch sic. 6a | Tre fonti e un solo `max()`: tier dichiarato (pavimento), `override_tier` in `[[tool]]`, store append-only in `state_dir`. Scrive **solo gli incrementi reali**, quindi ha un tetto strutturale di due righe per tool (`2 × tool × connessioni contemporanee` nel caso concorrente) e non va ruotato. `state_dir` assente o non scrivibile → innalzamento valido per la connessione, **dichiarato** in `override_scope` e registrato come `override_not_persisted`. |
 | Il `detail` diceva «in attesa di conferma dell'utente» | patch sic. 6a | Non c'era nessuna attesa: nessun canale di conferma è collegato. Un modello che legge «in attesa» conclude che qualcuno risponderà e riprova — o cerca un'altra via per lo stesso effetto. Ora il testo dice che il tool non è stato eseguito e che riprovare non cambia l'esito. Il flusso resta aperto qui sotto. |
-| Il limite di concorrenza era per processo | patch sic. 6b | Un file di lock per posto in `state_dir/slots/<agente>/`, preso con `flock(LOCK_EX|LOCK_NB)`. Il kernel lo rilascia alla morte del processo: niente lock orfani, niente scadenze da indovinare. Il semaforo in memoria resta come percorso veloce. Senza `state_dir` il tetto resta per processo, dichiarato nel preflight. |
+| Il limite di concorrenza era per processo | patch sic. 6b | Un file di lock per posto in `state_dir/slots/<agente>/`, preso con `flock(LOCK_EX|LOCK_NB)`. Il kernel lo rilascia alla morte del processo: niente lock orfani, niente scadenze da indovinare. Il semaforo in memoria resta come percorso veloce. **Assente è diverso da rotto:** senza `state_dir` il tetto resta per processo ed è dichiarato nel preflight e nel catalogo (`concurrency_shared_across_connections`); con `state_dir` configurata e la directory dei posti non utilizzabile il tetto è promesso e non applicabile, quindi il gate **rifiuta** invece di degradare — stessa regola del container assente. |
 | HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che e' la protezione vera, e' documentato in `docs/dipendenze.md` e resta da generare. |
 
 ---
@@ -235,9 +235,15 @@ una VM molto prima di dieci script che dormono. Lo strumento giusto è una
 slice `systemd` o un cgroup con limiti di CPU e memoria, che vale per
 qualunque cosa giri sulla macchina e non solo per i tool lanciati da qui.
 
-**Da rivalutare se:** gli agenti attivi diventeranno molti, o se un agente
-arriverà a poter saturare la VM da solo — nel qual caso serve il cgroup, non
-un pool condiviso.
+**Condizione di chiusura:** la slice `systemd` o il cgroup che arrivano con
+A1 (uid separato per i tool). Non è una coincidenza di calendario: A1 deve
+comunque lanciare i tool sotto un'altra identità, e `systemd-run --uid` con
+`MemoryMax`/`TasksMax` dà nello stesso passaggio l'uid e il tetto di risorse.
+Questa voce si chiude lì, o non si chiude — un pool condiviso non la chiude,
+la sposta su un altro guasto.
+
+**Da rivalutare prima se:** gli agenti attivi diventeranno molti, o se un
+agente arriverà a poter saturare la VM da solo.
 
 ---
 

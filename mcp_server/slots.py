@@ -43,13 +43,23 @@ La conseguenza va detta: il tetto di macchina è ``N × agenti``, non ``N``. Un
 tetto di macchina vero non è lavoro di questo processo — lo danno una slice
 systemd o un cgroup, che contano CPU e memoria reali invece di esecuzioni.
 
-Degradare dichiarandolo
------------------------
+Assente è diverso da rotto
+-------------------------
 
-Senza ``state_dir``, o se la directory dei posti non è utilizzabile, il limite
-resta quello di prima — per processo — e la cosa viene **registrata**, non
-taciuta. Vale la stessa regola degli override: un controllo che decade in
-silenzio è peggio di un controllo assente.
+Senza ``state_dir`` il limite resta quello di prima — per processo — e il
+preflight e il catalogo lo dichiarano. È una configurazione che non promette
+il tetto condiviso, e chi la legge sa cosa non ha.
+
+Se invece ``state_dir`` c'è e la directory dei posti non è utilizzabile, il
+tetto condiviso è **promesso e non applicabile**, e allora non si esegue: il
+gate rifiuta. Eseguire lo stesso avrebbe superato in silenzio un limite che la
+configurazione dichiara, nel momento in cui la macchina ha già un guasto. È la
+stessa forma del container, che assente nega invece di ricadere sull'ambiente
+meno isolato.
+
+Per questo ``acquire`` non inghiotte nulla: la distinzione fra «non
+configurato» e «configurato e rotto» esiste solo fuori di qui, e un modulo che
+decidesse al posto del gate la cancellerebbe.
 """
 
 from __future__ import annotations

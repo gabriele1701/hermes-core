@@ -296,6 +296,13 @@ class HermesServer:
             "vault_backend": self._vault.nome_backend,
             "vault_is_stub": self._vault.e_stub,
             "container_available": self._config.container_available,
+            # Come gli altri due: un presidio che non c'è va dichiarato dove
+            # lo si legge, non solo nel preflight. False significa che il
+            # tetto sulle esecuzioni vale per questo processo, e l'host ne
+            # avvia uno per connessione.
+            "concurrency_shared_across_connections": (
+                self._executor.concorrenza_condivisa
+            ),
             "tools": elenco,
         }
 

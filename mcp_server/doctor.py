@@ -31,6 +31,7 @@ from mcp_server.contracts import RiskTier, ToolSpec
 from mcp_server.executor import risolvi_script, sha256_file
 from mcp_server.overrides import NOME_FILE as NOME_FILE_OVERRIDE
 from mcp_server.overrides import OverrideStore, OverrideStoreError
+from mcp_server.slots import NOME_DIR as NOME_DIR_POSTI
 from mcp_server.slots import SlotPool
 from mcp_server.tiers import derive_policy_for
 
@@ -608,16 +609,69 @@ def _limiti(referto: Referto, cfg: ServerConfig) -> None:
             "Stessa state_dir dello store degli override: configurandola, il "
             "limite diventa comune alle connessioni dello stesso agente.",
         )
-    else:
-        pool = SlotPool.per_agente(
-            cfg.state_dir, cfg.agent, cfg.max_concurrent_tools
-        )
+        return
+
+    pool = SlotPool.per_agente(cfg.state_dir, cfg.agent, cfg.max_concurrent_tools)
+
+    # Non basta stampare il percorso: la directory nasce alla prima
+    # esecuzione, quindi l'unica domanda utile prima è se nascerà — e si
+    # risponde solo provandoci. Un controllo che non riproduce l'operazione
+    # che diagnostica sta rispondendo su un'altra cosa.
+    #
+    # Il file di prova si chiama .preflight e viene rimosso: NON si crea un
+    # vero `slot-NN`. Il preflight lanciato da root lo creerebbe intestato a
+    # root, il servizio non riuscirebbe più ad aprirlo e — da quando i posti
+    # rotti negano invece di degradare — il gate rifiuterebbe ogni
+    # invocazione. Un controllo non deve poter causare il guasto che cerca.
+    prova = pool.directory / ".preflight"
+    utente = _utente_di_servizio(cfg) or "<utente-di-servizio>"
+    try:
+        pool.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(prova, os.O_RDWR | os.O_CREAT, 0o600)
+        os.close(fd)
+    except OSError as err:
         referto.aggiungi(
             "posti condivisi",
-            Esito.OK,
-            f"{pool.directory} · i posti sono per agente, quindi il tetto di "
-            f"macchina è {cfg.max_concurrent_tools} × agenti attivi",
+            Esito.ERRORE,
+            f"{pool.directory} configurata ma non utilizzabile: {err}",
+            f"sudo install -d -o {utente} -g {utente} -m 700 {cfg.state_dir}\n"
+            "             Finché non è riparata il gate rifiuta ogni "
+            "invocazione: un tetto dichiarato e non applicato è peggio di un "
+            "tetto che non c'è, perché nessuno sa di averlo perso.",
         )
+        return
+    finally:
+        try:
+            prova.unlink()
+        except OSError:  # pragma: no cover - niente da rimuovere
+            pass
+
+    # Stessa trappola dello store: la directory la crea chi lancia il
+    # preflight, e lanciato da root nasce intestata a root. Lì il danno era un
+    # falso verde sulla persistenza; qui è una toolbox che rifiuta tutto.
+    st = _stat(pool.directory)
+    proprietario = _utente(st.st_uid) if st is not None else None
+    servizio = _utente_di_servizio(cfg)
+    if servizio is not None and proprietario is not None and proprietario != servizio:
+        referto.aggiungi(
+            "proprietario dei posti",
+            Esito.ERRORE,
+            f"{pool.directory} appartiene a {proprietario}, ma il server gira "
+            f"come {servizio}: non potrà prendere un posto, e il gate "
+            f"rifiuterà ogni invocazione",
+            f"sudo chown -R {servizio}: {cfg.state_dir / NOME_DIR_POSTI}\n"
+            f"             Poi rilanciare il preflight come {servizio}, non "
+            f"come root: è l'esecuzione dall'utente sbagliato ad aver creato "
+            f"la directory così.",
+        )
+        return
+
+    referto.aggiungi(
+        "posti condivisi",
+        Esito.OK,
+        f"{pool.directory} · i posti sono per agente, quindi il tetto di "
+        f"macchina è {cfg.max_concurrent_tools} × agenti attivi",
+    )
 
 
 #: Quanti file esaminare al massimo nel controllo di scrivibilità. Serve a non

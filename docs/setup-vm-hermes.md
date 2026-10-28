@@ -190,15 +190,29 @@ Sono gli unici due posti in cui il servizio ha bisogno di scrivere, e stanno
 fuori dal repo di proposito: il repo è in sola lettura per l'utente che
 esegue, ed è la mitigazione del TOCTOU fra verifica dello SHA ed esecuzione.
 
-`/var/lib/hermes/state` tiene due cose: lo **store degli innalzamenti di
-tier** (`overrides.jsonl`) e i **posti di esecuzione** (`slots/<agente>/`), i
-file di lock con cui il limite di esecuzioni contemporanee vale fra le
-connessioni dello stesso agente invece che dentro un solo processo. I posti non
-vanno irrigiditi né ripuliti a mano: sono file vuoti il cui unico contenuto
-informativo è il lock, che il kernel rilascia alla morte del processo. Senza, un tool alzato a Rosso dopo un incidente torna al
-tier dichiarato alla connessione successiva, perché Hermes avvia un processo
-nuovo ogni volta. Il server parte lo stesso e lo dichiara nelle risposte, ma
-la persistenza è il comportamento che serve.
+`/var/lib/hermes/state` tiene due cose.
+
+Lo **store degli innalzamenti di tier** (`overrides.jsonl`). Senza, un tool
+alzato a Rosso dopo un incidente torna al tier dichiarato alla connessione
+successiva, perché Hermes avvia un processo nuovo ogni volta. Il server parte
+lo stesso e lo dichiara nelle risposte, ma la persistenza è il comportamento
+che serve.
+
+I **posti di esecuzione** (`slots/<agente>/`), i file di lock con cui il
+limite di esecuzioni contemporanee vale fra le connessioni dello stesso agente
+invece che dentro un solo processo. Non vanno irrigiditi con `chattr +a` né
+ripuliti a mano: sono file il cui unico contenuto informativo è il lock, che
+il kernel rilascia alla morte del processo. La directory nasce alla prima
+esecuzione; il preflight verifica in anticipo che possa nascere.
+
+**Se la directory dei posti non è utilizzabile il gate rifiuta ogni
+invocazione**, e non è un guasto da aspettare che passi: il tetto condiviso
+sarebbe dichiarato dalla configurazione e non applicato, e si eseguirebbe
+oltre un limite che tutti credono attivo. Il rimedio è lo stesso comando
+`install -d` qui sopra; il preflight lo stampa già quando il controllo
+fallisce. La differenza con l'assenza di `state_dir` è che lì il limite
+condiviso non è mai stato promesso: il catalogo lo dice con
+`concurrency_shared_across_connections: false`.
 
 Anche lo store si può irrigidire con `chattr +a`, per la stessa ragione del
 log e con la stessa avvertenza: l'attributo va messo sul **file**, quindi dopo
