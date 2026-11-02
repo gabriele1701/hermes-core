@@ -226,29 +226,39 @@ alzare un tier, cioè chiedere più conferme.
 
 ---
 
-## 4. La chiave SSH, vincolata a un comando
+## 4. Il canale SSH, vincolato e fuori dalla portata del servizio
 
 Qui sta la parte che vale la pena fare bene. La chiave che userà Hermes **non
 deve essere un accesso alla macchina**: deve essere il permesso di avviare
 quel server e nient'altro. Se un domani quella chiave finisse altrove, non
 darebbe una shell.
 
+E c'è una seconda proprietà, meno ovvia della prima: **la restrizione non deve
+stare dove il servizio può cambiarla.** Nella versione precedente di questo
+documento il comando vincolato viveva in `/var/lib/hermes/.ssh/authorized_keys`,
+dentro la home del servizio e di sua proprietà — e i tool girano come il
+servizio. Un tool compromesso poteva togliere il `command=`, aggiungere la
+propria chiave, e il canale vincolato diventava una shell senza che una riga di
+log lo dicesse. La restrizione era custodita da chi dovrebbe subirla.
+
+### 4.1 La chiave del servizio
+
 Su **Windows**, da PowerShell:
 
 ```powershell
-ssh-keygen -t ed25519 -C "hermes-desktop@windows"
-type $env:USERPROFILE\.ssh\id_ed25519.pub
+ssh-keygen -t ed25519 -C "hermes-core@windows" -f $env:USERPROFILE\.ssh\id_ed25519_hermes_mcp
+type $env:USERPROFILE\.ssh\id_ed25519_hermes_mcp.pub
 ```
 
-Sulla **VM**, incolla quella chiave pubblica in `authorized_keys` di `hermes`,
-**preceduta dalle restrizioni**, tutto su una riga:
+Sulla **VM**, la chiave pubblica va in una directory di **root**, non nella home
+del servizio, preceduta dalle restrizioni e tutto su una riga:
 
 ```sh
-sudo install -d -o hermes -g hermes -m 700 /var/lib/hermes/.ssh
-sudo -u hermes tee -a /var/lib/hermes/.ssh/authorized_keys >/dev/null <<'EOF'
-command="/opt/hermes-core/bin/hermes-core-server",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA...INCOLLA_QUI... hermes-desktop@windows
+sudo install -d -m 755 -o root -g root /etc/ssh/authorized_keys.d
+sudo tee /etc/ssh/authorized_keys.d/hermes >/dev/null <<'EOF'
+command="/opt/hermes-core/bin/hermes-core-server",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA...INCOLLA_QUI... hermes-core@windows
 EOF
-sudo chmod 600 /var/lib/hermes/.ssh/authorized_keys
+sudo chmod 644 /etc/ssh/authorized_keys.d/hermes
 ```
 
 Cosa fa ciascun pezzo:
@@ -261,8 +271,157 @@ Cosa fa ciascun pezzo:
 | `no-agent-forwarding`, `no-X11-forwarding` | nessuna delega di credenziali, nessuna superficie grafica |
 
 Conseguenza pratica: nel comando di Hermes **non serve indicare lo script**,
-perché il vincolo lo impone già. Più avanti, un secondo agente avrà una
-propria chiave con il proprio comando vincolato — lo schema regge.
+perché il vincolo lo impone già. Più avanti, un secondo agente avrà una propria
+chiave con il proprio comando vincolato — lo schema regge.
+
+File di root e permessi `644`: deve essere **leggibile** da `sshd` (che lo apre
+come root) e **non scrivibile** da nessun altro. Il servizio non ha bisogno di
+scriverlo mai.
+
+### 4.2 Il drop-in di sshd
+
+Le stesse restrizioni vanno anche nella configurazione di `sshd`, che il
+servizio non può modificare. Le opzioni dentro `authorized_keys` restano come
+seconda rete, ma non sono più l'unica.
+
+Il file è versionato nel repo: `config/sshd/10-hermes.conf`. Prima di
+installarlo, **verifica che `sshd` legga i drop-in**:
+
+```sh
+grep -n '^Include' /etc/ssh/sshd_config
+sed -n "1,$(grep -n '^Include' /etc/ssh/sshd_config | cut -d: -f1)p" \
+    /etc/ssh/sshd_config | grep -vE '^\s*#|^\s*$|^Include'
+```
+
+Il primo comando deve trovare `Include /etc/ssh/sshd_config.d/*.conf`; il
+secondo deve stampare **niente**. In `sshd` vince il **primo** valore
+incontrato, quindi un `Include` in fondo al file, o preceduto da direttive
+attive, lascia vincere quelle e il drop-in resta inerte — installato e senza
+effetto, che è il falso verde peggiore possibile. Debian 12 e Ubuntu ≥ 22.04 lo
+hanno in cima; su distribuzioni più vecchie va aggiunto a mano come prima riga.
+
+```sh
+sudo install -m 644 -o root -g root \
+    config/sshd/10-hermes.conf /etc/ssh/sshd_config.d/10-hermes.conf
+sudo sshd -t
+```
+
+`sshd -t` deve stampare niente. Poi guarda **cosa sarà attivo**, non cosa c'è
+scritto nel file:
+
+```sh
+sudo sshd -T | grep -iE 'passwordauthentication|permitrootlogin|authenticationmethods|allowusers'
+sudo sshd -T -C user=hermes | grep -iE 'forcecommand|authorizedkeysfile|permittty'
+```
+
+`sshd -T` stampa la configurazione effettiva dopo tutti gli include e i merge:
+è la differenza fra leggere un file e sapere cosa farà. Attesi
+`passwordauthentication no`, `authenticationmethods publickey`, e per `hermes`
+il `forcecommand` e `authorizedkeysfile /etc/ssh/authorized_keys.d/hermes`.
+
+> **Il drop-in disattiva l'accesso con password per tutti.** Prima di
+> ricaricare `sshd`, assicurati di avere una chiave funzionante anche per
+> l'utente amministrativo, verificata forzando il metodo:
+>
+> ```
+> ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no utente@vm
+> ```
+>
+> Senza `-o`, `ssh` ricade sulla password **senza dirlo**: entreresti,
+> concluderesti che la chiave funziona, e dopo il reload ti troveresti fuori.
+> Modifica `AllowUsers` nel drop-in se l'utente amministrativo ha un altro
+> nome.
+
+```sh
+sudo systemctl reload ssh
+```
+
+La sessione aperta sopravvive al reload: **non chiuderla** finché una seconda
+connessione nuova non ha funzionato. Per tornare indietro basta
+`sudo rm /etc/ssh/sshd_config.d/10-hermes.conf && sudo systemctl reload ssh`.
+
+Infine, togli il file che non è più letto:
+
+```sh
+sudo rm /var/lib/hermes/.ssh/authorized_keys
+```
+
+Lasciarlo significa che la prossima modifica a quelle chiavi verrà fatta nel
+file sbagliato, senza effetto e senza errore. Il preflight lo segnala.
+
+### 4.3 Il perimetro di rete
+
+Gli indirizzi **non** stanno nel drop-in: quello è versionato, e un indirizzo è
+per-installazione. Il perimetro lo definisce `ufw`, con l'IP della postazione
+da cui Hermes si connette — che si legge dal server, invece di dedurlo:
+
+```sh
+echo $SSH_CONNECTION        # il primo valore è l'IP del client
+sudo ufw allow from <IP-postazione> to any port 22 proto tcp comment 'SSH postazione Hermes'
+sudo ufw status numbered
+```
+
+Poi cancella le regole `22/tcp ALLOW IN Anywhere` **per numero, partendo dal più
+alto** (ce ne sono due, v4 e v6; cancellare rinumera le altre):
+
+```sh
+sudo ufw delete <numero più alto>
+sudo ufw delete <numero più basso>
+sudo ufw status verbose
+```
+
+Deve restare una sola regola per la 22, con la sorgente della postazione. In
+caso di problemi, `sudo ufw allow 22/tcp` dalla sessione aperta rimette tutto
+come prima.
+
+**Un solo indirizzo e non la sottorete**, anche se la sottorete è "solo il
+laboratorio": su quella rete finiranno le altre VM del progetto, compresa quella
+di pentest, che per definizione esegue codice ostile. Con la sottorete aperta,
+quella VM raggiungerebbe la porta 22 del server MCP.
+
+### 4.4 La chiave privata sulla postazione
+
+Lato Windows la chiave privata va protetta con le ACL, perché è l'unica cosa
+che sta fra un processo locale e il canale verso la VM:
+
+```powershell
+icacls $env:USERPROFILE\.ssh\id_ed25519_hermes_mcp /inheritance:r /grant:r "${env:USERNAME}:(R)"
+icacls $env:USERPROFILE\.ssh\id_ed25519_hermes_mcp
+```
+
+`/inheritance:r` rompe l'ereditarietà dalla cartella, `/grant:r` sostituisce i
+permessi con il solo utente in lettura. Nell'output non devono comparire
+`Users`, `Everyone` o altri account utente.
+
+`BUILTIN\Administrators` e `NT AUTHORITY\SYSTEM` restano, e **va bene**: un
+amministratore locale può in ogni caso prendere la proprietà del file e
+riassegnarsi i permessi, quindi togliere quelle voci dà un output più pulito e
+zero sicurezza in più. Se un attaccante ha quei privilegi, la chiave è l'ultimo
+dei problemi.
+
+**La chiave del servizio non ha passphrase, ed è una scelta.** Il motivo: per un
+uso non interattivo la passphrase deve stare permanentemente nell'`ssh-agent`,
+che su Windows persiste le chiavi nel registro cifrate con DPAPI dell'utente —
+estraibili da chi ha quel contesto. La passphrase proteggerebbe quindi dalla
+*copia del file*, non da un processo locale compromesso, e in cambio
+introdurrebbe una dipendenza operativa: con l'agente spento, Hermes chiede una
+passphrase a un canale non interattivo e la connessione fallisce con un errore
+che non punta alla causa. La protezione a riposo è l'ACL; il perimetro è il
+comando vincolato più la regola `ufw`, che rende quella chiave inutile da
+qualunque altra macchina.
+
+Se un'installazione preferisce la passphrase, si aggiunge senza rigenerare la
+chiave e senza toccare la VM — la parte pubblica non cambia:
+
+```powershell
+ssh-keygen -p -f $env:USERPROFILE\.ssh\id_ed25519_hermes_mcp
+Get-Service ssh-agent | Set-Service -StartupType Automatic   # altrimenti al riavvio non parte
+Start-Service ssh-agent
+ssh-add $env:USERPROFILE\.ssh\id_ed25519_hermes_mcp
+```
+
+L'avvio automatico del servizio è il passaggio che si dimentica, e il guasto
+compare solo al riavvio successivo.
 
 ---
 
@@ -289,6 +448,15 @@ Due esempi visti sul campo:
   TOCTOU — dal proprietario del repo non può rispondere e si dichiara non
   applicabile. Solo eseguito come `hermes` verifica davvero che il servizio
   non possa riscrivere gli script che esegue.
+
+* il controllo sul **canale del servizio** confronta ciò che dichiara il
+  drop-in di `sshd` con ciò che risulta sul filesystem, e se divergono vince
+  la misura: dice ERRORE se il file che autorizza il canale appartiene al
+  servizio o è scrivibile da altri, anche quando la configurazione sembra a
+  posto. La verifica autorevole della configurazione effettiva resta
+  `sudo sshd -T -C user=hermes`, che richiede root e quindi non è alla
+  portata del preflight: il messaggio del controllo lo dice, invece di far
+  credere il contrario.
 
 La seconda è la ragione per cui vale la pena fare così anche quando il primo
 modo sembra funzionare: un verde ottenuto dall'utente sbagliato è un verde su

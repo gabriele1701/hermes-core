@@ -1049,8 +1049,238 @@ def esegui(percorso_config: str | Path) -> Referto:
     _vault(referto, cfg)
     _container(referto, cfg)
     _tool(referto, cfg)
+    _canale_ssh(referto, cfg)
     _handshake(referto, percorso)
     return referto
+
+
+#: Percorsi di sshd. Fissi: non sono configurabili in ``hermes.toml`` perché
+#: non sono scelte del server ma del sistema su cui gira.
+PERCORSO_SSHD_CONFIG = Path("/etc/ssh/sshd_config")
+PERCORSO_DROPIN_SSH = Path("/etc/ssh/sshd_config.d/10-hermes.conf")
+
+
+def _direttive_prima_dell_include(percorso: Path) -> tuple[bool, list[str]]:
+    """``(include presente, direttive attive che lo precedono)``.
+
+    In ``sshd`` vince il **primo** valore incontrato, quindi un ``Include`` in
+    fondo al file lascerebbe vincere le direttive della distribuzione e il
+    drop-in non avrebbe effetto — o ne avrebbe solo su ciò che non è già
+    scritto sopra. Un drop-in installato e inerte è il falso verde peggiore
+    possibile: il file c'è, ``sshd -t`` passa, e la configurazione è quella di
+    prima.
+    """
+    try:
+        righe = percorso.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False, []
+    precedenti: list[str] = []
+    for riga in righe:
+        pulita = riga.strip()
+        if not pulita or pulita.startswith("#"):
+            continue
+        if pulita.lower().startswith("include"):
+            return True, precedenti
+        precedenti.append(pulita.split()[0])
+    return False, precedenti
+
+
+def _dropin(percorso: Path) -> dict[str, str] | None:
+    """Direttive del blocco ``Match User`` del drop-in, o ``None``.
+
+    Lettura testuale, non configurazione effettiva: la risposta autorevole la
+    dà ``sshd -T -C user=<servizio>``, che richiede root e quindi non è
+    disponibile a un preflight eseguito — come deve — dall'utente di servizio.
+    Il messaggio del controllo lo dice, invece di far credere il contrario.
+    """
+    try:
+        righe = percorso.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    dentro = False
+    trovate: dict[str, str] = {}
+    for riga in righe:
+        pulita = riga.strip()
+        if not pulita or pulita.startswith("#"):
+            continue
+        parole = pulita.split(None, 1)
+        chiave = parole[0].lower()
+        if chiave == "match":
+            dentro = parole[1].lower().startswith("user") if len(parole) > 1 else False
+            continue
+        if dentro and len(parole) > 1:
+            trovate[chiave] = parole[1].strip()
+    return trovate
+
+
+def _canale_ssh(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica che il canale del servizio non possa auto-autorizzarsi (HC-04).
+
+    Il difetto che questo controllo esiste per vedere: le autorizzazioni del
+    canale vivevano in ``~<servizio>/.ssh/authorized_keys``, di proprietà del
+    servizio — e i tool girano come il servizio. Un tool compromesso poteva
+    togliere il ``command=`` e aggiungere la propria chiave, trasformando un
+    canale vincolato in una shell, senza che una riga di log lo dicesse.
+
+    La proprietà da verificare non è «il drop-in è installato» ma **«il file
+    che autorizza il canale non è scrivibile da chi lo usa»**. La prima è una
+    configurazione, la seconda è il confine: si controllano entrambe, e se
+    divergono vince quella che si misura sul filesystem.
+
+    Non applicabile dove non c'è ``sshd``: il server può girare sulla stessa
+    macchina del client, e un controllo che pretende un canale inesistente
+    produce un errore su una installazione sana.
+    """
+    if _stat(PERCORSO_SSHD_CONFIG) is None:
+        return
+
+    servizio = _utente_di_servizio(cfg)
+    if servizio is None:
+        referto.aggiungi(
+            "canale ssh del servizio",
+            Esito.AVVISO,
+            "c'è sshd ma l'utente di servizio non è deducibile: "
+            "l'irrigidimento del canale non è verificabile",
+            "Il proprietario della directory del log è il testimone usato per "
+            "dedurlo: crearla come l'utente che eseguirà il server.",
+        )
+        return
+
+    include, precedenti = _direttive_prima_dell_include(PERCORSO_SSHD_CONFIG)
+    direttive = _dropin(PERCORSO_DROPIN_SSH)
+
+    if direttive is None:
+        referto.aggiungi(
+            "canale ssh del servizio",
+            Esito.AVVISO,
+            f"{PERCORSO_DROPIN_SSH} assente: le restrizioni del canale, se "
+            f"esistono, vivono solo nella authorized_keys del servizio — che "
+            f"il servizio stesso può riscrivere",
+            "sudo install -m 644 -o root -g root "
+            "config/sshd/10-hermes.conf "
+            f"{PERCORSO_DROPIN_SSH}\n"
+            "             poi: sudo sshd -t && sudo systemctl reload ssh",
+        )
+    elif not include:
+        referto.aggiungi(
+            "canale ssh del servizio",
+            Esito.ERRORE,
+            f"il drop-in {PERCORSO_DROPIN_SSH.name} è installato ma "
+            f"{PERCORSO_SSHD_CONFIG} non ha una riga Include: non viene letto",
+            "Aggiungere in CIMA a sshd_config:\n"
+            "             Include /etc/ssh/sshd_config.d/*.conf\n"
+            "             In sshd vince il primo valore incontrato, quindi "
+            "l'Include va prima delle direttive della distribuzione.",
+        )
+    elif precedenti:
+        referto.aggiungi(
+            "canale ssh del servizio",
+            Esito.AVVISO,
+            f"l'Include in {PERCORSO_SSHD_CONFIG} è preceduto da "
+            f"{len(precedenti)} direttive attive ({', '.join(precedenti[:4])}): "
+            f"su quelle vince sshd_config, non il drop-in",
+            "Spostare l'Include sopra le direttive, o verificare con "
+            f"sudo sshd -T -C user={servizio} quali valori sono davvero "
+            "attivi.",
+        )
+    else:
+        mancanti = [
+            d for d in ("forcecommand", "authorizedkeysfile") if d not in direttive
+        ]
+        if mancanti:
+            referto.aggiungi(
+                "canale ssh del servizio",
+                Esito.ERRORE,
+                f"nel blocco Match del drop-in manca {', '.join(mancanti)}: "
+                f"il vincolo sul comando o la posizione delle chiavi resta "
+                f"dove il servizio può cambiarlo",
+                "Reinstallare config/sshd/10-hermes.conf dal repo senza "
+                "modifiche al blocco Match.",
+            )
+        else:
+            referto.aggiungi(
+                "canale ssh del servizio",
+                Esito.OK,
+                f"{PERCORSO_DROPIN_SSH.name}: comando vincolato e chiavi fuori "
+                f"dalla home del servizio (lettura del file, non configurazione "
+                f"effettiva: l'autorevole è sudo sshd -T -C user={servizio})",
+            )
+
+    # -- il confine vero, misurato sul filesystem --------------------------- #
+
+    percorso_chiavi = None
+    if direttive:
+        dichiarato = direttive.get("authorizedkeysfile", "").split()
+        if dichiarato and dichiarato[0].startswith("/"):
+            percorso_chiavi = Path(dichiarato[0])
+
+    if percorso_chiavi is not None:
+        st = _stat(percorso_chiavi)
+        if st is None:
+            referto.aggiungi(
+                "autorizzazioni del canale",
+                Esito.ERRORE,
+                f"{percorso_chiavi} è dichiarato in AuthorizedKeysFile ma non "
+                f"è ispezionabile: il servizio non potrà autenticarsi",
+                f"sudo install -d -m 755 -o root -g root "
+                f"{percorso_chiavi.parent}\n"
+                f"             sudo install -m 644 -o root -g root "
+                f"<chiave.pub> {percorso_chiavi}",
+            )
+        else:
+            proprietario = _utente(st.st_uid)
+            modo = stat.S_IMODE(st.st_mode)
+            if proprietario == servizio or modo & 0o022:
+                referto.aggiungi(
+                    "autorizzazioni del canale",
+                    Esito.ERRORE,
+                    f"{percorso_chiavi} è di {proprietario} con permessi "
+                    f"{modo:04o}: chi usa il canale può riscrivere le proprie "
+                    f"autorizzazioni, che è il difetto che spostarle doveva "
+                    f"chiudere",
+                    f"sudo chown root: {percorso_chiavi} && "
+                    f"sudo chmod 644 {percorso_chiavi}",
+                )
+            else:
+                referto.aggiungi(
+                    "autorizzazioni del canale",
+                    Esito.OK,
+                    f"{percorso_chiavi} è di {proprietario}, {modo:04o}: "
+                    f"{servizio} non può modificare le proprie autorizzazioni",
+                )
+
+    # -- il residuo nella home, che non è più letto ma inganna -------------- #
+
+    try:
+        home = Path(pwd.getpwnam(servizio).pw_dir)
+    except KeyError:  # pragma: no cover - l'utente esiste, l'abbiamo dedotto da lui
+        return
+    residuo = home / ".ssh" / "authorized_keys"
+    st_residuo = _stat(residuo)
+    if st_residuo is None:
+        return
+    if percorso_chiavi is not None and percorso_chiavi != residuo:
+        referto.aggiungi(
+            "residuo nella home del servizio",
+            Esito.AVVISO,
+            f"{residuo} esiste ma sshd legge {percorso_chiavi}: un file che "
+            f"sembra autorevole e non lo è",
+            f"sudo rm {residuo}\n"
+            "             Lasciarlo significa che la prossima modifica a "
+            "quelle chiavi verrà fatta nel file sbagliato, senza effetto e "
+            "senza errore.",
+        )
+    elif _utente(st_residuo.st_uid) == servizio:
+        referto.aggiungi(
+            "autorizzazioni del canale",
+            Esito.ERRORE,
+            f"le autorizzazioni del canale sono in {residuo}, di proprietà di "
+            f"{servizio}: un tool compromesso può togliersi il comando "
+            f"vincolato e aggiungere una chiave (HC-04)",
+            "Installare config/sshd/10-hermes.conf, che sposta "
+            "AuthorizedKeysFile in /etc/ssh/authorized_keys.d/, e poi "
+            f"rimuovere {residuo}.",
+        )
 
 
 def stampa(referto: Referto, destinazione=sys.stdout) -> None:
