@@ -67,10 +67,12 @@ from mcp_server.contracts import (
     ToolCall,
 )
 from mcp_server.executor import (
+    ConcurrencyLimitReached,
     ConfirmationRequired,
     ContainerUnavailable,
     ExecutionError,
     IntegrityMismatch,
+    SharedSlotsUnusable,
     ToolExecutor,
 )
 from mcp_server.overrides import OverrideScope, OverrideStore
@@ -81,6 +83,7 @@ from mcp_server.registry import (
     ToolRegistry,
     ToolSpecRejected,
 )
+from mcp_server.slots import SlotPool
 from mcp_server.vault import StubBackend, Vault, VaultBackend
 
 NOME_SERVER = "hermes-core"
@@ -170,6 +173,16 @@ class HermesServer:
             tool_python_flags=config.tool_python_flags,
             max_output_bytes=config.max_output_bytes,
             max_concurrent=config.max_concurrent_tools,
+            # Senza state_dir il limite resta per processo, come prima. Non
+            # si inventa una directory: l'assenza ha una conseguenza precisa
+            # che il preflight dichiara.
+            slots=(
+                SlotPool.per_agente(
+                    config.state_dir, config.agent, config.max_concurrent_tools
+                )
+                if config.state_dir is not None
+                else None
+            ),
         )
         self._carica_tool()
         self._mcp = self._costruisci_mcp()
@@ -285,6 +298,13 @@ class HermesServer:
             "vault_backend": self._vault.nome_backend,
             "vault_is_stub": self._vault.e_stub,
             "container_available": self._config.container_available,
+            # Come gli altri due: un presidio che non c'è va dichiarato dove
+            # lo si legge, non solo nel preflight. False significa che il
+            # tetto sulle esecuzioni vale per questo processo, e l'host ne
+            # avvia uno per connessione.
+            "concurrency_shared_across_connections": (
+                self._executor.concorrenza_condivisa
+            ),
             "tools": elenco,
         }
 
@@ -348,7 +368,18 @@ class HermesServer:
             )
         except ConfirmationRequired as err:
             return self._risultato_in_attesa(correlation_id, tool_id, target, str(err))
-        except (ContainerUnavailable, IntegrityMismatch) as err:
+        except (
+            ContainerUnavailable,
+            IntegrityMismatch,
+            ConcurrencyLimitReached,
+            SharedSlotsUnusable,
+        ) as err:
+            # Tutte decisioni del gate, non guasti dell'invocazione: il gate
+            # ha già scritto la sua riga `denied`, e un risultato di tipo
+            # «errore» la contraddirebbe nella stessa catena. I due limiti di
+            # concorrenza stanno qui per lo stesso motivo del container
+            # assente: un presidio che non si può applicare nega, e negare è
+            # una decisione, non un incidente.
             return self._risultato_negato(correlation_id, tool_id, target, str(err))
         except (InvocationRefused, ToolNotRegistered) as err:
             return self._risultato_errore(correlation_id, str(err))

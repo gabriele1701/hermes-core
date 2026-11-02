@@ -108,6 +108,7 @@ from mcp_server.contracts import (
     ToolSpec,
 )
 from mcp_server.registry import ToolRegistry
+from mcp_server.slots import Posto, SlotPool, SlotUnavailable
 from mcp_server.tiers import ConfirmationPolicy
 
 #: Timeout di default di un'esecuzione. Un tool che non termina è un tool che
@@ -148,6 +149,16 @@ class IntegrityMismatch(ExecutionError):
 
 class ConcurrencyLimitReached(ExecutionError):
     """Troppe esecuzioni contemporanee in questo processo."""
+
+
+class SharedSlotsUnusable(ExecutionError):
+    """I posti condivisi sono configurati, ma la loro directory non è usabile.
+
+    Distinta da :class:`ConcurrencyLimitReached` di proposito: là la macchina
+    è occupata e riprovare fra poco ha senso, qui è rotta e riprovare no. Due
+    cause con rimedi opposti dietro la stessa eccezione costringerebbero chi
+    legge — persona o modello — a indovinare quale delle due ha incontrato.
+    """
 
 
 class ConfirmationRequired(ExecutionError):
@@ -409,6 +420,7 @@ class ToolExecutor:
         tool_python_flags: Sequence[str] = TOOL_PYTHON_FLAGS_DEFAULT,
         max_output_bytes: int = MAX_OUTPUT_BYTES_DEFAULT,
         max_concurrent: int = MAX_CONCURRENT_DEFAULT,
+        slots: SlotPool | None = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
@@ -422,6 +434,10 @@ class ToolExecutor:
         # I tool sincroni girano nel thread pool del framework MCP, quindi le
         # invocazioni concorrenti sono thread reali dello stesso processo.
         self._posti = threading.BoundedSemaphore(max_concurrent)
+        # Il semaforo resta anche quando c'è il pool condiviso: è il percorso
+        # veloce, non costa I/O, e due limiti dello stesso numero non si
+        # contraddicono — il più stretto vince e sono uguali.
+        self._slots = slots
 
     @property
     def container_available(self) -> bool:
@@ -443,6 +459,32 @@ class ToolExecutor:
     @property
     def max_concurrent(self) -> int:
         return self._max_concurrent
+
+    @property
+    def concorrenza_condivisa(self) -> bool:
+        """Se il limite vale fra le connessioni dell'agente o solo qui dentro."""
+        return self._slots is not None
+
+    def _prendi_posto_condiviso(self) -> Posto | None:
+        """Occupa un posto nel pool fra processi, se configurato.
+
+        Qui non si decide nulla: o il pool non è configurato — e allora il
+        limite per processo è tutto ciò che è stato promesso — o è
+        configurato, e un suo guasto risale al gate.
+
+        Degradare sarebbe stato il riflesso comodo: il semaforo di processo ha
+        già fatto il suo lavoro, e un lock che non si crea somiglia a un
+        problema di filesystem più che a un problema di sicurezza. Ma se i
+        posti sono configurati, il tetto che la configurazione dichiara è
+        quello condiviso: eseguire senza avrebbe significato girare oltre il
+        limite dichiarato proprio nel momento in cui la macchina ha già un
+        guasto — e senza che nessuno, leggendo la risposta, avesse motivo di
+        sospettarlo. È la stessa forma del container, che assente nega invece
+        di ricadere sull'ambiente meno isolato.
+        """
+        if self._slots is None:
+            return None
+        return self._slots.acquire()
 
     # -- preparazione -------------------------------------------------------- #
 
@@ -586,18 +628,80 @@ class ToolExecutor:
         # Posto libero, o rifiuto tracciato. Il gate è l'unico punto in cui
         # passano le esecuzioni, quindi è il punto in cui si contano.
         if not self._posti.acquire(timeout=ATTESA_POSTO_LIBERO):
+            # Un solo testo per la riga di log e per l'eccezione. Tenerli
+            # separati aveva prodotto esattamente il difetto del `pending`:
+            # la formulazione che dice se riprovare ha senso finiva nel log,
+            # che legge una persona, mentre al modello arrivava il messaggio
+            # corto — e chi decide se riprovare è il modello.
+            motivo = (
+                f"limite di esecuzioni contemporanee raggiunto in questo "
+                f"processo ({self._max_concurrent}): invocazione rifiutata, "
+                f"non eseguita. Riprovare ha senso quando una delle "
+                f"esecuzioni in corso sarà terminata."
+            )
             self._nega(
                 pronta.spec,
                 agent,
                 pronta.effective_tier,
                 correlation_id,
                 target,
-                f"limite di esecuzioni contemporanee raggiunto "
-                f"({self._max_concurrent}): invocazione rifiutata",
+                motivo,
             )
-            raise ConcurrencyLimitReached(
-                f"già {self._max_concurrent} esecuzioni in corso in questo processo"
+            raise ConcurrencyLimitReached(motivo)
+
+        # Secondo posto, quello condiviso fra i processi dell'agente. Si
+        # prende dopo il semaforo e si rilascia per primo, come ogni coppia di
+        # lock annidati: l'ordine inverso fra due esecuzioni produrrebbe uno
+        # stallo.
+        try:
+            posto = self._prendi_posto_condiviso()
+        except SlotUnavailable:
+            self._posti.release()
+            motivo = (
+                f"limite di esecuzioni contemporanee raggiunto fra le "
+                f"connessioni dell'agente ({self._max_concurrent}): "
+                f"invocazione rifiutata, non eseguita. Riprovare ha senso "
+                f"quando una delle esecuzioni in corso sarà terminata."
             )
+            self._nega(
+                pronta.spec,
+                agent,
+                pronta.effective_tier,
+                correlation_id,
+                target,
+                motivo,
+            )
+            raise ConcurrencyLimitReached(motivo) from None
+        except OSError as err:
+            # Posti configurati e non utilizzabili: il limite dichiarato non
+            # è applicabile, quindi non si esegue. Qui riprovare NON ha senso,
+            # ed è l'opposto del rifiuto qui sopra: due cause che il testo
+            # deve distinguere, perché portano a due comportamenti diversi.
+            self._posti.release()
+            motivo = (
+                f"posti condivisi non utilizzabili in "
+                f"{self._slots.directory if self._slots else '?'}: {err}. "
+                f"Il limite fra le connessioni dell'agente è configurato ma "
+                f"non applicabile: invocazione rifiutata, non eseguita. "
+                f"Riprovare non cambia l'esito finché la directory di stato "
+                f"non è riparata."
+            )
+            self._nega(
+                pronta.spec,
+                agent,
+                pronta.effective_tier,
+                correlation_id,
+                target,
+                motivo,
+            )
+            raise SharedSlotsUnusable(motivo) from err
+        except BaseException:
+            # Qualunque altra cosa vada storta qui deve comunque restituire il
+            # posto in memoria prima di risalire. Un semaforo perso riduce la
+            # capacità del processo per sempre: è esattamente il controllo che
+            # si auto-esaurisce che questo modulo esiste per evitare.
+            self._posti.release()
+            raise
 
         argv = [str(self._tool_python), *self._tool_python_flags, str(pronta.script)]
         try:
@@ -624,6 +728,8 @@ class ToolExecutor:
                 raise
             return call, risultato
         finally:
+            if posto is not None:
+                posto.release()
             self._posti.release()
 
         outcome = CallOutcome.OK if esito.returncode == 0 else CallOutcome.ERROR

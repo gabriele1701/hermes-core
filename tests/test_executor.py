@@ -24,6 +24,7 @@ from mcp_server.executor import (
     ContainerUnavailable,
     IntegrityMismatch,
     RunResult,
+    SharedSlotsUnusable,
     SubprocessRunner,
     ToolExecutor,
     ambiente_minimo,
@@ -823,3 +824,202 @@ def test_runner_reale_esegue_davvero(repo, registry, audit):
     call, esito = ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
     assert call.outcome is CallOutcome.OK
     assert esito.stdout.strip() == "ok"
+
+
+# --------------------------------------------------------------------------- #
+# Posti condivisi fra processi (patch di sicurezza, passo 6b)
+# --------------------------------------------------------------------------- #
+
+
+def test_posto_occupato_da_un_altro_processo_rifiuta(repo, registry, audit, tmp_path):
+    """Il limite ora vale anche fra le connessioni, non solo nel processo.
+
+    Il posto viene occupato da un processo **vero**, perché è esattamente ciò
+    che il semaforo in memoria non poteva vedere.
+    """
+    import subprocess as sp
+    import sys as _sys
+
+    from mcp_server.slots import SlotPool
+
+    pool = SlotPool(tmp_path / "slots", 1)
+    pool.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    occupante = sp.Popen(
+        [
+            _sys.executable,
+            "-c",
+            "import fcntl,os,sys,time\n"
+            "fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "sys.stdout.write('preso\\n'); sys.stdout.flush()\n"
+            "time.sleep(300)\n",
+            str(pool.percorso(0)),
+        ],
+        stdout=sp.PIPE,
+        text=True,
+    )
+    assert occupante.stdout.readline().strip() == "preso"
+
+    try:
+        registry.register(_spec(repo))
+        ex = ToolExecutor(
+            registry,
+            audit,
+            repo_root=repo,
+            runner=RunnerFinto(),
+            max_concurrent=1,
+            slots=pool,
+        )
+        assert ex.concorrenza_condivisa is True
+        # Il messaggio dell'eccezione è quello che arriva al modello, e deve
+        # dire che qui riprovare ha senso — all'opposto dei posti rotti.
+        with pytest.raises(ConcurrencyLimitReached, match="Riprovare ha senso"):
+            ex.execute(
+                "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+            )
+    finally:
+        occupante.kill()
+        occupante.wait(timeout=10)
+
+    negate = [
+        r
+        for r in audit.read_all()
+        if r.outcome is CallOutcome.DENIED and "connessioni dell'agente" in r.detail
+    ]
+    assert len(negate) == 1
+
+
+def test_rifiuto_condiviso_restituisce_il_posto_di_processo(
+    repo, registry, audit, tmp_path
+):
+    """Il semaforo va rilasciato anche quando a negare è il lock condiviso.
+
+    Senza, ogni rifiuto consumerebbe un posto in memoria per sempre: dopo N
+    rifiuti il processo non eseguirebbe più nulla, cioè un controllo che si
+    auto-esaurisce.
+    """
+    from mcp_server.slots import SlotPool
+
+    pool = SlotPool(tmp_path / "slots", 1)
+    registry.register(_spec(repo))
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        runner=RunnerFinto(),
+        max_concurrent=1,
+        slots=pool,
+    )
+
+    with pool.acquire():
+        for _ in range(3):
+            with pytest.raises(ConcurrencyLimitReached):
+                ex.execute(
+                    "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+                )
+
+    # Liberato il posto condiviso, il processo deve poter ancora eseguire.
+    call, _ = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.OK
+
+
+def test_pool_inutilizzabile_nega_e_non_esegue(repo, registry, audit, tmp_path):
+    """Posti configurati e rotti: si rifiuta, non si degrada.
+
+    Degradare avrebbe fatto girare il tool oltre il tetto che la
+    configurazione dichiara, e l'avrebbe fatto proprio quando la macchina ha
+    già un guasto — con una risposta che non dà a nessuno motivo di
+    sospettarlo. Il rifiuto è una riga del gate come le altre, correlata
+    all'invocazione: la prova che non basta che l'evento sia registrato, deve
+    essere anche ricollegabile.
+    """
+    from mcp_server.slots import SlotPool
+
+    blocco = tmp_path / "slots"
+    blocco.write_text("non sono una directory\n", encoding="utf-8")
+
+    registry.register(_spec(repo))
+    runner = RunnerFinto()
+    correlation_id = uuid.uuid4()
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        runner=runner,
+        max_concurrent=1,
+        slots=SlotPool(blocco, 1),
+    )
+    with pytest.raises(SharedSlotsUnusable) as sollevata:
+        ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=correlation_id)
+
+    # Il messaggio dell'eccezione è ciò che legge il modello: la frase che gli
+    # impedisce di riprovare in ciclo deve stare lì, non solo nel log.
+    assert "non eseguita" in str(sollevata.value)
+    assert "Riprovare non cambia l'esito" in str(sollevata.value)
+
+    # Nulla è partito: è la differenza fra un rifiuto e un degrado.
+    assert runner.chiamate == []
+
+    righe = [
+        r
+        for r in audit.read_all()
+        if r.action is LogAction.TOOL_CALL and r.outcome is CallOutcome.DENIED
+    ]
+    assert len(righe) == 1
+    assert righe[0].correlation_id == correlation_id
+    assert righe[0].tool_id == "echo.ping"
+    assert righe[0].agent is OwnerAgent.ECHO_DUMMY
+    assert "non eseguita" in righe[0].detail
+    assert "Riprovare non cambia l'esito" in righe[0].detail
+
+    # Il posto in memoria è tornato: un rifiuto non deve consumare capacità.
+    assert ex._posti.acquire(blocking=False) is True
+    ex._posti.release()
+
+
+def test_senza_pool_resta_il_limite_di_processo(repo, registry, audit):
+    ex = ToolExecutor(registry, audit, repo_root=repo, runner=RunnerFinto())
+    assert ex.concorrenza_condivisa is False
+
+
+def test_guasto_imprevisto_nel_pool_non_perde_il_posto_in_memoria(
+    repo, registry, audit, monkeypatch
+):
+    """Un semaforo perso riduce la capacità del processo per sempre.
+
+    È lo stesso controllo-che-si-auto-esaurisce per cui i posti condivisi sono
+    lock e non contatori: vale anche per il semaforo in memoria, e un'eccezione
+    inattesa nel codice dei posti non deve provocarlo.
+    """
+    from mcp_server.slots import SlotPool
+
+    registry.register(_spec(repo))
+    pool = SlotPool(repo / "slots", 1)
+    ex = ToolExecutor(
+        registry,
+        audit,
+        repo_root=repo,
+        runner=RunnerFinto(),
+        max_concurrent=1,
+        slots=pool,
+    )
+
+    def esplode():
+        raise RuntimeError("guasto inatteso nel pool")
+
+    monkeypatch.setattr(ex, "_prendi_posto_condiviso", esplode)
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            ex.execute(
+                "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+            )
+
+    # Il processo deve avere ancora il suo posto: senza il rilascio, al
+    # secondo tentativo il semaforo sarebbe gia' esaurito.
+    monkeypatch.undo()
+    call, _ = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
+    )
+    assert call.outcome is CallOutcome.OK

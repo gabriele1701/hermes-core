@@ -870,3 +870,51 @@ def test_conferma_non_dice_di_essere_in_attesa(repo: Path):
     assert "nessun canale di conferma" in chiamata["detail"]
     assert "NON è stato eseguito" in chiamata["detail"]
     assert "riprovando" in chiamata["detail"]
+
+
+def test_server_collega_i_posti_condivisi(repo: Path, tmp_path: Path):
+    """Con state_dir il tetto diventa comune alle connessioni dell'agente."""
+    stato = tmp_path / "stato"
+    srv = crea_server(scrivi_config(repo, righe_server=f'state_dir = "{stato}"'))
+    assert srv._executor.concorrenza_condivisa is True
+    assert srv._executor._slots.directory == stato / "slots" / "echo_dummy"
+    assert srv._list_available_tools()["concurrency_shared_across_connections"] is True
+
+
+def test_server_senza_state_dir_resta_per_processo(server: HermesServer):
+    assert server._executor.concorrenza_condivisa is False
+
+
+def test_posti_rotti_sono_una_negazione_non_un_errore(repo: Path, tmp_path: Path):
+    """Il gate ha scritto `denied`: il risultato non può dire «errore».
+
+    Trovato usando il sistema. Il log riportava `tool_call`/`denied` e
+    `agent_result`/`error` sotto lo stesso correlation_id, e il modello
+    leggeva «esecuzione fallita» su una decisione presa apposta. Un presidio
+    che non si può applicare nega, e negare non è un incidente: stessa
+    famiglia del container assente, stesso ramo.
+    """
+    stato = tmp_path / "stato"
+    (stato / "slots").mkdir(parents=True)
+    # I posti dell'agente esistono come file: acquire() non potrà mai aprirli.
+    (stato / "slots" / "echo_dummy").write_text("non sono una directory\n")
+
+    srv = crea_server(scrivi_config(repo, righe_server=f'state_dir = "{stato}"'))
+    risposta = srv._invoke_tool("echo.ping")
+
+    chiamata = risposta["result"]["tool_calls"][0]
+    assert chiamata["outcome"] == "denied"
+    assert chiamata["authorized_by"] == "none"
+    assert "non eseguita" in chiamata["detail"]
+    assert "Riprovare non cambia l'esito" in chiamata["detail"]
+
+
+def test_catalogo_dichiara_il_tetto_non_condiviso(server: HermesServer):
+    """Un presidio assente si dichiara dove lo si legge, non solo nel preflight.
+
+    `container_available` e `vault_is_stub` arrivano già al modello; il tetto
+    sulle esecuzioni è l'unico che non arrivava, ed è quello che decide se più
+    connessioni possono superarlo.
+    """
+    catalogo = server._list_available_tools()
+    assert catalogo["concurrency_shared_across_connections"] is False

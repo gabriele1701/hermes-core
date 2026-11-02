@@ -19,12 +19,13 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | `exec_sha256` dichiarato ma mai verificato | passo 6a | `executor.py` ricalcola lo SHA e lo confronta **prima di ogni esecuzione**, non all'avvio; discordanza → esecuzione negata e riga di audit. Resta il residuo TOCTOU qui sotto. |
 | HC-01 — esecuzione senza riga di audit | patch sic. 1 | Decodifica tollerante e, dopo lo spawn, ogni eccezione convertita in esito registrato. Rete di sicurezza finale nel server. |
 | HC-03 — interprete ereditato dal `PATH`, user site e moduli omonimi | patch sic. 2 | Interprete assoluto dalla configurazione, verificato all'avvio, eseguito con `-I -S`. Preflight: posizione, permessi e isolamento effettivo. |
-| HC-06 — processi orfani al timeout, output e concorrenza illimitati | patch sic. 3 | `start_new_session` + terminazione del gruppo (SIGTERM poi SIGKILL), tetto per stream con flag `truncated` dichiarato, semaforo con rifiuto tracciato. |
+| HC-06 — processi orfani al timeout, output e concorrenza illimitati | patch sic. 3 | `start_new_session` + terminazione del gruppo (SIGTERM poi SIGKILL), tetto per stream con flag `truncated` dichiarato, semaforo con rifiuto tracciato. **Chiusa per il caso del timeout soltanto:** un tool che esce con 0 lasciando figli vivi non fa scattare nulla — voce aperta qui sotto. |
 | Lo stdin dei tool era il canale MCP del server | patch sic. 3 | `stdin=DEVNULL`. Trovato verificando il report, non era fra i suoi finding: un tool poteva leggere e consumare i byte del protocollo. |
 | HC-08 — `valida_nome_segreto` accettava un newline finale | patch sic. 4 | `fullmatch` invece di `match`: in `re` il `$` combacia anche prima di un `\n` finale. Si rifiuta, non si normalizza. |
 | HC-07 — provenienza nel log controllata dal client | patch sic. 5 | `correlation_id` generato dal server, quello del client registrato come `peer_correlation_id` e collegato da entrambi i lati. Etichetta onesta: «richiesto dal client MCP», non «override utente». |
 | Gli override di tier non sopravvivevano alla connessione | patch sic. 6a | Tre fonti e un solo `max()`: tier dichiarato (pavimento), `override_tier` in `[[tool]]`, store append-only in `state_dir`. Scrive **solo gli incrementi reali**, quindi ha un tetto strutturale di due righe per tool (`2 × tool × connessioni contemporanee` nel caso concorrente) e non va ruotato. `state_dir` assente o non scrivibile → innalzamento valido per la connessione, **dichiarato** in `override_scope` e registrato come `override_not_persisted`. |
 | Il `detail` diceva «in attesa di conferma dell'utente» | patch sic. 6a | Non c'era nessuna attesa: nessun canale di conferma è collegato. Un modello che legge «in attesa» conclude che qualcuno risponderà e riprova — o cerca un'altra via per lo stesso effetto. Ora il testo dice che il tool non è stato eseguito e che riprovare non cambia l'esito. Il flusso resta aperto qui sotto. |
+| Il limite di concorrenza era per processo | patch sic. 6b | Un file di lock per posto in `state_dir/slots/<agente>/`, preso con `flock(LOCK_EX|LOCK_NB)`. Il kernel lo rilascia alla morte del processo: niente lock orfani, niente scadenze da indovinare. Il semaforo in memoria resta come percorso veloce. **Assente è diverso da rotto:** senza `state_dir` il tetto resta per processo ed è dichiarato nel preflight e nel catalogo (`concurrency_shared_across_connections`); con `state_dir` configurata e la directory dei posti non utilizzabile il tetto è promesso e non applicabile, quindi il gate **rifiuta** invece di degradare — stessa regola del container assente. |
 | HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che e' la protezione vera, e' documentato in `docs/dipendenze.md` e resta da generare. |
 
 ---
@@ -139,34 +140,6 @@ con `chattr -a`, copia, troncamento, `chattr +a` — annotando l'intervento.
 
 ---
 
-## MEDIA — il limite di concorrenza è per processo, non complessivo
-
-**Dove:** `mcp_server/executor.py` (semaforo), `docs/integrazione-hermes.md`.
-
-Il tetto sulle esecuzioni contemporanee vive in un semaforo del processo
-server, e Hermes avvia **un processo per connessione**. Contiene quindi un
-modello in ciclo dentro una sessione, non la somma di più sessioni o
-connessioni aperte in parallelo.
-
-**Mitigazione:** il limite per processo copre il caso realistico di oggi, cioè
-un agente che invoca in ciclo nella sessione in cui sta lavorando. Ogni
-rifiuto è tracciato, quindi una saturazione si vede nel log.
-
-**Condizione di chiusura:** `server.state_dir` esiste ora (introdotta con lo
-store degli override) ed è la directory in cui mettere i file di lock dei
-posti. Lo *store* non si riusa: gli override sono un registro append-only di
-fatti avvenuti, i posti sono un conteggio di risorse occupate che devono
-liberarsi anche se il processo muore, e sono due meccanismi diversi — un
-contatore su file append-only non saprebbe mai che un processo è sparito.
-Serve un lock per posto (`flock` su `state_dir/slots/N`), che il kernel
-rilascia alla morte del processo. È il passo 6b.
-
-**Nota sulla mitigazione precedente:** questa voce diceva di risolverla
-«insieme agli override, con lo stesso store». Era vero per la *directory*,
-non per il meccanismo: condividono dove stanno, non come funzionano.
-
----
-
 ## MEDIA — il flusso di conferma non è collegato
 
 **Dove:** `mcp_server/server.py`.
@@ -237,6 +210,82 @@ una manomissione locale.
 **Da rivalutare se:** il log dovrà reggere da solo come prova davanti a
 terzi. In quel caso la strada è un digest periodico firmato con chiave
 esterna, che non tocca il percorso di scrittura.
+
+---
+
+## ACCETTATA — il tetto di concorrenza è per agente, non per macchina
+
+**Dove:** `mcp_server/slots.py`.
+
+I posti di esecuzione sono partizionati per agente
+(`state_dir/slots/<agente>/`), quindi il tetto complessivo della macchina è
+`max_concurrent_tools × agenti attivi`, non `max_concurrent_tools`.
+
+**Perché così.** Un pool unico darebbe un tetto di macchina migliore, ma
+sarebbe il primo punto dell'architettura in cui **un agente può degradarne un
+altro**: l'agente di pentest in ciclo affamerebbe quello di vulnerability
+assessment, e lo farebbe senza violare alcuna regola. Tutto il resto del
+progetto tiene gli agenti separati per costruzione — un processo ciascuno, i
+tool di proprietà, i tool altrui invisibili — e aprire proprio qui un canale
+di denial-of-service fra agenti è il male peggiore fra i due.
+
+**Perché non è un rinvio mascherato.** Un tetto di macchina vero non è lavoro
+di questo processo: conta esecuzioni, non risorse. Due `nmap` pesanti saturano
+una VM molto prima di dieci script che dormono. Lo strumento giusto è una
+slice `systemd` o un cgroup con limiti di CPU e memoria, che vale per
+qualunque cosa giri sulla macchina e non solo per i tool lanciati da qui.
+
+**Condizione di chiusura:** la slice `systemd` o il cgroup che arrivano con
+A1 (uid separato per i tool). Non è una coincidenza di calendario: A1 deve
+comunque lanciare i tool sotto un'altra identità, e `systemd-run --uid` con
+`MemoryMax`/`TasksMax` dà nello stesso passaggio l'uid e il tetto di risorse.
+Questa voce si chiude lì, o non si chiude — un pool condiviso non la chiude,
+la sposta su un altro guasto.
+
+**Da rivalutare prima se:** gli agenti attivi diventeranno molti, o se un
+agente arriverà a poter saturare la VM da solo.
+
+---
+
+## ACCETTATA — i figli di un'uscita pulita non vengono ripuliti da nessuno
+
+**Dove:** `mcp_server/executor.py` (terminazione della discendenza).
+
+HC-06 è chiuso per il caso che descriveva: al timeout il gate termina il
+gruppo di processi, SIGTERM e poi SIGKILL. Ma la terminazione scatta **solo**
+al timeout. Un tool che esce con codice 0 dopo aver lasciato un figlio vivo
+non fa scattare nulla, e quel figlio resta a girare a tempo indeterminato.
+
+**Verificato nel 6b.** Uno script di prova che lancia `sleep 300` e termina
+subito ha prodotto due orfani sopravvissuti a due invocazioni concluse con
+`exit=0`. Nessun timeout, nessuna terminazione, nessuna traccia nel log oltre
+alle due righe `ok`.
+
+**Cosa non è.** Non è un consumo di posti: il figlio **non** eredita il file
+descriptor del lock — `O_CLOEXEC` su `os.open` e `close_fds=True` su
+`subprocess` — e questo è stato verificato con `lsof` sui file dei posti
+mentre gli orfani erano vivi. Il contatore dei posti resta quindi corretto.
+
+**Cosa è.** Un consumo di macchina che il gate non vede. Il tetto sui posti
+misura le esecuzioni che il gate controlla, non i processi che girano davvero:
+dopo dieci invocazioni di questo tipo il gate conta zero esecuzioni in corso e
+la VM ne ha dieci. Con `nmap` e `trivy`, che lanciano helper, è la forma
+realistica del problema — non quella del timeout.
+
+**Perché non si chiude qui.** Terminare il gruppo anche in uscita pulita
+sembra ovvio e non lo è: un tool legittimo potrebbe lasciare un figlio di
+proposito, e il gate non ha modo di distinguerlo da un residuo. Il confine
+giusto non è il gruppo di processi ma il cgroup, che muore con lo scope
+qualunque cosa contenga.
+
+**Condizione di chiusura:** la stessa della voce qui sopra — la slice
+`systemd` di A1. `systemd-run --scope` uccide l'albero del cgroup alla fine
+dello scope, senza che il gate debba decidere quali figli siano legittimi.
+
+**Da rivalutare prima se:** un tool reale entrerà in M1 prima di A1. In quel
+caso serve almeno un controllo manuale (`pgrep` dopo le sessioni di lavoro),
+perché il sintomo — VM lenta, nessuna esecuzione in corso secondo il log — non
+punta alla causa.
 
 ---
 
