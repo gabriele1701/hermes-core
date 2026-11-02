@@ -8,6 +8,7 @@ ingiustificata. I test verificano soprattutto che i guasti vengano
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import textwrap
 from pathlib import Path
@@ -842,3 +843,183 @@ def test_posti_configurati_ma_non_creabili_e_errore(
     assert posti.esito is Esito.ERRORE
     assert "non utilizzabile" in posti.messaggio
     assert referto.pronto is False
+
+
+# --------------------------------------------------------------------------- #
+# Il canale del servizio non deve poter auto-autorizzarsi (HC-04)
+# --------------------------------------------------------------------------- #
+
+
+def _sshd(tmp_path: Path, *, include_in_cima: bool = True, prima: str = "") -> Path:
+    """Finto ``sshd_config``, con l'Include dove serve al test."""
+    righe = ["# commento", ""]
+    if prima:
+        righe.append(prima)
+    if include_in_cima:
+        righe.append("Include /etc/ssh/sshd_config.d/*.conf")
+    righe += ["PermitRootLogin prohibit-password", "UsePAM yes"]
+    percorso = tmp_path / "sshd_config"
+    percorso.write_text("\n".join(righe) + "\n", encoding="utf-8")
+    return percorso
+
+
+def _dropin_file(tmp_path: Path, chiavi: Path, *, forcecommand: bool = True) -> Path:
+    corpo = [
+        "PasswordAuthentication no",
+        "Match User hermes",
+        f"    AuthorizedKeysFile {chiavi}",
+    ]
+    if forcecommand:
+        corpo.append("    ForceCommand /opt/hermes-core/bin/hermes-core-server")
+    percorso = tmp_path / "10-hermes.conf"
+    percorso.write_text("\n".join(corpo) + "\n", encoding="utf-8")
+    return percorso
+
+
+def _prepara_canale(monkeypatch, sshd: Path | None, dropin: Path | None, servizio: str):
+    """Punta il controllo a file di test e fissa l'utente di servizio.
+
+    L'utente si fissa invece di creare file con proprietari diversi: un test
+    che richiede ``chown`` gira solo da root, e questa suite deve dare lo
+    stesso esito sulla VM, dove la lancia l'amministratore senza privilegi.
+    """
+    from mcp_server import doctor as mod
+
+    monkeypatch.setattr(
+        mod, "PERCORSO_SSHD_CONFIG", sshd if sshd else Path("/non/esiste/sshd_config")
+    )
+    monkeypatch.setattr(
+        mod, "PERCORSO_DROPIN_SSH", dropin if dropin else Path("/non/esiste/10.conf")
+    )
+    monkeypatch.setattr(mod, "_utente_di_servizio", lambda cfg: servizio)
+
+
+def test_include_in_cima_riconosciuto(tmp_path: Path):
+    from mcp_server.doctor import _direttive_prima_dell_include
+
+    presente, prima = _direttive_prima_dell_include(_sshd(tmp_path))
+    assert presente is True
+    assert prima == []
+
+
+def test_include_preceduto_da_direttive_attive(tmp_path: Path):
+    """In sshd vince il primo valore: ciò che sta sopra l'Include vince."""
+    from mcp_server.doctor import _direttive_prima_dell_include
+
+    presente, prima = _direttive_prima_dell_include(
+        _sshd(tmp_path, prima="PasswordAuthentication yes")
+    )
+    assert presente is True
+    assert prima == ["PasswordAuthentication"]
+
+
+def test_include_assente(tmp_path: Path):
+    from mcp_server.doctor import _direttive_prima_dell_include
+
+    presente, _ = _direttive_prima_dell_include(
+        _sshd(tmp_path, include_in_cima=False)
+    )
+    assert presente is False
+
+
+def test_dropin_legge_solo_il_blocco_match(tmp_path: Path):
+    from mcp_server.doctor import _dropin
+
+    chiavi = tmp_path / "hermes"
+    direttive = _dropin(_dropin_file(tmp_path, chiavi))
+    assert direttive is not None
+    assert direttive["authorizedkeysfile"] == str(chiavi)
+    assert "forcecommand" in direttive
+    # Fuori dal blocco Match: non è una direttiva del canale del servizio.
+    assert "passwordauthentication" not in direttive
+
+
+def test_senza_sshd_il_canale_non_e_un_controllo(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Il server può girare sulla stessa macchina del client.
+
+    Pretendere un canale SSH dove non ce n'è produrrebbe un errore su una
+    installazione sana.
+    """
+    _prepara_canale(monkeypatch, None, None, "hermes")
+    referto = esegui(scrivi_config(tmp_path, radice))
+    assert [c for c in referto.controlli if c.nome.startswith("canale ssh")] == []
+
+
+def test_dropin_assente_e_avviso(tmp_path: Path, radice: Path, monkeypatch):
+    _prepara_canale(monkeypatch, _sshd(tmp_path), None, "hermes")
+    referto = esegui(scrivi_config(tmp_path, radice))
+    controllo = _controllo(referto, "canale ssh del servizio")
+    assert controllo.esito is Esito.AVVISO
+    assert "può riscrivere" in controllo.messaggio
+
+
+def test_dropin_installato_ma_senza_include_e_errore(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Un drop-in inerte è il falso verde peggiore: c'è, e non fa niente."""
+    chiavi = tmp_path / "hermes"
+    chiavi.write_text("ssh-ed25519 AAAA test\n", encoding="utf-8")
+    _prepara_canale(
+        monkeypatch,
+        _sshd(tmp_path, include_in_cima=False),
+        _dropin_file(tmp_path, chiavi),
+        "hermes",
+    )
+    referto = esegui(scrivi_config(tmp_path, radice))
+    controllo = _controllo(referto, "canale ssh del servizio")
+    assert controllo.esito is Esito.ERRORE
+    assert "non viene letto" in controllo.messaggio
+    assert referto.pronto is False
+
+
+def test_canale_irrigidito_e_ok(tmp_path: Path, radice: Path, monkeypatch):
+    chiavi = tmp_path / "hermes"
+    chiavi.write_text("ssh-ed25519 AAAA test\n", encoding="utf-8")
+    chiavi.chmod(0o644)
+    _prepara_canale(
+        monkeypatch, _sshd(tmp_path), _dropin_file(tmp_path, chiavi), "hermes"
+    )
+    referto = esegui(scrivi_config(tmp_path, radice))
+    assert _controllo(referto, "canale ssh del servizio").esito is Esito.OK
+    autorizzazioni = _controllo(referto, "autorizzazioni del canale")
+    assert autorizzazioni.esito is Esito.OK
+    assert "non può modificare le proprie autorizzazioni" in autorizzazioni.messaggio
+
+
+def test_chiavi_di_proprieta_del_servizio_e_errore(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """È il difetto che spostare le chiavi doveva chiudere.
+
+    Il file di test appartiene a chi lancia la suite, quindi si dichiara quello
+    come utente di servizio: l'esito non dipende dai privilegi del runner.
+    """
+    import pwd as _pwd
+
+    proprietario = _pwd.getpwuid(os.getuid()).pw_name
+    chiavi = tmp_path / "authorized_keys"
+    chiavi.write_text("ssh-ed25519 AAAA test\n", encoding="utf-8")
+    chiavi.chmod(0o644)
+    _prepara_canale(
+        monkeypatch, _sshd(tmp_path), _dropin_file(tmp_path, chiavi), proprietario
+    )
+    referto = esegui(scrivi_config(tmp_path, radice))
+    controllo = _controllo(referto, "autorizzazioni del canale")
+    assert controllo.esito is Esito.ERRORE
+    assert "riscrivere le proprie autorizzazioni" in controllo.messaggio
+    assert referto.pronto is False
+
+
+def test_chiavi_scrivibili_da_altri_e_errore(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    chiavi = tmp_path / "hermes"
+    chiavi.write_text("ssh-ed25519 AAAA test\n", encoding="utf-8")
+    chiavi.chmod(0o666)
+    _prepara_canale(
+        monkeypatch, _sshd(tmp_path), _dropin_file(tmp_path, chiavi), "hermes"
+    )
+    referto = esegui(scrivi_config(tmp_path, radice))
+    assert _controllo(referto, "autorizzazioni del canale").esito is Esito.ERRORE
