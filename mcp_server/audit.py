@@ -73,6 +73,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mcp_server.contracts import (
     AgentResult,
+    AgentStatus,
     AuthorizedBy,
     CallOutcome,
     OwnerAgent,
@@ -231,7 +232,7 @@ class AuditLog:
             self.log(
                 correlation_id=result.correlation_id,
                 action=LogAction.AGENT_RESULT,
-                outcome=_esito_da_status(result),
+                outcome=esito_da_status(result.status),
                 agent=result.agent,
                 detail=result.summary,
             )
@@ -300,18 +301,31 @@ def _restringi(percorso: Path, modo: int) -> None:
         pass
 
 
-def _esito_da_status(result: AgentResult) -> CallOutcome:
-    """Mappa lo status di un agente sull'esito registrato nel log."""
-    from mcp_server.contracts import AgentStatus
+def esito_da_status(status: AgentStatus) -> CallOutcome:
+    """Mappa lo status di un agente sull'esito registrato nel log.
 
-    match result.status:
+    **Unica** mappa fra i due vocabolari. Prima ne esisteva una copia anche in
+    ``server.py``, e aggiungere ``DENIED`` all'enum ha richiesto di cambiarle
+    tutte e due: una duplicazione che si fa notare solo quando l'enum cresce,
+    cioè quando si è già sbagliato. Il ``match`` esaustivo fa fallire qui un
+    valore nuovo senza il suo ramo, invece di lasciarlo scivolare.
+    """
+    match status:
         case AgentStatus.OK:
             return CallOutcome.OK
         case AgentStatus.ERROR:
             return CallOutcome.ERROR
+        case AgentStatus.DENIED:
+            return CallOutcome.DENIED
         case AgentStatus.NEEDS_CONFIRMATION:
             return CallOutcome.PENDING
-    raise AssertionError(f"status non gestito: {result.status}")  # pragma: no cover
+    raise AssertionError(f"status non gestito: {status}")  # pragma: no cover
 
 
-__all__ = ["AuditLog", "DEFAULT_LOG_PATH", "LogAction", "LogRecord"]
+__all__ = [
+    "AuditLog",
+    "DEFAULT_LOG_PATH",
+    "LogAction",
+    "LogRecord",
+    "esito_da_status",
+]

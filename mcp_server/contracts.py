@@ -110,12 +110,27 @@ class AgentStatus(StrEnum):
 
     ``NEEDS_CONFIRMATION`` è il gancio con cui una richiesta di autorizzazione
     risale dall'agente fino all'utente: l'agente si ferma e dichiara cosa
-    resta in attesa, invece di procedere. In M0 è presente nello schema e
-    vincolato dagli invarianti, ma non esercitato da tool reali.
+    resta in attesa, invece di procedere.
+
+    ``DENIED`` separa «un presidio ha detto no» da «qualcosa si è rotto».
+    Prima i rifiuti del gate — container assente, integrità fallita, posti
+    esauriti, bersaglio fuori perimetro — finivano in ``ERROR``, perché non
+    c'era altro dove metterli: al livello sotto la riga diceva ``denied``, e
+    in cima lo stesso evento si presentava come un guasto.
+
+    Non è cosmetica. È il difetto del ``pending`` formulato male un livello
+    più su: un modello che legge ``error`` può concludere che qualcosa si è
+    rotto e **riprovare**, mentre ``denied`` dice che la decisione è stata
+    deliberata e che riprovare non la cambia. E quando i rifiuti verranno
+    aggregati — la vista del log nell'app di controllo — contare le negazioni
+    fra gli errori confonderebbe «la macchina ha fallito» con «la policy ha
+    detto no», che su uno strumento il cui prodotto è la traccia è la
+    distinzione che conta.
     """
 
     OK = "ok"
     ERROR = "error"
+    DENIED = "denied"
     NEEDS_CONFIRMATION = "needs_confirmation"
 
 
@@ -387,6 +402,19 @@ class AgentResult(_StrictModel):
             raise ValueError(
                 "status 'ok' non è compatibile con tool_call 'pending' "
                 f"({len(pending)} in attesa)"
+            )
+        negate = [c for c in self.tool_calls if c.outcome is CallOutcome.DENIED]
+        if self.status is AgentStatus.DENIED and not negate:
+            raise ValueError(
+                "status 'denied' richiede almeno una tool_call con outcome "
+                "'denied': un rifiuto che non dice cosa è stato rifiutato è "
+                "indistinguibile da un guasto, che è il motivo per cui questo "
+                "status esiste"
+            )
+        if self.status is AgentStatus.OK and negate:
+            raise ValueError(
+                "status 'ok' non è compatibile con tool_call 'denied' "
+                f"({len(negate)} rifiutate)"
             )
         return self
 

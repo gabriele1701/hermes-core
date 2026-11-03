@@ -421,5 +421,8 @@ async def test_script_manomesso_fermato_lungo_la_catena(
     )
     inv = await orchestratore.invoca(endpoint_rotto, "echo.ping")
 
-    assert inv.result.status is AgentStatus.ERROR
+    # Lungo la catena intera il rifiuto resta un rifiuto: l'orchestratore non
+    # lo riclassifica come guasto passando da un processo all'altro.
+    assert inv.result.status is AgentStatus.DENIED
     assert inv.result.tool_calls[0].outcome is CallOutcome.DENIED
+    assert inv.riuscita is False

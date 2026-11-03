@@ -343,3 +343,66 @@ def test_error_con_pending_ammesso():
         )
     )
     assert res.status is AgentStatus.ERROR
+
+
+# --------------------------------------------------------------------------- #
+# Un rifiuto è una negazione, non un guasto
+# --------------------------------------------------------------------------- #
+
+
+def _chiamata(outcome: CallOutcome) -> ToolCall:
+    return ToolCall(
+        tool_id="echo.ping",
+        tier_effective=RiskTier.VERDE,
+        authorized_by=AuthorizedBy.NONE,
+        outcome=outcome,
+        detail="motivo",
+    )
+
+
+def test_denied_richiede_una_chiamata_rifiutata():
+    """Un rifiuto che non dice cosa è stato rifiutato non è distinguibile
+    da un guasto, che è il motivo per cui questo status esiste."""
+    with pytest.raises(ValidationError, match="richiede almeno una tool_call"):
+        AgentResult(
+            correlation_id=uuid.uuid4(),
+            agent=OwnerAgent.ECHO_DUMMY,
+            status=AgentStatus.DENIED,
+            summary="rifiutato",
+        )
+
+
+def test_denied_con_la_sua_chiamata_e_valido():
+    risultato = AgentResult(
+        correlation_id=uuid.uuid4(),
+        agent=OwnerAgent.ECHO_DUMMY,
+        status=AgentStatus.DENIED,
+        summary="bersaglio fuori perimetro",
+        tool_calls=(_chiamata(CallOutcome.DENIED),),
+    )
+    assert risultato.status is AgentStatus.DENIED
+
+
+def test_ok_non_convive_con_una_chiamata_rifiutata():
+    """Un esito riuscito che contiene un rifiuto nasconderebbe la negazione."""
+    with pytest.raises(ValidationError, match="non è compatibile con tool_call"):
+        AgentResult(
+            correlation_id=uuid.uuid4(),
+            agent=OwnerAgent.ECHO_DUMMY,
+            status=AgentStatus.OK,
+            summary="tutto bene",
+            tool_calls=(_chiamata(CallOutcome.DENIED),),
+        )
+
+
+def test_ogni_status_ha_un_esito_nel_log():
+    """La mappa status → esito è una sola, e deve coprire l'enum intero.
+
+    Ne esistevano tre copie — audit, server, orchestratore — e aggiungere
+    DENIED ha richiesto di cambiarle tutte: una duplicazione che si fa notare
+    solo quando l'enum cresce, cioè quando si è già sbagliato.
+    """
+    from mcp_server.audit import esito_da_status
+
+    for status in AgentStatus:
+        assert isinstance(esito_da_status(status), CallOutcome)
