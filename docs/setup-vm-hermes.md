@@ -522,10 +522,36 @@ sudo -u hermes /opt/hermes-core/.venv/bin/python \
 ```
 
 Il referto deve mostrare le reti e gli alias caricati, e dichiarare che non c'è
-risoluzione DNS. Un controllo visto solo verde non dice molto: vale la pena
-vederlo dire no, invocando un tool con bersaglio su un indirizzo fuori
-perimetro e controllando che la riga nel log sia `denied` con il bersaglio
-tentato.
+risoluzione DNS.
+
+Un controllo visto solo verde non dice molto. Per esercitare il perimetro
+serve un tool che dichiari un bersaglio, e nessuno di quelli della Milestone 0
+lo fa: in `config/hermes.example.toml` c'è un blocco `[[tool]]` commentato,
+`echo.bersaglio`, che riusa lo script del dummy con `target_kind = "host"` e
+`exec_args = ["--bersaglio"]`. Scommentarlo (con lo SHA dello script, lo
+stesso di `echo.ping`) e ricaricare il server.
+
+Tre invocazioni, che insieme coprono ciò che il perimetro promette:
+
+| Invocazione | Atteso |
+|---|---|
+| `echo.bersaglio` su un alias dichiarato | `ok`, e nell'output `args` contiene `["--bersaglio", "--", "<indirizzo>"]` — l'alias risolto dal file, non dal DNS |
+| `echo.bersaglio` su un indirizzo fuori perimetro (es. `192.0.2.1`, che non è instradabile) | `denied`, con `fuori dal perimetro` nel motivo e il bersaglio tentato nella riga di log |
+| `echo.ping` con un bersaglio | `denied`: dichiara `target_kind = "none"`, quindi un bersaglio è un rifiuto e non un valore ignorato |
+
+Vale la pena anche la verifica di controllo — `echo.ping` **senza** bersaglio
+deve funzionare — perché conferma che il rifiuto è selettivo sull'argomento di
+troppo e non un tool rotto.
+
+Nessuna di queste tocca la rete: lo script stampa `argv` e termina. Il
+bersaglio è una stringa che arriva a un eseguibile che non la usa, ed è
+esattamente ciò che serve per collaudare il gate senza che nulla venga
+contattato.
+
+`echo.bersaglio` conviene tenerlo registrato fino all'ingresso del primo tool
+reale: è l'unico modo di riesercitare il perimetro dopo una modifica alla
+configurazione o un aggiornamento, e l'alternativa è ricrearlo ogni volta.
+Quando arriva un tool con un bersaglio vero, va tolto.
 
 ---
 
