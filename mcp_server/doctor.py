@@ -31,6 +31,7 @@ from mcp_server.contracts import RiskTier, ToolSpec
 from mcp_server.executor import risolvi_script, sha256_file
 from mcp_server.overrides import NOME_FILE as NOME_FILE_OVERRIDE
 from mcp_server.overrides import OverrideStore, OverrideStoreError
+from mcp_server.scope import ScopeAllowlist, ScopeError
 from mcp_server.slots import NOME_DIR as NOME_DIR_POSTI
 from mcp_server.slots import SlotPool
 from mcp_server.tiers import derive_policy_for
@@ -1045,6 +1046,7 @@ def esegui(percorso_config: str | Path) -> Referto:
     _stato(referto, cfg, percorso)
     _interprete(referto, cfg)
     _limiti(referto, cfg)
+    _perimetro(referto, cfg, percorso)
     _scrivibilita(referto, cfg)
     _vault(referto, cfg)
     _container(referto, cfg)
@@ -1111,6 +1113,108 @@ def _dropin(percorso: Path) -> dict[str, str] | None:
         if dentro and len(parole) > 1:
             trovate[chiave] = parole[1].strip()
     return trovate
+
+
+def _perimetro(referto: Referto, cfg: ServerConfig, percorso_config: Path) -> None:
+    """Verifica il perimetro dei bersagli ammessi (A2).
+
+    Tre esiti e non due, perché i casi sono tre e confonderli sarebbe il
+    difetto che questo controllo deve prevenire:
+
+    * **non configurato, nessun tool con bersaglio** → avviso. Il server
+      funziona, e nulla di ciò che è registrato ha bisogno di un perimetro.
+    * **non configurato, ma c'è un tool con bersaglio** → errore. Quel tool
+      non è invocabile, e senza questo controllo lo si scoprirebbe alla prima
+      invocazione — cioè quando serve.
+    * **configurato e non caricabile** → errore. Il perimetro è promesso e non
+      applicabile: il server non parte, di proposito.
+
+    Verifica anche che il file **non sia scrivibile dal servizio**: un
+    perimetro che il servizio può riscrivere non è un perimetro, ed è la
+    stessa forma di HC-04. La verifica è sui permessi misurati, non su ciò
+    che la configurazione dichiara.
+    """
+    con_bersaglio = sorted(
+        str(t.get("tool_id", "?"))
+        for t in cfg.tools
+        if str(t.get("target_kind", "none")) != "none"
+    )
+
+    if cfg.scope_file is None:
+        if con_bersaglio:
+            referto.aggiungi(
+                "perimetro dei bersagli",
+                Esito.ERRORE,
+                f"server.scope_file non è configurato, ma "
+                f"{len(con_bersaglio)} tool dichiarano un bersaglio "
+                f"({', '.join(con_bersaglio)}): non sono invocabili",
+                "Creare il file del perimetro (vedere config/scope.example.toml)\n"
+                "             e indicarlo in [server]: scope_file = \"…\"\n"
+                "             L'assenza di perimetro non vale come «tutto "
+                "ammesso»: i tool con bersaglio vengono rifiutati.",
+            )
+        else:
+            referto.aggiungi(
+                "perimetro dei bersagli",
+                Esito.AVVISO,
+                "server.scope_file non configurato: nessun tool registrato "
+                "dichiara un bersaglio, quindi nulla lo richiede ancora",
+                "Al primo tool con target_kind diverso da 'none' il perimetro "
+                "diventa obbligatorio.",
+            )
+        return
+
+    try:
+        perimetro = ScopeAllowlist.carica(cfg.scope_file)
+    except ScopeError as err:
+        referto.aggiungi(
+            "perimetro dei bersagli",
+            Esito.ERRORE,
+            str(err),
+            f"Il server non parte finché il perimetro è configurato e non "
+            f"caricabile.\n"
+            f"             {_perche_non_scrivibile(cfg.scope_file, cfg, percorso_config)}",
+        )
+        return
+
+    st = _stat(cfg.scope_file)
+    servizio = _utente_di_servizio(cfg)
+    proprietario = _utente(st.st_uid) if st is not None else None
+    modo = stat.S_IMODE(st.st_mode) if st is not None else 0
+
+    reti = ", ".join(str(r) for r in perimetro.reti) or "nessuna rete"
+    alias = ", ".join(perimetro.alias) or "nessun alias"
+    referto.aggiungi(
+        "perimetro dei bersagli",
+        Esito.OK,
+        f"{cfg.scope_file} (di {proprietario}, {modo:04o}) · reti: {reti} · "
+        f"alias: {alias} · nessuna risoluzione DNS",
+    )
+    if con_bersaglio:
+        referto.aggiungi(
+            "tool con bersaglio",
+            Esito.OK,
+            f"{', '.join(con_bersaglio)}: validati contro il perimetro prima "
+            f"dell'integrità e prima di qualunque conferma",
+        )
+
+    # Il confine, misurato: chi usa il perimetro non deve poterlo ampliare.
+    # Controllo a sé e senza uscita anticipata — il contenuto del perimetro e
+    # la proprietà del file sono due fatti diversi, e chi legge il referto ha
+    # bisogno di entrambi. Un controllo che smette di informare quando trova
+    # un problema informa meno proprio quando serve.
+    if st is not None and (
+        (servizio is not None and proprietario == servizio) or modo & 0o022
+    ):
+        referto.aggiungi(
+            "proprietario del perimetro",
+            Esito.ERRORE,
+            f"{cfg.scope_file} è di {proprietario} con permessi {modo:04o}: "
+            f"chi esegue i tool può ampliare il proprio perimetro, che è "
+            f"come non averne uno",
+            f"sudo chown root: {cfg.scope_file} && "
+            f"sudo chmod 644 {cfg.scope_file}",
+        )
 
 
 def _canale_ssh(referto: Referto, cfg: ServerConfig) -> None:

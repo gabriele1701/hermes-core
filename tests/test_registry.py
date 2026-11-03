@@ -343,28 +343,48 @@ def _alias(audit: AuditLog):
     return [r for r in audit.read_all() if r.action is LogAction.TOOL_ALIAS_DETECTED]
 
 
-def test_alias_a_tier_inferiore_segnalato(reg: ToolRegistry, audit: AuditLog):
-    """Secondo tool_id sullo stesso script a tier più basso: declassamento mascherato."""
+def test_alias_a_identita_identica_rifiutato(reg: ToolRegistry, audit: AuditLog):
+    """Stesso comando, tier più basso, nome diverso: declassamento. Si rifiuta.
+
+    Era la voce ALTA del debito, e non si poteva chiudere: senza ``exec_args``
+    il caso abusivo e quello legittimo erano indistinguibili. Ora l'identità
+    di esecuzione è `(exec_path, exec_sha256, exec_args)`, e a identità
+    identica non c'è ambiguità da rispettare.
+    """
     reg.register(_spec(tool_id="nmap.aggressive", default_tier=RiskTier.ROSSO,
                        exec_path="tools/nmap.py"))
-    reg.register(_spec(tool_id="nmap.sneaky", default_tier=RiskTier.VERDE,
-                       exec_path="tools/nmap.py"))
+    with pytest.raises(ToolSpecRejected, match="declassamento"):
+        reg.register(_spec(tool_id="nmap.sneaky", default_tier=RiskTier.VERDE,
+                           exec_path="tools/nmap.py"))
 
-    righe = _alias(audit)
+    # Rifiutato significa non registrato: il registro non tiene il tool a metà.
+    assert len(reg) == 1
+    righe = [
+        r for r in audit.read_all()
+        if r.action is LogAction.TOOL_REGISTRATION_REJECTED
+    ]
     assert len(righe) == 1
     assert righe[0].tool_id == "nmap.sneaky"
-    assert "nmap.aggressive=rosso" in righe[0].detail
-    assert "declassamento mascherato" in righe[0].detail
+    assert "nmap.aggressive" in righe[0].detail
 
 
-def test_alias_segnalato_ma_non_bloccante(reg: ToolRegistry):
-    """Rilevamento, non rifiuto: il pattern legittimo non deve rompersi."""
+def test_sottocomandi_con_argomenti_diversi_restano_ammessi(
+    reg: ToolRegistry, audit: AuditLog
+):
+    """Il caso legittimo non deve rompersi, ed è ciò che il rifiuto distingue.
+
+    Argomenti diversi = comandi diversi, anche a tier diverso: resta
+    segnalato in review e non bloccato, perché qui l'ambiguità c'è davvero.
+    """
     reg.register(_spec(tool_id="nmap.aggressive", default_tier=RiskTier.ROSSO,
-                       exec_path="tools/nmap.py"))
-    reg.register(_spec(tool_id="nmap.sneaky", default_tier=RiskTier.VERDE,
-                       exec_path="tools/nmap.py"))
+                       exec_path="tools/nmap.py", exec_args=("-A",)))
+    reg.register(_spec(tool_id="nmap.leggero", default_tier=RiskTier.VERDE,
+                       exec_path="tools/nmap.py", exec_args=("--top-ports", "100")))
     assert len(reg) == 2
-    assert reg.effective_tier("nmap.sneaky") is RiskTier.VERDE
+    assert reg.effective_tier("nmap.leggero") is RiskTier.VERDE
+    righe = _alias(audit)
+    assert len(righe) == 1
+    assert "declassamento mascherato" in righe[0].detail
 
 
 def test_sottocomandi_a_rischio_crescente_non_segnalati(reg: ToolRegistry, audit: AuditLog):
@@ -376,7 +396,12 @@ def test_sottocomandi_a_rischio_crescente_non_segnalati(reg: ToolRegistry, audit
     assert _alias(audit) == []
 
 
-def test_stesso_tier_sullo_stesso_script_non_segnalato(reg: ToolRegistry, audit: AuditLog):
+def test_identita_identica_a_pari_tier_ammessa(reg: ToolRegistry, audit: AuditLog):
+    """A pari tier non c'è declassamento: non si rifiuta e non si segnala.
+
+    Il rifiuto colpisce il declassamento, non la duplicazione: due nomi per
+    lo stesso comando allo stesso rischio sono ridondanti, non pericolosi.
+    """
     reg.register(_spec(tool_id="nmap.uno", default_tier=RiskTier.GIALLO,
                        exec_path="tools/nmap.py"))
     reg.register(_spec(tool_id="nmap.due", default_tier=RiskTier.GIALLO,
@@ -399,12 +424,10 @@ def test_alias_confrontato_col_tier_effettivo_non_col_dichiarato(
     reg.register(_spec(tool_id="nmap.uno", default_tier=RiskTier.VERDE,
                        exec_path="tools/nmap.py"))
     reg.set_override("nmap.uno", RiskTier.ROSSO)
-    reg.register(_spec(tool_id="nmap.due", default_tier=RiskTier.VERDE,
-                       exec_path="tools/nmap.py"))
-
-    righe = _alias(audit)
-    assert len(righe) == 1
-    assert "nmap.uno=rosso" in righe[0].detail
+    with pytest.raises(ToolSpecRejected, match="nmap.uno"):
+        reg.register(_spec(tool_id="nmap.due", default_tier=RiskTier.VERDE,
+                           exec_path="tools/nmap.py"))
+    assert len(reg) == 1
 
 
 def test_sha_incoerente_sullo_stesso_path_segnalato(reg: ToolRegistry, audit: AuditLog):

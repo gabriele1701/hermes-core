@@ -425,7 +425,111 @@ compare solo al riavvio successivo.
 
 ---
 
-## 5. Verificare dalla VM
+## 5. Il perimetro dei bersagli
+
+Serve solo se almeno un tool dichiara `target_kind` diverso da `"none"`. Finché
+nessuno lo fa — come in Milestone 0 con `echo.ping` — si può saltare, e il
+preflight lo dice con un avviso invece di un errore.
+
+Il problema che chiude: l'argomento `target` di un'invocazione è scelto dal
+**modello**. Un testo malevolo nel contesto di un agente non deve poter
+spostare uno scan su una rete che non è del laboratorio. Finché nessun tool
+usava il bersaglio la cosa era inerte; con i tool reali diventa il punto più
+direttamente sfruttabile da una prompt injection.
+
+### Dove va il file, e perché non in `state_dir`
+
+```sh
+sudo install -d -m 755 -o root -g root /etc/hermes
+sudo install -m 644 -o root -g root config/scope.example.toml /etc/hermes/scope.toml
+sudo nano /etc/hermes/scope.toml      # mettere le proprie reti e i propri alias
+```
+
+Poi in `hermes.toml`, sezione `[server]`:
+
+```toml
+scope_file = "/etc/hermes/scope.toml"
+```
+
+Di **root**, e non dentro `state_dir`: quella è scrivibile dal servizio, e un
+tool compromesso che potesse riscrivere la propria allowlist non avrebbe
+un'allowlist. È la stessa forma di HC-04 — una restrizione custodita da chi la
+subisce non è una restrizione. Il preflight verifica proprietario e permessi,
+non si fida della documentazione.
+
+Leggibile da tutti va bene: il perimetro non è un segreto, è un vincolo.
+
+### Niente DNS, e alias al suo posto
+
+```toml
+reti = ["192.168.205.0/24"]
+
+[alias]
+lab-web = "192.168.205.20"
+```
+
+Il `target` di un'invocazione deve essere un **indirizzo IP** dentro una delle
+reti, oppure un **alias dichiarato qui**. Non si risolvono nomi: un nome
+risolto al momento del controllo può puntare altrove al momento
+dell'esecuzione (DNS rebinding), può risolvere a più indirizzi, e dipende da un
+servizio che non è nel perimetro. Un alias si risolve leggendo un file di root:
+non si avvelena e non cambia sotto il controllo.
+
+Due regole che il caricamento impone, e che fa fallire l'avvio se violate:
+
+* le reti vanno in **forma canonica** — `192.168.205.0/24` sì,
+  `192.168.205.10/24` no. Il secondo verrebbe interpretato come l'intera `/24`,
+  cioè un perimetro più largo di quello inteso;
+* un alias deve puntare a un indirizzo **dentro** le reti dichiarate, perché
+  altrimenti il file direbbe nello stesso momento che quell'indirizzo è
+  ammesso e che non lo è.
+
+Nel log restano entrambi: il nome chiesto dal modello e l'indirizzo raggiunto.
+
+### Cosa succede quando manca
+
+Tre casi distinti, e tenerli distinti è il punto:
+
+| Situazione | Comportamento |
+|---|---|
+| `scope_file` non configurato, nessun tool con bersaglio | Il server funziona. Avviso nel preflight, `scope_configured: false` nel catalogo |
+| `scope_file` non configurato, ma un tool dichiara un bersaglio | Quel tool **non è invocabile**: il gate rifiuta, e il preflight dà errore. L'assenza di perimetro non vale come «tutto ammesso» |
+| `scope_file` configurato e non caricabile | **Il server non parte.** Un perimetro promesso e non applicabile è peggio di uno assente, perché nessuno sa di averlo perso |
+
+### Come arriva il bersaglio al tool
+
+```
+<interprete> -I -S <script> <exec_args...> -- <bersaglio validato>
+```
+
+Il separatore `--` non è cosmetico: senza, un bersaglio che inizia per `-`
+verrebbe letto come **opzione** dal tool — injection di argomenti, la sola
+forma che sopravvive quando non c'è una shell. Il perimetro rifiuta già quei
+bersagli; il separatore è il secondo dei due meccanismi, perché un controllo
+che dipende da un solo punto non è un controllo.
+
+`exec_args` sono gli argomenti **fissi** del tool, dichiarati
+all'integrazione. Fanno parte dell'identità di ciò che viene eseguito —
+`(exec_path, exec_sha256, exec_args)` — e servono a distinguere due
+sottocomandi dello stesso script a rischio diverso da un alias abusivo: a
+identità identica e tier inferiore la registrazione viene **rifiutata**.
+
+### Verificare
+
+```sh
+sudo -u hermes /opt/hermes-core/.venv/bin/python \
+     -m mcp_server.doctor /opt/hermes-core/config/hermes.toml
+```
+
+Il referto deve mostrare le reti e gli alias caricati, e dichiarare che non c'è
+risoluzione DNS. Un controllo visto solo verde non dice molto: vale la pena
+vederlo dire no, invocando un tool con bersaglio su un indirizzo fuori
+perimetro e controllando che la riga nel log sia `denied` con il bersaglio
+tentato.
+
+---
+
+## 6. Verificare dalla VM
 
 Il preflight va eseguito **come l'utente di servizio**, sempre:
 
@@ -527,7 +631,7 @@ dalla configurazione versionata, che è il posto in cui è stato messo.
 
 ---
 
-## 6. Verificare da Windows
+## 7. Verificare da Windows
 
 Prima di configurare Hermes, la prova che conta — da PowerShell:
 
@@ -544,7 +648,7 @@ stampa testo misto o righe spezzate, è il canale.
 
 ---
 
-## 7. Registrare in Hermes
+## 8. Registrare in Hermes
 
 Sull'Hermes di Windows:
 
@@ -574,7 +678,7 @@ devono comparire le righe della catena sotto un unico `correlation_id`.
 
 ---
 
-## 8. Cosa resta per le milestone successive
+## 9. Cosa resta per le milestone successive
 
 **Container runtime** (Docker o Podman) sulla VM, per l'agente di pentest: è
 la ragione per cui il disco è stato dimensionato con margine. Finché

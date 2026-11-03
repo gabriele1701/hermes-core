@@ -16,7 +16,14 @@ from pathlib import Path
 import pytest
 
 from mcp_server.audit import AuditLog, LogAction
-from mcp_server.contracts import AuthorizedBy, CallOutcome, OwnerAgent, RiskTier, ToolSpec
+from mcp_server.contracts import (
+    AuthorizedBy,
+    CallOutcome,
+    OwnerAgent,
+    RiskTier,
+    TargetKind,
+    ToolSpec,
+)
 from mcp_server.config import TOOL_PYTHON_DEFAULT
 from mcp_server.executor import (
     ConcurrencyLimitReached,
@@ -32,6 +39,7 @@ from mcp_server.executor import (
     sha256_file,
 )
 from mcp_server.registry import InvocationRefused, ToolNotRegistered, ToolRegistry
+from mcp_server.scope import ScopeAllowlist
 
 SCRIPT = "tools/echo.py"
 SORGENTE = "import sys\nprint('ok')\nsys.exit(0)\n"
@@ -83,6 +91,24 @@ def _spec(repo: Path, **override) -> ToolSpec:
 def _executor(registry, audit, repo, **kw) -> ToolExecutor:
     kw.setdefault("runner", RunnerFinto())
     return ToolExecutor(registry, audit, repo_root=repo, **kw)
+
+
+def _perimetro(reti=("10.10.0.0/16",), alias=None) -> ScopeAllowlist:
+    """Perimetro costruito in memoria, senza passare da un file.
+
+    Il parsing ha i suoi test in test_scope.py; qui serve il comportamento
+    del gate, e farlo passare da un file temporaneo aggiungerebbe un modo di
+    fallire che non c'entra con ciò che si misura.
+    """
+    import ipaddress
+
+    return ScopeAllowlist(
+        tuple(ipaddress.ip_network(r) for r in reti),
+        {
+            nome: ipaddress.ip_address(ind)
+            for nome, ind in (alias or {"lab-kali": "10.10.0.5"}).items()
+        },
+    )
 
 
 def _negati(audit: AuditLog):
@@ -791,13 +817,15 @@ def test_limiti_introspezionabili(repo, registry, audit):
 
 
 def test_toolcall_pronta_per_agentresult(repo, registry, audit):
-    registry.register(_spec(repo))
-    ex = _executor(registry, audit, repo)
+    registry.register(_spec(repo, target_kind=TargetKind.HOST))
+    ex = _executor(registry, audit, repo, scope=_perimetro())
     cid = uuid.uuid4()
     call, _ = ex.execute(
         "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=cid, target="lab-kali"
     )
     assert call.tool_id == "echo.ping"
+    # Nel ToolCall resta ciò che è stato CHIESTO: l'alias come l'ha scritto il
+    # modello. Dove è andata l'esecuzione lo dice il bersaglio risolto.
     assert call.target == "lab-kali"
     assert call.tier_effective is RiskTier.VERDE
 

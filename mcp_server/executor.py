@@ -108,6 +108,7 @@ from mcp_server.contracts import (
     ToolSpec,
 )
 from mcp_server.registry import ToolRegistry
+from mcp_server.scope import ScopeAllowlist, TargetRefused, valida_bersaglio
 from mcp_server.slots import Posto, SlotPool, SlotUnavailable
 from mcp_server.tiers import ConfirmationPolicy
 
@@ -149,6 +150,15 @@ class IntegrityMismatch(ExecutionError):
 
 class ConcurrencyLimitReached(ExecutionError):
     """Troppe esecuzioni contemporanee in questo processo."""
+
+
+class TargetOutOfScope(ExecutionError):
+    """Il bersaglio non è ammesso dal perimetro, o non ha la forma attesa.
+
+    Rifiuto della richiesta, non guasto della macchina: il modello ha chiesto
+    di toccare qualcosa che non è nel perimetro, e questa è l'informazione che
+    più vale la pena vedere nel log.
+    """
 
 
 class SharedSlotsUnusable(ExecutionError):
@@ -352,6 +362,11 @@ class PreparedExecution:
     authorized_by: AuthorizedBy
     correlation_id: uuid.UUID
     target: str | None = None
+    #: Bersaglio validato e in forma canonica, che è ciò che viene passato al
+    #: tool. Diverso da ``target`` quando il modello ha usato un alias: il log
+    #: conserva entrambi, così dice cosa è stato chiesto *e* cosa è stato
+    #: toccato.
+    target_risolto: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -421,6 +436,7 @@ class ToolExecutor:
         max_output_bytes: int = MAX_OUTPUT_BYTES_DEFAULT,
         max_concurrent: int = MAX_CONCURRENT_DEFAULT,
         slots: SlotPool | None = None,
+        scope: ScopeAllowlist | None = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
@@ -438,6 +454,10 @@ class ToolExecutor:
         # veloce, non costa I/O, e due limiti dello stesso numero non si
         # contraddicono — il più stretto vince e sono uguali.
         self._slots = slots
+        # ``None`` significa perimetro non configurato, non «tutto ammesso»:
+        # è `valida_bersaglio` a rifiutare i tool con bersaglio, e lo fa
+        # con un motivo leggibile invece di lasciar passare.
+        self._scope = scope
 
     @property
     def container_available(self) -> bool:
@@ -459,6 +479,11 @@ class ToolExecutor:
     @property
     def max_concurrent(self) -> int:
         return self._max_concurrent
+
+    @property
+    def perimetro_configurato(self) -> bool:
+        """Se esiste un perimetro dei bersagli da applicare."""
+        return self._scope is not None
 
     @property
     def concorrenza_condivisa(self) -> bool:
@@ -508,7 +533,30 @@ class ToolExecutor:
         tier = self._registry.effective_tier(tool_id)
         policy = self._registry.policy_for(tool_id)
 
-        # 3. Isolamento: mai degradare silenziosamente verso l'host.
+        # 3. Perimetro del bersaglio.
+        #
+        # Prima del container, e non è una questione di costo: un bersaglio
+        # fuori perimetro deve essere rifiutato e registrato allo stesso modo
+        # sia che il container ci sia sia che non ci sia. Col controllo del
+        # container davanti, un tool che lo richiede su una macchina che non
+        # l'ha registrerebbe «container non disponibile», e il tentativo fuori
+        # perimetro diventerebbe invisibile — perdendo esattamente il segnale
+        # che più conta: che il modello ha provato a toccare qualcosa fuori
+        # dal confine.
+        try:
+            target_risolto = valida_bersaglio(spec.target_kind, target, self._scope)
+        except TargetRefused as err:
+            self._nega(
+                spec,
+                agent,
+                tier,
+                correlation_id,
+                target,
+                f"bersaglio rifiutato: {err}",
+            )
+            raise TargetOutOfScope(f"bersaglio rifiutato: {err}") from None
+
+        # 4. Isolamento: mai degradare silenziosamente verso l'host.
         if spec.requires_container and not self._container_available:
             self._nega(
                 spec,
@@ -523,7 +571,8 @@ class ToolExecutor:
                 f"{tool_id!r} richiede il container isolato, non disponibile"
             )
 
-        # 4. Integrità, prima di chiedere qualunque conferma.
+        # 5. Integrità, dopo il perimetro: rifiutare fuori confine è più
+        #    economico e più indipendente dal tool che hashare uno script.
         try:
             script = risolvi_script(self._repo_root, spec.exec_path)
             effettivo = sha256_file(script)
@@ -550,7 +599,7 @@ class ToolExecutor:
                 f"{tool_id!r}: lo script non corrisponde allo SHA dichiarato"
             )
 
-        # 5. Autorizzazione.
+        # 6. Autorizzazione.
         if policy.requires_confirmation and not confirmed:
             self._audit.log(
                 correlation_id=correlation_id,
@@ -582,6 +631,7 @@ class ToolExecutor:
             ),
             correlation_id=correlation_id,
             target=target,
+            target_risolto=target_risolto,
         )
 
     # -- esecuzione ---------------------------------------------------------- #
@@ -703,7 +753,19 @@ class ToolExecutor:
             self._posti.release()
             raise
 
-        argv = [str(self._tool_python), *self._tool_python_flags, str(pronta.script)]
+        # Argomenti fissi dichiarati nel contratto, poi il separatore, poi il
+        # bersaglio già validato. Il `--` non è cosmetico: senza, un bersaglio
+        # che inizia per '-' verrebbe letto come opzione dal tool. `scope.py`
+        # lo rifiuta già, e questo è il secondo dei due meccanismi — un
+        # controllo che dipende da un solo punto non è un controllo.
+        argv = [
+            str(self._tool_python),
+            *self._tool_python_flags,
+            str(pronta.script),
+            *pronta.spec.exec_args,
+        ]
+        if pronta.target_risolto is not None:
+            argv += ["--", pronta.target_risolto]
         try:
             esito = self._runner.run(
                 argv,
@@ -802,6 +864,7 @@ class ToolExecutor:
 
 
 __all__ = [
+    "ConcurrencyLimitReached",
     "ConfirmationRequired",
     "ContainerUnavailable",
     "ExecutionError",
@@ -809,8 +872,10 @@ __all__ = [
     "PreparedExecution",
     "RunResult",
     "Runner",
+    "SharedSlotsUnusable",
     "SubprocessRunner",
     "TIMEOUT_DEFAULT",
+    "TargetOutOfScope",
     "ToolExecutor",
     "ambiente_minimo",
     "risolvi_script",
