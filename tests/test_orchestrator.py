@@ -146,8 +146,11 @@ def test_script_echo_emette_json(radice: Path):
         check=True,
     )
     payload = json.loads(esito.stdout)
-    assert payload["tool"] == "echo.ping"
     assert payload["findings"] == []
+    # Nessun tool_id nel payload: lo script non sa sotto quale nome è
+    # registrato, e dal passo 8 lo stesso file è registrato due volte. Chi ha
+    # invocato cosa lo dice il log, non l'output del tool.
+    assert "tool" not in payload
 
 
 # --------------------------------------------------------------------------- #

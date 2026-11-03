@@ -480,7 +480,11 @@ def test_echo_agent_reale_gira_isolato(registry, audit):
         "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
     )
     assert call.outcome is CallOutcome.OK
-    assert json.loads(esito.stdout)["tool"] == "echo.ping"
+    payload = json.loads(esito.stdout)
+    assert payload["findings"] == []
+    # L'identità dell'invocazione sta nel ToolCall, non nel payload: lo script
+    # non sa sotto quale tool_id è registrato.
+    assert call.tool_id == "echo.ping"
 
 
 def test_timeout_propagato(repo, registry, audit):
