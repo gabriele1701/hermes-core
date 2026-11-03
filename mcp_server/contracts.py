@@ -81,6 +81,30 @@ class OwnerAgent(StrEnum):
     PENTEST_KALI = "pentest_kali"
 
 
+class TargetKind(StrEnum):
+    """Che tipo di bersaglio accetta un tool, e quindi come va validato.
+
+    Non è una descrizione: è ciò che decide quale validatore viene applicato
+    all'argomento ``target`` prima dell'esecuzione. Da qui una regola che va
+    tenuta: **nessun kind senza validatore**. Aggiungere un valore a questo
+    enum senza il controllo corrispondente in ``scope.py`` trasformerebbe
+    quel valore in un passaggio libero verso la riga di comando di un tool,
+    ed è esattamente il contrario di ciò per cui l'enum esiste.
+
+    ``NONE`` è il default, e il default sta sul lato restrittivo: un tool che
+    non dichiara un bersaglio non ne accetta uno. Passargliene uno è un
+    rifiuto, non un valore ignorato — un argomento accettato e buttato via è
+    il modo in cui un modello si convince di aver limitato qualcosa.
+
+    Diverso da ``default_tier``, che non ha default proprio perché l'assenza
+    avrebbe dovuto scegliere un grado di permissività: qui l'assenza coincide
+    con il grado più restrittivo.
+    """
+
+    NONE = "none"
+    HOST = "host"
+
+
 class AgentStatus(StrEnum):
     """Esito complessivo dell'invocazione di un agente.
 
@@ -201,11 +225,53 @@ class ToolSpec(_StrictModel):
             "eseguita: uno script modificato non corrisponde e non va eseguito."
         ),
     )
+    target_kind: TargetKind = Field(
+        default=TargetKind.NONE,
+        description=(
+            "Che bersaglio accetta il tool, e quindi come viene validato. "
+            "Il default NONE non ne accetta nessuno."
+        ),
+    )
+    exec_args: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Argomenti FISSI dello script, dichiarati all'integrazione e "
+            "immutabili. Fanno parte dell'identità di ciò che viene eseguito: "
+            "`(exec_path, exec_sha256, exec_args)`. Servono a distinguere due "
+            "sottocomandi dello stesso script con rischio diverso — es. uno "
+            "scan leggero e uno aggressivo — da un alias abusivo che registra "
+            "lo stesso comando a tier più basso. Il bersaglio NON sta qui: "
+            "varia a ogni invocazione e non è identità."
+        ),
+    )
     description: str = Field(
         min_length=1,
         max_length=512,
         description="Cosa fa il tool, in una riga. Mostrato in fase di conferma.",
     )
+
+    @field_validator("exec_args")
+    @classmethod
+    def _argomenti_dichiarati(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        """Rifiuta argomenti vuoti o che contengano il separatore.
+
+        ``--`` è il confine fra gli argomenti dichiarati e il bersaglio
+        scelto a ogni invocazione: se potesse comparire qui, un tool
+        dichiarerebbe argomenti che il tool legge come bersaglio, cioè
+        rimetterebbe nella parte fissa ciò che il gate valida nella parte
+        variabile.
+        """
+        for arg in v:
+            if not arg or not arg.strip():
+                raise ValueError("exec_args non può contenere argomenti vuoti")
+            if arg == "--":
+                raise ValueError(
+                    "exec_args non può contenere '--': è il separatore che "
+                    "delimita il bersaglio validato"
+                )
+            if "\x00" in arg:
+                raise ValueError("exec_args non può contenere byte nulli")
+        return v
 
     @field_validator("exec_path")
     @classmethod
@@ -334,6 +400,7 @@ __all__ = [
     "OwnerAgent",
     "RiskTier",
     "Severity",
+    "TargetKind",
     "ToolCall",
     "ToolSpec",
 ]

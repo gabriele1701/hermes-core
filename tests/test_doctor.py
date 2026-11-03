@@ -44,8 +44,17 @@ def scrivi_config(
     senza_tool: bool = False,
     agent: str = "echo_dummy",
     state_dir: Path | str | None = None,
+    scope_file: Path | str | None = None,
+    target_kind: str | None = None,
 ) -> Path:
     riga_stato = f'state_dir = "{state_dir}"\n' if state_dir is not None else ""
+    if scope_file is not None:
+        riga_stato += f'scope_file = "{scope_file}"\n'
+    riga_bersaglio = (
+        f'target_kind = "{target_kind}"\n            '
+        if target_kind is not None
+        else ""
+    )
     sha = sha if sha is not None else sha256_file(radice / SCRIPT)
     blocco_tool = (
         ""
@@ -59,7 +68,7 @@ def scrivi_config(
             requires_container = {str(requires_container).lower()}
             exec_path = "{exec_path}"
             exec_sha256 = "{sha}"
-            description = "Agente dummy."
+            {riga_bersaglio}description = "Agente dummy."
             """)
     )
     percorso = tmp_path / "hermes.toml"
@@ -1023,3 +1032,117 @@ def test_chiavi_scrivibili_da_altri_e_errore(
     )
     referto = esegui(scrivi_config(tmp_path, radice))
     assert _controllo(referto, "autorizzazioni del canale").esito is Esito.ERRORE
+
+
+# --------------------------------------------------------------------------- #
+# Perimetro dei bersagli (A2)
+# --------------------------------------------------------------------------- #
+
+
+def _scope(tmp_path: Path, contenuto: str | None = None) -> Path:
+    percorso = tmp_path / "scope.toml"
+    percorso.write_text(
+        contenuto
+        if contenuto is not None
+        else 'reti = ["10.10.0.0/16"]\n\n[alias]\ndc01 = "10.10.0.5"\n',
+        encoding="utf-8",
+    )
+    return percorso
+
+
+def test_senza_perimetro_e_senza_tool_con_bersaglio_e_avviso(
+    tmp_path: Path, radice: Path
+):
+    """Nulla di registrato lo richiede: manca una proprietà, non un pezzo."""
+    referto = esegui(scrivi_config(tmp_path, radice))
+    controllo = _controllo(referto, "perimetro dei bersagli")
+    assert controllo.esito is Esito.AVVISO
+    assert referto.pronto is True
+
+
+def test_tool_con_bersaglio_senza_perimetro_e_errore(tmp_path: Path, radice: Path):
+    """Quel tool non è invocabile, e senza questo controllo si scoprirebbe
+    alla prima invocazione — cioè quando serve."""
+    referto = esegui(scrivi_config(tmp_path, radice, target_kind="host"))
+    controllo = _controllo(referto, "perimetro dei bersagli")
+    assert controllo.esito is Esito.ERRORE
+    assert "echo.ping" in controllo.messaggio
+    assert referto.pronto is False
+
+
+def test_perimetro_non_caricabile_e_errore(tmp_path: Path, radice: Path):
+    """Promesso e non applicabile: il caso peggiore dei due."""
+    rotto = _scope(tmp_path, "reti = [\n")
+    referto = esegui(
+        scrivi_config(tmp_path, radice, scope_file=rotto, target_kind="host")
+    )
+    controllo = _controllo(referto, "perimetro dei bersagli")
+    assert controllo.esito is Esito.ERRORE
+    assert "non parsabile" in controllo.messaggio
+    assert referto.pronto is False
+
+
+def test_perimetro_vuoto_e_errore(tmp_path: Path, radice: Path):
+    referto = esegui(
+        scrivi_config(tmp_path, radice, scope_file=_scope(tmp_path, "reti = []\n"))
+    )
+    assert _controllo(referto, "perimetro dei bersagli").esito is Esito.ERRORE
+
+
+def test_perimetro_valido_e_ok_e_dichiara_reti_e_alias(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Il messaggio deve dire qual è il perimetro, non solo che c'è.
+
+    Un operatore che non sa quali reti sono ammesse non sa interpretare un
+    rifiuto.
+    """
+    from mcp_server import doctor as mod
+
+    monkeypatch.setattr(mod, "_utente_di_servizio", lambda cfg: "hermes")
+    referto = esegui(
+        scrivi_config(
+            tmp_path, radice, scope_file=_scope(tmp_path), target_kind="host"
+        )
+    )
+    controllo = _controllo(referto, "perimetro dei bersagli")
+    assert controllo.esito is Esito.OK
+    assert "10.10.0.0/16" in controllo.messaggio
+    assert "dc01" in controllo.messaggio
+    assert "nessuna risoluzione DNS" in controllo.messaggio
+    assert _controllo(referto, "tool con bersaglio").esito is Esito.OK
+
+
+def test_perimetro_scrivibile_dal_servizio_e_errore(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Un perimetro che il servizio può riscrivere non è un perimetro.
+
+    Come per il canale SSH, l'utente di servizio si dichiara invece di
+    cambiare proprietario al file: un test che richiede `chown` gira solo da
+    root, e questa suite deve dare lo stesso esito sulla VM.
+    """
+    import pwd as _pwd
+
+    from mcp_server import doctor as mod
+
+    proprietario = _pwd.getpwuid(os.getuid()).pw_name
+    monkeypatch.setattr(mod, "_utente_di_servizio", lambda cfg: proprietario)
+    referto = esegui(scrivi_config(tmp_path, radice, scope_file=_scope(tmp_path)))
+    controllo = _controllo(referto, "proprietario del perimetro")
+    assert controllo.esito is Esito.ERRORE
+    assert "ampliare il proprio perimetro" in controllo.messaggio
+    assert referto.pronto is False
+
+
+def test_perimetro_leggibile_da_altri_ma_non_scrivibile_e_ok(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Leggibile va bene: il perimetro non è un segreto, è un vincolo."""
+    from mcp_server import doctor as mod
+
+    monkeypatch.setattr(mod, "_utente_di_servizio", lambda cfg: "hermes")
+    percorso = _scope(tmp_path)
+    percorso.chmod(0o644)
+    referto = esegui(scrivi_config(tmp_path, radice, scope_file=percorso))
+    assert _controllo(referto, "perimetro dei bersagli").esito is Esito.OK

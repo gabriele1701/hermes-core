@@ -43,6 +43,11 @@ def radice() -> Path:
 @pytest.fixture()
 def config(tmp_path: Path, radice: Path) -> Path:
     """Config che punta allo script reale, con log in una cartella temporanea."""
+    perimetro = tmp_path / "scope.toml"
+    perimetro.write_text(
+        'reti = ["10.10.0.0/16"]\n\n[alias]\nlab-kali = "10.10.0.5"\n',
+        encoding="utf-8",
+    )
     percorso = tmp_path / "hermes.toml"
     percorso.write_text(
         textwrap.dedent(f"""\
@@ -51,6 +56,7 @@ def config(tmp_path: Path, radice: Path) -> Path:
             repo_root = "{radice}"
             log_path = "{tmp_path}/audit.jsonl"
             container_available = false
+            scope_file = "{perimetro}"
 
             [vault]
             backend = "stub"
@@ -65,6 +71,18 @@ def config(tmp_path: Path, radice: Path) -> Path:
             exec_path = "{SCRIPT}"
             exec_sha256 = "{sha256_file(radice / SCRIPT)}"
             description = "Agente dummy."
+
+            [[tool]]
+            tool_id = "echo.bersaglio"
+            owner_agent = "echo_dummy"
+            default_tier = "verde"
+            personal_data = false
+            requires_container = false
+            exec_path = "{SCRIPT}"
+            exec_sha256 = "{sha256_file(radice / SCRIPT)}"
+            target_kind = "host"
+            exec_args = ["--bersaglio"]
+            description = "Dummy che accetta un bersaglio."
 
             [[tool]]
             tool_id = "echo.rosso"
@@ -128,8 +146,11 @@ def test_script_echo_emette_json(radice: Path):
         check=True,
     )
     payload = json.loads(esito.stdout)
-    assert payload["tool"] == "echo.ping"
     assert payload["findings"] == []
+    # Nessun tool_id nel payload: lo script non sa sotto quale nome è
+    # registrato, e dal passo 8 lo stesso file è registrato due volte. Chi ha
+    # invocato cosa lo dice il log, non l'output del tool.
+    assert "tool" not in payload
 
 
 # --------------------------------------------------------------------------- #
@@ -201,13 +222,48 @@ def test_risultato_valido_accettato(orchestratore, endpoint):
 @pytest.mark.anyio
 async def test_catena_completa(orchestratore, endpoint, audit):
     """Definition of done di M0: la catena intera, con esito strutturato."""
-    inv = await orchestratore.invoca(endpoint, "echo.ping", target="lab-kali")
+    inv = await orchestratore.invoca(endpoint, "echo.ping")
 
     assert inv.riuscita is True
     assert inv.result.agent is OwnerAgent.ECHO_DUMMY
     assert inv.result.tool_calls[0].tool_id == "echo.ping"
-    assert inv.result.tool_calls[0].target == "lab-kali"
     assert "catena di esecuzione percorsa correttamente" in inv.stdout
+
+
+@pytest.mark.slow
+@pytest.mark.anyio
+async def test_il_bersaglio_arriva_allo_script_solo_se_ammesso(
+    orchestratore, endpoint, audit
+):
+    """La catena intera, bersaglio compreso: contratto, perimetro, argv, log.
+
+    È il test che vale più degli altri su A2, perché il bersaglio non era mai
+    arrivato allo script: fino a ieri era una stringa che il gate accettava e
+    non passava a nessuno. Qui lo script lo stampa, quindi si vede.
+    """
+    inv = await orchestratore.invoca(endpoint, "echo.bersaglio", target="lab-kali")
+
+    assert inv.riuscita is True
+    # L'alias è stato risolto dal file di perimetro, non dal DNS.
+    assert '"--bersaglio", "--", "10.10.0.5"' in inv.stdout.replace("'", '"')
+    # Nel log resta ciò che il modello ha chiesto.
+    assert inv.result.tool_calls[0].target == "lab-kali"
+
+
+@pytest.mark.slow
+@pytest.mark.anyio
+async def test_bersaglio_fuori_perimetro_rifiutato_dalla_catena(
+    orchestratore, endpoint, audit
+):
+    """Un bersaglio fuori perimetro non arriva allo script."""
+    inv = await orchestratore.invoca(
+        endpoint, "echo.bersaglio", target="192.0.2.1"
+    )
+
+    assert inv.riuscita is False
+    assert "catena di esecuzione percorsa correttamente" not in inv.stdout
+    negati = [r for r in audit.read_all() if r.outcome is CallOutcome.DENIED]
+    assert negati and "fuori dal perimetro" in negati[-1].detail
 
 
 @pytest.mark.slow
@@ -299,7 +355,11 @@ async def test_due_processi_scrivono_lo_stesso_log(orchestratore, endpoint, audi
 @pytest.mark.anyio
 async def test_elenco_tool_via_orchestratore(orchestratore, endpoint):
     tool = await orchestratore.elenca_tool(endpoint)
-    assert {t["tool_id"] for t in tool} == {"echo.ping", "echo.rosso"}
+    assert {t["tool_id"] for t in tool} == {
+        "echo.ping",
+        "echo.bersaglio",
+        "echo.rosso",
+    }
 
 
 @pytest.mark.slow

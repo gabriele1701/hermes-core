@@ -1,0 +1,45 @@
+# Perimetro dei bersagli ammessi — hermes-core (A2)
+#
+# Copiare FUORI dal repo, in una posizione di root, e indicarlo in
+# hermes.toml come [server] scope_file:
+#
+#     sudo install -d -m 755 -o root -g root /etc/hermes
+#     sudo install -m 644 -o root -g root config/scope.example.toml \
+#         /etc/hermes/scope.toml
+#
+# Deve essere di root e NON scrivibile dall'utente di servizio. Non va in
+# state_dir: quella è scrivibile dal servizio, e un tool compromesso che
+# potesse riscrivere la propria allowlist non avrebbe un'allowlist. Il
+# preflight verifica proprietario e permessi, non si fida di questo commento.
+
+# Reti su cui i tool possono agire, in notazione CIDR canonica.
+#
+# Canonica vuol dire che l'indirizzo deve essere quello della rete:
+# "192.168.205.0/24" sì, "192.168.205.10/24" no. Il secondo è quasi sempre un
+# errore di chi scrive, e verrebbe interpretato come l'intera /24 — cioè un
+# perimetro più largo di quello inteso, che è il difetto che questo file
+# esiste per evitare. Si rifiuta al caricamento.
+#
+# Tenerle strette. Una /16 di comodo è un perimetro che non limita niente.
+reti = [
+    "192.168.205.0/24",
+]
+
+# Nomi, per non ricordare gli indirizzi a memoria.
+#
+# Qui NON c'è DNS, ed è una scelta: un alias si risolve leggendo questo file,
+# non interrogando la rete. Un nome risolto al momento del controllo potrebbe
+# puntare altrove al momento dell'esecuzione (DNS rebinding), può risolvere a
+# più indirizzi, e dipende da un servizio fuori dal perimetro. Un alias
+# dichiarato qui non si avvelena e non cambia sotto il controllo.
+#
+# Ogni alias deve puntare a un INDIRIZZO, non a un altro nome: l'alias è la
+# risoluzione, non un secondo livello da risolvere. E deve cadere dentro una
+# delle reti dichiarate sopra, altrimenti il file direbbe nello stesso momento
+# che quell'indirizzo è ammesso e che non lo è.
+#
+# Nel log restano entrambi — il nome chiesto dal modello e l'indirizzo
+# raggiunto — così la traccia dice cosa è stato toccato davvero.
+[alias]
+# lab-web = "192.168.205.20"
+# lab-kali = "192.168.205.30"

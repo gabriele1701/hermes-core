@@ -56,7 +56,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from mcp_server.audit import AuditLog, LogAction
-from mcp_server.config import ServerConfig, load_config
+from mcp_server.config import ConfigError, ServerConfig, load_config
 from mcp_server.contracts import (
     AgentResult,
     AgentStatus,
@@ -64,7 +64,9 @@ from mcp_server.contracts import (
     CallOutcome,
     OwnerAgent,
     RiskTier,
+    TargetKind,
     ToolCall,
+    ToolSpec,
 )
 from mcp_server.executor import (
     ConcurrencyLimitReached,
@@ -73,6 +75,7 @@ from mcp_server.executor import (
     ExecutionError,
     IntegrityMismatch,
     SharedSlotsUnusable,
+    TargetOutOfScope,
     ToolExecutor,
 )
 from mcp_server.overrides import OverrideScope, OverrideStore
@@ -84,6 +87,7 @@ from mcp_server.registry import (
     ToolSpecRejected,
 )
 from mcp_server.slots import SlotPool
+from mcp_server.scope import ScopeAllowlist, ScopeError
 from mcp_server.vault import StubBackend, Vault, VaultBackend
 
 NOME_SERVER = "hermes-core"
@@ -183,6 +187,13 @@ class HermesServer:
                 if config.state_dir is not None
                 else None
             ),
+            # Perimetro caricato una volta all'avvio. Non configurato → None,
+            # e i tool con bersaglio non sono invocabili: l'assenza di
+            # perimetro non vale come «tutto ammesso». Configurato e non
+            # caricabile → il server non parte, perché un perimetro promesso
+            # e non applicabile è peggio di un perimetro assente: nessuno
+            # saprebbe di averlo perso.
+            scope=self._carica_perimetro(config),
         )
         self._carica_tool()
         self._mcp = self._costruisci_mcp()
@@ -215,6 +226,23 @@ class HermesServer:
         self._mcp.run(transport=transport)  # type: ignore[arg-type]
 
     # -- avvio -------------------------------------------------------------- #
+
+    @staticmethod
+    def _carica_perimetro(config: ServerConfig) -> ScopeAllowlist | None:
+        """Perimetro dei bersagli, o ``None`` se non configurato.
+
+        Un perimetro configurato e non caricabile fa fallire l'avvio invece di
+        degradare: il server girerebbe senza il confine che la configurazione
+        dichiara, e l'unico momento in cui qualcuno può accorgersene è adesso.
+        """
+        if config.scope_file is None:
+            return None
+        try:
+            return ScopeAllowlist.carica(config.scope_file)
+        except ScopeError as err:
+            raise ConfigError(
+                f"server.scope_file è configurato ma non utilizzabile: {err}"
+            ) from err
 
     def _carica_tool(self) -> None:
         """Registra i tool della configurazione, fallendo al primo non conforme.
@@ -305,6 +333,10 @@ class HermesServer:
             "concurrency_shared_across_connections": (
                 self._executor.concorrenza_condivisa
             ),
+            # Come gli altri: un presidio che non c'è si dichiara dove lo si
+            # legge. False significa che i tool con bersaglio non sono
+            # invocabili su questa installazione.
+            "scope_configured": self._executor.perimetro_configurato,
             "tools": elenco,
         }
 
@@ -373,6 +405,7 @@ class HermesServer:
             IntegrityMismatch,
             ConcurrencyLimitReached,
             SharedSlotsUnusable,
+            TargetOutOfScope,
         ) as err:
             # Tutte decisioni del gate, non guasti dell'invocazione: il gate
             # ha già scritto la sua riga `denied`, e un risultato di tipo
@@ -473,7 +506,13 @@ class HermesServer:
                 "personal_data": policy.personal.value,
                 "required": policy.requires_confirmation,
             },
-            "executable_now": not policy.requires_confirmation,
+            # «Il gate lo lascerebbe passare adesso», non «la policy non
+            # chiede conferme». Un tool con bersaglio su un'installazione
+            # senza perimetro non è invocabile, e un campo che dicesse true
+            # mentre il gate rifiuta sarebbe peggio di un campo assente.
+            "executable_now": (
+                not policy.requires_confirmation and self._bersaglio_praticabile(spec)
+            ),
         }
         if dettagliato:
             base["unattended_safe"] = policy.unattended_safe
@@ -486,6 +525,13 @@ class HermesServer:
             base["override_scope"] = durata.value if attivo else None
             base["override_note"] = NOTE_DURATA[durata] if attivo else None
         return base
+
+    def _bersaglio_praticabile(self, spec: ToolSpec) -> bool:
+        """Se il perimetro necessario a questo tool è disponibile."""
+        return (
+            spec.target_kind is TargetKind.NONE
+            or self._executor.perimetro_configurato
+        )
 
     def _log_risultato(self, risultato: AgentResult) -> None:
         """Registra la riga ``agent_result`` della catena.

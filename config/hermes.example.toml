@@ -69,6 +69,20 @@ log_path = "../logs/hermes-audit.jsonl"
 #
 # state_dir = "/var/lib/hermes/state"
 
+# Perimetro dei bersagli ammessi: reti e alias che i tool possono toccare.
+# Modello in config/scope.example.toml.
+#
+# Serve ai tool che dichiarano `target_kind` diverso da "none". Senza questa
+# chiave quei tool NON sono invocabili: l'assenza di perimetro non vale come
+# «tutto ammesso», e il catalogo lo dichiara in scope_configured.
+#
+# File di ROOT, non scrivibile dall'utente di servizio, e fuori da state_dir:
+# un tool compromesso che potesse riscrivere la propria allowlist non avrebbe
+# un'allowlist. Configurato e non caricabile → il server non parte, perché un
+# perimetro promesso e non applicabile è peggio di uno assente.
+#
+# scope_file = "/etc/hermes/scope.toml"
+
 # Disponibilità del runtime isolato. A false, i tool che dichiarano
 # requires_container vengono NEGATI, non eseguiti sull'host.
 container_available = false
@@ -162,3 +176,33 @@ requires_container = false
 exec_path = "agents/echo_agent/run.py"
 exec_sha256 = "34b7aa6afc7f96e5c88ecfd8f4305a0739743bc5a1f7aa27ee2b63546518d3a8"
 description = "Agente dummy: restituisce un risultato conforme al contratto."
+
+# target_kind: che bersaglio accetta il tool, e quindi come viene validato.
+#   "none" (default) — nessun bersaglio. Passarne uno è un RIFIUTO, non un
+#           valore ignorato: un argomento accettato e buttato via fa credere
+#           di aver limitato qualcosa.
+#   "host" — un indirizzo IP dentro le reti del perimetro, o un alias
+#           dichiarato. Richiede scope_file.
+#
+# exec_args: argomenti FISSI dello script, parte dell'identità di ciò che
+# viene eseguito — `(exec_path, exec_sha256, exec_args)`. Servono a
+# distinguere due sottocomandi dello stesso script a rischio diverso (uno
+# scan leggero e uno aggressivo) da un alias abusivo che registra lo stesso
+# comando a tier più basso: a identità identica e tier inferiore la
+# registrazione viene RIFIUTATA. Il bersaglio non sta qui, varia a ogni
+# invocazione.
+#
+# Il bersaglio validato arriva allo script dopo un separatore `--`, quindi un
+# tool riceve: <exec_args...> -- <bersaglio>
+
+# [[tool]]
+# tool_id = "echo.bersaglio"
+# owner_agent = "echo_dummy"
+# default_tier = "verde"
+# personal_data = false
+# requires_container = false
+# exec_path = "agents/echo_agent/run.py"
+# exec_sha256 = "<lo stesso SHA di sopra>"
+# target_kind = "host"
+# exec_args = ["--bersaglio"]
+# description = "Dummy che accetta un bersaglio: serve a verificare il perimetro."

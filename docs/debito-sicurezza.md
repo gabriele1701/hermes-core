@@ -27,6 +27,8 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | Il `detail` diceva «in attesa di conferma dell'utente» | patch sic. 6a | Non c'era nessuna attesa: nessun canale di conferma è collegato. Un modello che legge «in attesa» conclude che qualcuno risponderà e riprova — o cerca un'altra via per lo stesso effetto. Ora il testo dice che il tool non è stato eseguito e che riprovare non cambia l'esito. Il flusso resta aperto qui sotto. |
 | Il limite di concorrenza era per processo | patch sic. 6b | Un file di lock per posto in `state_dir/slots/<agente>/`, preso con `flock(LOCK_EX|LOCK_NB)`. Il kernel lo rilascia alla morte del processo: niente lock orfani, niente scadenze da indovinare. Il semaforo in memoria resta come percorso veloce. **Assente è diverso da rotto:** senza `state_dir` il tetto resta per processo ed è dichiarato nel preflight e nel catalogo (`concurrency_shared_across_connections`); con `state_dir` configurata e la directory dei posti non utilizzabile il tetto è promesso e non applicabile, quindi il gate **rifiuta** invece di degradare — stessa regola del container assente. |
 | HC-04 — il canale del servizio poteva auto-autorizzarsi | passo 7 | `ForceCommand` e `AuthorizedKeysFile` nel drop-in `config/sshd/10-hermes.conf`, quindi nella configurazione di sshd e non nella `authorized_keys` dentro la home del servizio: un tool compromesso non può più togliersi il comando vincolato né aggiungere una chiave. Chiavi in `/etc/ssh/authorized_keys.d/hermes`, root-owned. Password disattivata, `ufw` ristretto all'IP della postazione. Il preflight verifica il confine sul filesystem, non solo la configurazione. |
+| A2 — il bersaglio di un'invocazione non era validato | passo 8 | Perimetro di reti e alias in un file di root (`server.scope_file`), `target_kind` nel contratto e un validatore per ciascun kind. Controllo **prima** dell'integrità e del container: un bersaglio fuori perimetro va rifiutato e registrato allo stesso modo sia che il container ci sia sia che non ci sia. Nessuna risoluzione DNS — gli alias sono dichiarati dall'operatore, quindi non c'è finestra di rebinding. Perimetro assente non vale come «tutto ammesso»: i tool con bersaglio non sono invocabili, e il catalogo lo dichiara in `scope_configured`. |
+| ALTA — l'aliasing di un tool non era rifiutabile (`exec_args`) | passo 8 | `exec_args` nel contratto: l'identità di ciò che viene eseguito diventa `(exec_path, exec_sha256, exec_args)`. A identità **identica** e tier inferiore la registrazione è rifiutata, non più solo segnalata. A identità diversa — due sottocomandi dello stesso script a rischio diverso — resta la segnalazione `tool_alias_detected`, perché lì l'ambiguità c'è davvero. Chiusa al passo 8 e non in M1 perché la condizione era «quando i tool avranno bisogno di argomenti», e passare il bersaglio allo script è quel momento. |
 | HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che e' la protezione vera, e' documentato in `docs/dipendenze.md` e resta da generare. |
 
 ---
@@ -74,34 +76,6 @@ una corsa, cambia direttamente la configurazione.
 
 **Da rivalutare se:** il server girerà con un utente che ha accesso in
 scrittura al repo, o se gli script arriveranno da una sorgente non versionata.
-
----
-
-## ALTA — l'aliasing di un tool non è rifiutabile: manca `exec_args`
-
-**Dove:** `mcp_server/contracts.py` (`ToolSpec`), `mcp_server/registry.py`.
-
-Il rifiuto del `tool_id` duplicato chiude la via più comoda al declassamento,
-non tutte. Resta quella di registrare un **secondo `tool_id` sullo stesso
-script** a tier più basso: stessa capacità, conferme più lasche, regola
-sull'override aggirata.
-
-Non è rifiutabile oggi perché il caso abusivo e quello legittimo — uno script
-con più sottocomandi a rischio diverso, es. `nmap.ping_sweep` Verde e
-`nmap.aggressive` Rosso — sono **indistinguibili**: `ToolSpec` non ha un campo
-argomenti, quindi `exec_path` è l'intera identità di ciò che viene eseguito.
-
-**Mitigazione in essere:** il registro *rileva e registra* l'anomalia
-(`tool_alias_detected`) senza bloccarla, sia per l'alias a tier inferiore sia
-per l'incoerenza di `exec_sha256` sullo stesso path. Visibile in review, non
-bloccante.
-
-**Condizione di chiusura:** aggiungere `exec_args` a `ToolSpec`, così che
-l'identità di un tool diventi `(exec_path, exec_sha256, exec_args)`. A quel
-punto due `tool_id` con identità identica e tier diverso sono aliasing
-genuino, e il registro può **rifiutare** quello a tier inferiore invece di
-limitarsi a segnalarlo. Da affrontare **quando i tool avranno bisogno di
-argomenti**, cioè all'ingresso dei primi tool reali in Milestone 1.
 
 ---
 

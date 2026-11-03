@@ -35,6 +35,7 @@ _CHIAVI_SERVER = frozenset(
         "container_available",
         "log_path",
         "state_dir",
+        "scope_file",
         "tool_python",
         "tool_python_flags",
         "max_output_bytes",
@@ -105,6 +106,13 @@ class ServerConfig:
     #: creato, mentre l'assenza ha una conseguenza precisa e dichiarabile (gli
     #: innalzamenti valgono per la connessione) che il preflight segnala.
     state_dir: Path | None = None
+    #: File del perimetro dei bersagli ammessi (reti e alias). ``None``
+    #: significa **non configurato**, e ha una conseguenza precisa invece di
+    #: un default: i tool che dichiarano un bersaglio non sono invocabili, e
+    #: il preflight e il catalogo lo dichiarano. Non è ``state_dir``, ed è di
+    #: proposito: lo stato è scrivibile dal servizio, e un tool compromesso
+    #: che potesse riscrivere la propria allowlist non avrebbe un'allowlist.
+    scope_file: Path | None = None
     #: Interprete dei tool: percorso assoluto, verificato all'avvio.
     tool_python: Path = TOOL_PYTHON_DEFAULT
     tool_python_flags: tuple[str, ...] = TOOL_PYTHON_FLAGS_DEFAULT
@@ -165,6 +173,7 @@ def load_config(path: str | Path) -> ServerConfig:
         log_path=log_path,
         container_available=container,
         state_dir=_percorso(server.get("state_dir"), percorso),
+        scope_file=_percorso(server.get("scope_file"), percorso),
         tool_python=_interprete(server.get("tool_python")),
         tool_python_flags=_flag_interprete(server.get("tool_python_flags")),
         max_output_bytes=_intero_positivo(

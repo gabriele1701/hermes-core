@@ -89,26 +89,33 @@ non tutte. Resta quella di registrare un **secondo tool_id sullo stesso
 script** dichiarandolo a tier più basso: stessa capacità, conferme più lasche,
 regola sull'override aggirata.
 
-Un rifiuto secco su ``exec_path`` ripetuto sarebbe però sbagliato, perché lo
-stesso pattern descrive un caso legittimo: uno script con più sottocomandi,
-dove ``nmap.ping_sweep`` è davvero Verde e ``nmap.aggressive`` è davvero
-Rosso. I due casi oggi sono **indistinguibili**, perché :class:`ToolSpec` non
-ha un campo argomenti: ``exec_path`` è l'intera identità di ciò che viene
-eseguito, e il contratto non ha l'informazione per dire se due tool facciano
-la stessa cosa o cose diverse.
+Un rifiuto secco su ``exec_path`` ripetuto sarebbe sbagliato, perché lo stesso
+pattern descrive un caso legittimo: uno script con più sottocomandi, dove
+``nmap.ping-sweep`` è davvero Verde e ``nmap.aggressive`` è davvero Rosso. Il
+discrimine è l'**identità di ciò che viene eseguito**, che con ``exec_args``
+nel contratto è ``(exec_path, exec_sha256, exec_args)``:
 
-Finché quell'informazione manca, il registro **rileva e registra** invece di
-bloccare: una registrazione che condivide ``exec_path`` con un tool a tier
-superiore emette un evento ``tool_alias_detected``, che in review salta
-all'occhio senza rompere il pattern legittimo. Viene segnalata anche la
-dichiarazione di integrità incoerente — stesso ``exec_path``, ``exec_sha256``
-diversi — che non ha alcun caso d'uso valido: lo stesso file non può avere
-due hash, quindi una delle due spec è sbagliata.
+* **identità identica, tier inferiore** → non c'è ambiguità da rispettare. Non
+  sono due sottocomandi, è lo stesso comando dichiarato due volte, e quello a
+  tier più basso è un declassamento con un altro nome. La registrazione viene
+  **rifiutata**, e il rifiuto finisce nel log.
+* **identità diversa** → l'ambiguità c'è davvero, e si **segnala** invece di
+  bloccare: un evento ``tool_alias_detected`` che in review salta all'occhio
+  senza rompere il pattern legittimo.
 
-La chiusura definitiva richiede ``exec_args`` nel contratto, così che
-l'identità di un tool diventi ``(path, sha, args)`` e l'aliasing genuino
-diventi rifiutabile senza falsi positivi. È registrata come voce ad **alta
-rilevanza** in ``docs/debito-sicurezza.md``.
+Il confronto usa il tier **effettivo** del fratello, non quello dichiarato: un
+innalzamento già applicato conta, altrimenti basterebbe registrare prima a
+tier basso e alzarlo dopo.
+
+Viene segnalata anche la dichiarazione di integrità incoerente — stesso
+``exec_path``, ``exec_sha256`` diversi — che non ha alcun caso d'uso valido:
+lo stesso file non può avere due hash, quindi una delle due spec è sbagliata.
+
+Fino al passo 8 nessuno dei due casi era bloccabile, perché il contratto non
+aveva un campo argomenti e i due pattern erano indistinguibili. Era la voce ad
+alta rilevanza del debito, e la sua condizione di chiusura era «quando i tool
+avranno bisogno di argomenti»: passare un bersaglio allo script è quel
+momento.
 
 Limite di fiducia
 -----------------
@@ -296,6 +303,8 @@ class ToolRegistry:
                 detail="tool_id già registrato: il registro non ammette sovrascritture",
             )
             raise ToolAlreadyRegistered(f"tool già registrato: {spec.tool_id!r}")
+
+        self._rifiuta_aliasing_genuino(spec)
 
         self._specs[spec.tool_id] = spec
         policy = derive_policy_for(spec)
@@ -633,12 +642,56 @@ class ToolRegistry:
             )
         )
 
+    def _rifiuta_aliasing_genuino(self, spec: ToolSpec) -> None:
+        """Rifiuta un secondo ``tool_id`` identico a tier inferiore.
+
+        Con ``exec_args`` nel contratto, l'identità di ciò che viene eseguito
+        è ``(exec_path, exec_sha256, exec_args)``. Due ``tool_id`` con
+        identità **identica** e tier diverso non sono più ambigui: non sono
+        due sottocomandi, sono lo stesso comando dichiarato due volte, e
+        quello a tier più basso è un declassamento con un altro nome. Si
+        rifiuta.
+
+        Quando gli argomenti differiscono — ``nmap --top-ports`` contro
+        ``nmap -A`` — il caso resta legittimo e resta solo segnalato: è la
+        ragione per cui prima non si poteva bloccare nulla.
+        """
+        identici = sorted(
+            altro.tool_id
+            for altro in self._specs.values()
+            if altro.tool_id != spec.tool_id
+            and altro.exec_path == spec.exec_path
+            and altro.exec_sha256 == spec.exec_sha256
+            and altro.exec_args == spec.exec_args
+            and self.effective_tier(altro.tool_id).rank > spec.default_tier.rank
+        )
+        if not identici:
+            return
+        elenco = ", ".join(identici)
+        motivo = (
+            f"identità di esecuzione identica a {elenco} (stesso exec_path, "
+            f"exec_sha256 e exec_args) ma tier '{spec.default_tier}' "
+            f"inferiore: è un declassamento sotto altro nome, non un "
+            f"sottocomando"
+        )
+        self._log(
+            LogAction.TOOL_REGISTRATION_REJECTED,
+            CallOutcome.DENIED,
+            agent=spec.owner_agent,
+            tool_id=spec.tool_id,
+            tier_effective=spec.default_tier,
+            detail=motivo,
+        )
+        raise ToolSpecRejected(f"{spec.tool_id!r}: {motivo}")
+
     def _segnala_anomalie_di_alias(self, spec: ToolSpec) -> None:
         """Registra gli alias sospetti sullo stesso script.
 
-        Non blocca: il pattern legittimo (uno script, più sottocomandi a
-        rischio diverso) e quello abusivo (stesso script a tier più basso)
-        sono indistinguibili finché il contratto non ha ``exec_args``.
+        Resta un avviso e non un blocco: a identità di esecuzione **diversa**
+        (argomenti diversi) il pattern legittimo — uno script, più
+        sottocomandi a rischio diverso — e quello sospetto restano
+        indistinguibili. L'aliasing genuino, cioè a identità identica, è
+        rifiutato in `_rifiuta_aliasing_genuino` prima di arrivare qui.
         """
         fratelli = [
             altro
