@@ -64,7 +64,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from pydantic import ValidationError
 
-from mcp_server.audit import AuditLog, LogAction
+from mcp_server.audit import AuditLog, LogAction, esito_da_status
 from mcp_server.contracts import AgentResult, AgentStatus, CallOutcome, OwnerAgent
 
 
@@ -197,7 +197,7 @@ class Orchestrator:
             # come lui l'ha dichiarata nel risultato.
             peer_correlation_id=str(invocazione.agent_correlation_id),
             action=LogAction.AGENT_RESULT,
-            outcome=_esito(invocazione.result.status),
+            outcome=esito_da_status(invocazione.result.status),
             agent=OwnerAgent.ORCHESTRATOR,
             tool_id=tool_id,
             target=target,
@@ -261,14 +261,6 @@ class Orchestrator:
             agent=OwnerAgent.ORCHESTRATOR,
             detail=f"risposta non conforme da '{endpoint.agent}': {motivo}",
         )
-
-
-def _esito(status: AgentStatus) -> CallOutcome:
-    return {
-        AgentStatus.OK: CallOutcome.OK,
-        AgentStatus.ERROR: CallOutcome.ERROR,
-        AgentStatus.NEEDS_CONFIRMATION: CallOutcome.PENDING,
-    }[status]
 
 
 __all__ = [

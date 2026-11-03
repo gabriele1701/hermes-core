@@ -524,14 +524,15 @@ def test_dati_personali_sospendono_anche_su_verde(repo: Path):
 def test_integrita_fallita_nega(repo: Path):
     srv = crea_server(scrivi_config(repo, sha=SHA_FINTO))
     r = srv._invoke_tool("echo.ping")
-    assert r["result"]["status"] == "error"
+    # Denied e non error ai due livelli: il gate ha deciso, non è inciampato.
+    assert r["result"]["status"] == "denied"
     assert r["result"]["tool_calls"][0]["outcome"] == "denied"
 
 
 def test_container_assente_nega(repo: Path):
     srv = crea_server(scrivi_config(repo, requires_container=True))
     r = srv._invoke_tool("echo.ping")
-    assert r["result"]["status"] == "error"
+    assert r["result"]["status"] == "denied"
     assert r["result"]["tool_calls"][0]["outcome"] == "denied"
     assert "container" in r["result"]["summary"]
 
@@ -580,6 +581,13 @@ def test_output_non_utf8_attraverso_il_server(repo: Path):
 
 
 def test_tool_inesistente_errore_strutturato(server: HermesServer):
+    """Resta `error`, e non è una dimenticanza.
+
+    `denied` pretende una tool_call rifiutata che dica su cosa, e qui non c'è
+    niente da rifiutare: non esiste un tool. Un rifiuto che non nomina ciò che
+    ha rifiutato è indistinguibile da un guasto, quindi tanto vale chiamarlo
+    guasto.
+    """
     r = server._invoke_tool("mai.registrato")
     assert r["result"]["status"] == "error"
     assert r["result"]["tool_calls"] == []
@@ -598,6 +606,11 @@ def test_tool_di_altro_agente_non_invocabile(repo: Path):
         description = "Tool di un altro agente."
         """)
     srv = crea_server(scrivi_config(repo, extra_tool=altro))
+    # `error` di proposito, non `denied`: un tool di un altro agente è
+    # trattato come inesistente, e dire «rifiutato» rivelerebbe che esiste —
+    # cioè darebbe a questa istanza informazioni su un perimetro che non è il
+    # suo. Qui la distinzione fra negazione e guasto va sacrificata
+    # all'isolamento fra agenti, e vale la pena saperlo.
     assert srv._invoke_tool("kali.scan")["result"]["status"] == "error"
 
 

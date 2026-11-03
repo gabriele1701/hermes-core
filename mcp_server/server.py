@@ -55,7 +55,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from mcp_server.audit import AuditLog, LogAction
+from mcp_server.audit import AuditLog, LogAction, esito_da_status
 from mcp_server.config import ConfigError, ServerConfig, load_config
 from mcp_server.contracts import (
     AgentResult,
@@ -541,15 +541,10 @@ class HermesServer:
         duplicherebbe sotto lo stesso ``correlation_id``, rendendo il log
         ambiguo su quante volte una cosa è avvenuta davvero.
         """
-        esito = {
-            AgentStatus.OK: CallOutcome.OK,
-            AgentStatus.ERROR: CallOutcome.ERROR,
-            AgentStatus.NEEDS_CONFIRMATION: CallOutcome.PENDING,
-        }[risultato.status]
         self._audit.log(
             correlation_id=risultato.correlation_id,
             action=LogAction.AGENT_RESULT,
-            outcome=esito,
+            outcome=esito_da_status(risultato.status),
             agent=risultato.agent,
             detail=risultato.summary,
         )
@@ -596,7 +591,10 @@ class HermesServer:
         risultato = AgentResult(
             correlation_id=correlation_id,
             agent=self._config.agent,
-            status=AgentStatus.ERROR,
+            # Non ERROR: il gate ha deciso, non è inciampato. L'invariante di
+            # AgentResult pretende la tool_call 'denied' che segue, così un
+            # rifiuto non può dichiararsi senza dire su cosa.
+            status=AgentStatus.DENIED,
             summary=motivo,
             tool_calls=[
                 ToolCall(
