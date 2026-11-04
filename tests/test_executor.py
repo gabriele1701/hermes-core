@@ -1173,14 +1173,21 @@ def test_runner_inutilizzabile_nega_e_non_esegue(
 def test_wrapper_scrivibile_da_altri_rifiutato(tmp_path):
     """Se il servizio può riscrivere il wrapper, la riga di sudoers che lo
     autorizza diventa sudo pieno: la restrizione sarebbe custodita da chi la
-    subisce, per la quarta volta in questa patch."""
+    subisce, per la quarta volta in questa patch.
+
+    Il file appartiene a chi lancia la suite — root nel container,
+    l'amministratore sulla VM — quindi qui ci sono due problemi insieme e il
+    messaggio deve contenerli entrambi. La prima versione si fermava al primo
+    e questo test passava in un ambiente e falliva nell'altro.
+    """
     from mcp_server.executor import _wrapper_inutilizzabile
 
     w = tmp_path / "wrapper"
     w.write_text("#!/bin/sh\n", encoding="utf-8")
     w.chmod(0o777)
     guasto = _wrapper_inutilizzabile(w)
-    assert guasto is not None and "scrivibile da altri" in guasto
+    assert guasto is not None
+    assert "scrivibile da altri" in guasto
 
 
 def test_wrapper_non_eseguibile_rifiutato(tmp_path):
@@ -1191,6 +1198,24 @@ def test_wrapper_non_eseguibile_rifiutato(tmp_path):
     w.chmod(0o644)
     guasto = _wrapper_inutilizzabile(w)
     assert guasto is not None and "non è eseguibile" in guasto
+
+
+def test_il_wrapper_riporta_tutti_i_problemi_non_il_primo(tmp_path):
+    """Fermarsi al primo manda chi ripara a scoprirne un altro ogni volta.
+
+    Stessa lezione del controllo di perimetro nel preflight: un controllo che
+    smette di informare quando trova un problema informa meno proprio quando
+    serve.
+    """
+    from mcp_server.executor import _wrapper_inutilizzabile
+
+    w = tmp_path / "wrapper"
+    w.write_text("#!/bin/sh\n", encoding="utf-8")
+    w.chmod(0o666)  # né eseguibile né protetto dalla scrittura altrui
+    guasto = _wrapper_inutilizzabile(w)
+    assert guasto is not None
+    assert "non è eseguibile" in guasto
+    assert "scrivibile da altri" in guasto
 
 
 def test_wrapper_valido_accettato():

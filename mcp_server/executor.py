@@ -372,24 +372,36 @@ def _wrapper_inutilizzabile(percorso: Path) -> str | None:
 
     Non si verifica qui che ``sudo -n`` funzioni: richiederebbe di eseguire
     qualcosa a ogni invocazione. Quello lo fa il preflight, una volta.
+
+    Riporta **tutti** i problemi, non il primo. Fermarsi al primo manderebbe
+    chi ripara a scoprirne un altro dopo ogni correzione, e renderebbe il
+    messaggio dipendente dall'ordine dei controlli invece che dallo stato del
+    file — che è anche il modo in cui questa funzione ha prodotto un test che
+    passava nel container e falliva sulla VM.
     """
     try:
         st = percorso.stat()
     except OSError as err:
+        # Qui non c'è altro da guardare: senza stat ogni altro controllo
+        # risponderebbe su un file che non si è potuto leggere.
         return f"{percorso} non ispezionabile: {err}"
+
+    problemi = []
     if not stat.S_ISREG(st.st_mode):
-        return f"{percorso} non è un file regolare"
+        problemi.append("non è un file regolare")
     modo = stat.S_IMODE(st.st_mode)
     if not modo & 0o111:
-        return f"{percorso} non è eseguibile (permessi {modo:04o})"
+        problemi.append(f"non è eseguibile (permessi {modo:04o})")
     if st.st_uid != 0:
-        return f"{percorso} non è di root (uid {st.st_uid})"
+        problemi.append(f"non è di root (uid {st.st_uid})")
     if modo & 0o022:
-        return (
-            f"{percorso} è scrivibile da altri (permessi {modo:04o}): chi "
-            f"esegue i tool potrebbe riscrivere il proprio confine"
+        problemi.append(
+            f"è scrivibile da altri (permessi {modo:04o}): chi esegue i tool "
+            f"potrebbe riscrivere il proprio confine"
         )
-    return None
+    if not problemi:
+        return None
+    return f"{percorso} " + "; ".join(problemi)
 
 
 def ambiente_minimo() -> dict[str, str]:
