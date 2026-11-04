@@ -8,10 +8,15 @@
 # /etc/sudoers.d scrivibile da altri, e lo fa in silenzio dal punto di vista
 # di chi aspetta che la regola funzioni.
 #
-# Sostituire 'hermes' se l'utente di servizio ha un altro nome, e il percorso
-# se il repo non è in /opt/hermes-core. Il percorso deve essere ASSOLUTO: una
-# regola su un percorso relativo non vincola nulla.
-hermes ALL=(root) NOPASSWD: /opt/hermes-core/bin/hermes-tool-run
+# Sostituire 'hermes' se l'utente di servizio ha un altro nome. Il percorso
+# deve essere ASSOLUTO: una regola su un percorso relativo non vincola nulla.
+#
+# E deve stare FUORI dall'albero di git. Nel repo il wrapper è un artefatto
+# versionato; qui è codice privilegiato, e un `git checkout` di un altro branch
+# cambierebbe ciò che questa riga autorizza — senza che nessuno lo decida e
+# senza che niente lo dica. Si installa una copia, come si fa per il drop-in di
+# sshd e per il file di perimetro.
+hermes ALL=(root) NOPASSWD: /usr/local/sbin/hermes-tool-run
 
 # Perché questa riga non è un buco
 # --------------------------------

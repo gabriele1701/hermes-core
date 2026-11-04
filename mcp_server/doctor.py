@@ -1257,7 +1257,7 @@ def _isolamento_dei_tool(referto: Referto, cfg: ServerConfig) -> None:
             "del servizio, quindi possono leggere e scrivere tutto ciò che il "
             "server possiede — il log d'audit compreso",
             "sudo install -m 755 -o root -g root bin/hermes-tool-run "
-            "/opt/hermes-core/bin/hermes-tool-run\n"
+            "/usr/local/sbin/hermes-tool-run\n"
             "             poi in [server]: tool_runner = \"…/bin/hermes-tool-run\"\n"
             "             Procedura completa in docs/setup-vm-hermes.md.",
         )

@@ -582,7 +582,21 @@ Python.
 ### 6.2 Il wrapper, e cosa ci sta dentro
 
 ```sh
-sudo install -m 755 -o root -g root bin/hermes-tool-run /opt/hermes-core/bin/hermes-tool-run
+sudo install -m 755 -o root -g root bin/hermes-tool-run /usr/local/sbin/hermes-tool-run
+```
+
+**Fuori dall'albero di git, non dentro.** Nel repo il wrapper è un artefatto
+versionato; installato è codice privilegiato, e un `git checkout` di un altro
+branch cambierebbe ciò che la riga di `sudoers` autorizza — senza che nessuno
+lo decida e senza che niente lo dica. Stessa ragione per cui il drop-in di
+`sshd` e il file di perimetro si installano invece di essere letti dal repo.
+
+Ne segue anche una conseguenza operativa: **dopo un aggiornamento del repo il
+wrapper va reinstallato**, altrimenti la macchina gira con la versione
+precedente. `diff` risponde alla domanda:
+
+```sh
+diff /usr/local/sbin/hermes-tool-run /opt/hermes-core/bin/hermes-tool-run
 ```
 
 Di **root**, e il gate rifiuta di eseguire se non lo è. Dentro ci stanno le
@@ -649,7 +663,7 @@ macchina.
 Poi la configurazione, in `[server]`:
 
 ```toml
-tool_runner = "/opt/hermes-core/bin/hermes-tool-run"
+tool_runner = "/usr/local/sbin/hermes-tool-run"
 ```
 
 ### 6.4 Il tempo limite, su due livelli
@@ -703,9 +717,9 @@ invocazione.
 Un controllo visto solo verde non dice molto. Vale la pena vederlo dire no:
 
 ```sh
-sudo chmod 644 /opt/hermes-core/bin/hermes-tool-run   # non più eseguibile
+sudo chmod 644 /usr/local/sbin/hermes-tool-run   # non più eseguibile
 sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml | grep -i wrapper
-sudo chmod 755 /opt/hermes-core/bin/hermes-tool-run   # ripristino
+sudo chmod 755 /usr/local/sbin/hermes-tool-run   # ripristino
 ```
 
 Deve dare `[ERRORE] wrapper di isolamento`, e in quello stato il gate rifiuta

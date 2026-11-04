@@ -99,7 +99,7 @@ log_path = "../logs/hermes-audit.jsonl"
 # Richiede l'utente dei tool e la riga di sudoers (config/sudoers.example):
 #   sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-tool
 #
-# tool_runner = "/opt/hermes-core/bin/hermes-tool-run"
+# tool_runner = "/usr/local/sbin/hermes-tool-run"
 
 # Disponibilità del runtime isolato. A false, i tool che dichiarano
 # requires_container vengono NEGATI, non eseguiti sull'host.
