@@ -555,7 +555,192 @@ Quando arriva un tool con un bersaglio vero, va tolto.
 
 ---
 
-## 6. Verificare dalla VM
+## 6. L'identità separata dei tool
+
+Fino a qui i tool giravano con l'identità del **servizio**. Un tool compromesso
+— o semplicemente un tool che fa più del previsto — poteva quindi leggere e
+scrivere tutto ciò che il server possiede: lo store degli innalzamenti di tier,
+i posti di esecuzione, e soprattutto **il log d'audit**, cioè la traccia che
+dovrebbe registrarlo. Un presidio la cui prova è alterabile da chi dovrebbe
+subirlo non è un presidio.
+
+A1 sposta i tool su un uid dedicato e senza shell, e li racchiude in limiti di
+risorsa che il gate da solo non può imporre.
+
+### 6.1 L'utente dei tool
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-tool
+```
+
+Nessuna home e nessuna shell: se un giorno quelle credenziali finissero
+altrove, non darebbero un accesso. Il nome `hermes-tool` è una convenzione del
+progetto — compare nel wrapper e nel preflight, e un test verifica che le due
+copie coincidano, perché uno script di shell non può importare una costante
+Python.
+
+### 6.2 Il wrapper, e cosa ci sta dentro
+
+```sh
+sudo install -m 755 -o root -g root bin/hermes-tool-run /usr/local/sbin/hermes-tool-run
+```
+
+**Fuori dall'albero di git, non dentro.** Nel repo il wrapper è un artefatto
+versionato; installato è codice privilegiato, e un `git checkout` di un altro
+branch cambierebbe ciò che la riga di `sudoers` autorizza — senza che nessuno
+lo decida e senza che niente lo dica. Stessa ragione per cui il drop-in di
+`sshd` e il file di perimetro si installano invece di essere letti dal repo.
+
+Ne segue anche una conseguenza operativa: **dopo un aggiornamento del repo il
+wrapper va reinstallato**, altrimenti la macchina gira con la versione
+precedente. `diff` risponde alla domanda:
+
+```sh
+diff /usr/local/sbin/hermes-tool-run /opt/hermes-core/bin/hermes-tool-run
+```
+
+Di **root**, e il gate rifiuta di eseguire se non lo è. Dentro ci stanno le
+cose che il chiamante non deve poter scegliere: l'uid, il gid, i tetti di
+memoria e di processi, e il tetto massimo sul tempo. Dal chiamante arrivano
+solo il nome dell'unità e il comando.
+
+È la stessa forma del canale SSH (§4) e del perimetro dei bersagli (§5): *una
+restrizione custodita da chi la subisce non è una restrizione.*
+
+Il meccanismo è un'unità transiente di **tipo servizio**, non uno scope:
+
+```
+systemd-run --pipe --wait --quiet --unit=hermes-tool-<correlation_id> \
+    --uid=hermes-tool --gid=hermes-tool \
+    -p MemoryMax=1G -p MemorySwapMax=0 -p TasksMax=128 -p RuntimeMaxSec=<n> \
+    -- <comando>
+```
+
+Con `--scope` il processo sarebbe lanciato da chi chiama, e il cambio di uid lo
+dovrebbe fare `systemd-run` stesso — che gira non privilegiato e fallisce con
+`Failed to change GID`. Con un'unità di tipo servizio il processo lo lancia
+PID 1, che può cambiare identità. `--pipe` ricollega stdin, stdout e stderr al
+chiamante; `--wait` attende la fine.
+
+`--quiet` non è pulizia: senza, le righe di stato di systemd («Running as
+unit…», «Finished with result…») finiscono sullo **stderr del chiamante**, e il
+gate le catturerebbe mescolate all'errore vero del tool.
+
+**`MemorySwapMax=0` è necessario, non ridondante.** `MemoryMax` da solo limita
+la memoria *residente*: misurato, un processo che chiede 500 MB con
+`MemoryMax=64M` arriva in fondo con esito 0, spingendo 444 MB nello swap. La
+macchina non va in OOM ma può essere portata a nuotare nello swap — una
+negazione di servizio con un altro nome, mentre il log dice che è andato tutto
+bene.
+
+**I tetti sono generosi e non calibrati, di proposito.** Senza un tool reale non
+si sa quanto consumi un `nmap -A` su una /24. Un tetto largo e dichiarato è una
+misura onesta; un tetto stretto indovinato è il primo scan ucciso a metà, con
+un sintomo — un figlio morto con un codice strano — che non punta alla causa.
+Si stringono quando c'è qualcosa da misurare: è una voce aperta in
+`docs/debito-sicurezza.md`.
+
+### 6.3 Il privilegio concesso
+
+```sh
+sudo install -m 440 -o root -g root config/sudoers.example /etc/sudoers.d/hermes-core
+sudo visudo -c
+```
+
+Una riga sola, sul solo wrapper. I permessi `0440` servono: `sudo` rifiuta di
+leggere un file di `/etc/sudoers.d` scrivibile da altri.
+
+La regola permette qualunque argomento, e **va bene**: il wrapper fissa l'uid
+al suo interno, quindi `hermes` può far eseguire comandi solo come
+`hermes-tool`, che ha *meno* privilegi di `hermes`. Non è un'escalation — il
+modello di minaccia di A1 è il tool, non il server.
+
+Cosa invece **non** va fatto: allargare la regola a `systemd-run` o a
+`systemctl`. Con `systemd-run` libero si potrebbe avviare un'unità
+`--uid=root`; con `systemctl` libero, fermare qualunque servizio della
+macchina.
+
+Poi la configurazione, in `[server]`:
+
+```toml
+tool_runner = "/usr/local/sbin/hermes-tool-run"
+```
+
+### 6.4 Il tempo limite, su due livelli
+
+`RuntimeMaxSec` sta deliberatamente **sotto** il timeout del gate, così systemd
+vince sempre per primo. È l'unico che può terminare l'albero dei processi
+dentro il cgroup: da quando c'è un'unità in mezzo, uccidere il gruppo di
+processi raggiunge `sudo` e `systemd-run`, non il tool.
+
+Il timeout del gate resta la rete di riserva, e scatta solo se systemd ha
+fallito: in quel caso il gate chiama `hermes-tool-run --stop <unità>`. Se anche
+quello non riesce, la cosa finisce nel log — un residuo invisibile è peggio di
+un residuo noto.
+
+### 6.5 La causa nel log, non un «1» generico
+
+`systemd-run --wait` torna 1 sia per un tool che fallisce da sé, sia per uno
+ucciso dal tetto di memoria, sia per uno fermato dal tempo limite: tre cause
+con rimedi diversi dietro lo stesso numero. Il wrapper legge `ExecMainCode` e
+`ExecMainStatus` dall'unità **prima** di rimuoverla, e propaga l'esito con la
+convenzione della shell — ucciso da segnale → `128+segnale`. Quindi OOM
+diventa `137` e il tempo limite `143`.
+
+Per la causa esatta c'è il **journal**, e il nome dell'unità contiene il
+`correlation_id` che si legge nel log d'audit:
+
+```sh
+journalctl -u hermes-tool-<correlation_id> --no-pager
+```
+
+Deve comparire una riga come `Failed with result 'oom-kill'`, insieme al
+consumo di picco.
+
+> **Non usare `systemctl show` o `systemctl status` dopo il fatto.** Il wrapper
+> rimuove l'unità con `reset-failed` appena ne ha letto l'esito, e `systemctl
+> show` su un'unità **inesistente** non dà errore: restituisce i valori di
+> default, cioè `Result=success` e `ExecMainStatus=0`. Su un'esecuzione uccisa
+> dal tetto di memoria risponderebbe «successo».
+>
+> Misurato durante il collaudo del passo 9: `systemctl show` diceva `success`
+> mentre il journal, per la stessa unità e lo stesso istante, diceva
+> `oom-kill`. Il journal è l'autorità; il wrapper legge l'esito **prima** di
+> ripulire, ed è per questo che il `137` arriva corretto al chiamante.
+
+Guadagno collaterale: un processo rimasto in giro si ricollega all'invocazione
+che l'ha generato. Prima un orfano era anonimo.
+
+### 6.6 Verificare
+
+```sh
+sudo -u hermes /opt/hermes-core/.venv/bin/python \
+     -m mcp_server.doctor /opt/hermes-core/config/hermes.toml
+```
+
+Quattro controlli distinti, e sono distinti di proposito: il wrapper esiste ed
+è di root; l'utente dei tool esiste e non ha shell; `sudo -n` sul wrapper
+riesce **senza password**; log e stato restano fuori dalla portata dei tool.
+
+La terza è una sonda vera: il preflight esegue `hermes-tool-run --stop` su
+un'unità riservata e inesistente, che non fa nulla ma esercita esattamente il
+privilegio. Se `sudo` non è autorizzato si scopre lì, invece che alla prima
+invocazione.
+
+Un controllo visto solo verde non dice molto. Vale la pena vederlo dire no:
+
+```sh
+sudo chmod 644 /usr/local/sbin/hermes-tool-run   # non più eseguibile
+sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml | grep -i wrapper
+sudo chmod 755 /usr/local/sbin/hermes-tool-run   # ripristino
+```
+
+Deve dare `[ERRORE] wrapper di isolamento`, e in quello stato il gate rifiuta
+ogni invocazione invece di ricadere sull'identità del servizio.
+
+---
+
+## 7. Verificare dalla VM
 
 Il preflight va eseguito **come l'utente di servizio**, sempre:
 
@@ -657,7 +842,7 @@ dalla configurazione versionata, che è il posto in cui è stato messo.
 
 ---
 
-## 7. Verificare da Windows
+## 8. Verificare da Windows
 
 Prima di configurare Hermes, la prova che conta — da PowerShell:
 
@@ -674,7 +859,7 @@ stampa testo misto o righe spezzate, è il canale.
 
 ---
 
-## 8. Registrare in Hermes
+## 9. Registrare in Hermes
 
 Sull'Hermes di Windows:
 
@@ -704,7 +889,7 @@ devono comparire le righe della catena sotto un unico `correlation_id`.
 
 ---
 
-## 9. Cosa resta per le milestone successive
+## 10. Cosa resta per le milestone successive
 
 **Container runtime** (Docker o Podman) sulla VM, per l'agente di pentest: è
 la ragione per cui il disco è stato dimensionato con margine. Finché

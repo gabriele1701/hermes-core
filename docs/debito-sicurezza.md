@@ -30,6 +30,9 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | A2 — il bersaglio di un'invocazione non era validato | passo 8 | Perimetro di reti e alias in un file di root (`server.scope_file`), `target_kind` nel contratto e un validatore per ciascun kind. Controllo **prima** dell'integrità e del container: un bersaglio fuori perimetro va rifiutato e registrato allo stesso modo sia che il container ci sia sia che non ci sia. Nessuna risoluzione DNS — gli alias sono dichiarati dall'operatore, quindi non c'è finestra di rebinding. Perimetro assente non vale come «tutto ammesso»: i tool con bersaglio non sono invocabili, e il catalogo lo dichiara in `scope_configured`. |
 | ALTA — l'aliasing di un tool non era rifiutabile (`exec_args`) | passo 8 | `exec_args` nel contratto: l'identità di ciò che viene eseguito diventa `(exec_path, exec_sha256, exec_args)`. A identità **identica** e tier inferiore la registrazione è rifiutata, non più solo segnalata. A identità diversa — due sottocomandi dello stesso script a rischio diverso — resta la segnalazione `tool_alias_detected`, perché lì l'ambiguità c'è davvero. Chiusa al passo 8 e non in M1 perché la condizione era «quando i tool avranno bisogno di argomenti», e passare il bersaglio allo script è quel momento. |
 | Un rifiuto del gate si presentava come un guasto | passo 8b | `AgentStatus.DENIED` accanto a `OK`, `ERROR` e `NEEDS_CONFIRMATION`. Prima un rifiuto — container assente, integrità fallita, posti esauriti, bersaglio fuori perimetro — finiva in `ERROR`: la riga sotto diceva `denied` e lo status in cima lo contraddiceva. È il difetto del `pending` formulato male un livello più su, perché un modello che legge `error` può concludere che qualcosa si è rotto e riprovare. L'invariante di `AgentResult` pretende una `tool_call` rifiutata: un rifiuto che non dice cosa ha rifiutato resta `ERROR`, ed è il caso del tool inesistente e di quello di un altro agente — dove dire «rifiutato» rivelerebbe che il tool esiste. Unificate le tre copie della mappa status → esito. |
+| A1 — i tool giravano con l'identità del servizio | passo 9 | Uid dedicato `hermes-tool` senza shell, via un wrapper di root (`bin/hermes-tool-run`) autorizzato da una sola riga di sudoers. Unità transiente di tipo servizio e non scope, perché con `--scope` il processo lo lancia il chiamante e il cambio di uid fallisce. Il tool non può più aprire il log d'audit, cioè la traccia che dovrebbe registrarlo. Wrapper configurato e non utilizzabile → il gate rifiuta, non ricade sull'identità del servizio. |
+| Il tetto di concorrenza era per agente, non per macchina | passo 9 | `MemoryMax` + `MemorySwapMax=0` + `TasksMax` nel cgroup dell'unità: il tetto ora misura risorse reali e non esecuzioni, che era la condizione di chiusura registrata. Valori provvisori, vedere la voce aperta qui sotto. |
+| I figli di un'uscita pulita non venivano ripuliti | passo 9 | Il cgroup dell'unità muore con l'unità qualunque cosa contenga, quindi non serve che il gate distingua un figlio legittimo da un residuo — che era il motivo per cui non si poteva chiudere con un `killpg`. |
 | HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che e' la protezione vera, e' documentato in `docs/dipendenze.md` e resta da generare. |
 
 ---
@@ -189,79 +192,65 @@ esterna, che non tocca il percorso di scrittura.
 
 ---
 
-## ACCETTATA — il tetto di concorrenza è per agente, non per macchina
+## MEDIA — i tetti di risorsa dei tool non sono calibrati
 
-**Dove:** `mcp_server/slots.py`.
+**Dove:** `bin/hermes-tool-run` (`MEMORY_MAX`, `TASKS_MAX`, `RUNTIME_MAX_CEILING`).
 
-I posti di esecuzione sono partizionati per agente
-(`state_dir/slots/<agente>/`), quindi il tetto complessivo della macchina è
-`max_concurrent_tools × agenti attivi`, non `max_concurrent_tools`.
+I limiti del cgroup sono in vigore e **mordono** — verificato: un processo che
+sfonda `MemoryMax` con `MemorySwapMax=0` viene ucciso, e `TasksMax` ferma le
+fork oltre il tetto. Quello che non è verificato è che i **valori** siano
+quelli giusti: 1 GB di memoria e 128 processi sono stati scelti senza nulla da
+misurare.
 
-**Perché così.** Un pool unico darebbe un tetto di macchina migliore, ma
-sarebbe il primo punto dell'architettura in cui **un agente può degradarne un
-altro**: l'agente di pentest in ciclo affamerebbe quello di vulnerability
-assessment, e lo farebbe senza violare alcuna regola. Tutto il resto del
-progetto tiene gli agenti separati per costruzione — un processo ciascuno, i
-tool di proprietà, i tool altrui invisibili — e aprire proprio qui un canale
-di denial-of-service fra agenti è il male peggiore fra i due.
+**Perché non si calibra adesso.** Non si sa quanto consumi un `nmap -A` su una
+/24, né quanti processi lanci `trivy` su un'immagine grande. Misurarlo richiede
+quei tool.
 
-**Perché non è un rinvio mascherato.** Un tetto di macchina vero non è lavoro
-di questo processo: conta esecuzioni, non risorse. Due `nmap` pesanti saturano
-una VM molto prima di dieci script che dormono. Lo strumento giusto è una
-slice `systemd` o un cgroup con limiti di CPU e memoria, che vale per
-qualunque cosa giri sulla macchina e non solo per i tool lanciati da qui.
+**Perché larghi e non stretti.** Sono i due errori possibili, e il secondo è
+peggiore: un tetto troppo largo non limita molto, ma lo si sa e lo si è
+scritto; un tetto troppo stretto uccide il primo scan vero a metà, e il sintomo
+— un figlio morto con un codice d'uscita strano — non punta alla causa. Si
+perderebbe un pomeriggio a cercare un bug nel tool o nel gate.
 
-**Condizione di chiusura:** la slice `systemd` o il cgroup che arrivano con
-A1 (uid separato per i tool). Non è una coincidenza di calendario: A1 deve
-comunque lanciare i tool sotto un'altra identità, e `systemd-run --uid` con
-`MemoryMax`/`TasksMax` dà nello stesso passaggio l'uid e il tetto di risorse.
-Questa voce si chiude lì, o non si chiude — un pool condiviso non la chiude,
-la sposta su un altro guasto.
+**Mitigazione in essere:** la causa di un'uccisione è leggibile. Il wrapper
+propaga `128+segnale`, quindi OOM è `137` e il tempo limite `143`, e il nome
+dell'unità contiene il `correlation_id`: `journalctl -u hermes-tool-<cid>` dà
+`Result=oom-kill` e il consumo di picco.
 
-**Da rivalutare prima se:** gli agenti attivi diventeranno molti, o se un
-agente arriverà a poter saturare la VM da solo.
+**Condizione di chiusura:** l'ingresso del primo tool reale in M1. Allora i
+valori si misurano, e probabilmente diventano per-tool invece di uno solo per
+tutti — `nmap` e un controllo passivo non hanno bisogno dello stesso spazio.
 
 ---
 
-## ACCETTATA — i figli di un'uscita pulita non vengono ripuliti da nessuno
+## MEDIA — il traffico dei tool non è confinato a livello di rete
 
-**Dove:** `mcp_server/executor.py` (terminazione della discendenza).
+**Dove:** nessun punto del codice. È ciò che il perimetro dei bersagli non può
+fare.
 
-HC-06 è chiuso per il caso che descriveva: al timeout il gate termina il
-gruppo di processi, SIGTERM e poi SIGKILL. Ma la terminazione scatta **solo**
-al timeout. Un tool che esce con codice 0 dopo aver lasciato un figlio vivo
-non fa scattare nulla, e quel figlio resta a girare a tempo indeterminato.
+Il passo 8 valida **l'argomento con cui un tool parte**: un bersaglio fuori
+dalle reti ammesse viene rifiutato prima dell'esecuzione. Non controlla dove va
+il traffico del processo *dopo* l'avvio. Un tool che ignorasse il proprio
+argomento, o che aprisse una connessione per conto suo, non incontrerebbe
+alcun confine.
 
-**Verificato nel 6b.** Uno script di prova che lancia `sleep 300` e termina
-subito ha prodotto due orfani sopravvissuti a due invocazioni concluse con
-`exit=0`. Nessun timeout, nessuna terminazione, nessuna traccia nel log oltre
-alle due righe `ok`.
+**Perché diventa chiudibile solo ora.** Un confine di rete ha bisogno di un
+soggetto a cui applicarsi, e fino al passo 9 i tool condividevano l'identità
+del server: una regola sull'uid avrebbe colpito anche il canale MCP. Con
+`hermes-tool` il soggetto esiste.
 
-**Cosa non è.** Non è un consumo di posti: il figlio **non** eredita il file
-descriptor del lock — `O_CLOEXEC` su `os.open` e `close_fds=True` su
-`subprocess` — e questo è stato verificato con `lsof` sui file dei posti
-mentre gli orfani erano vivi. Il contatore dei posti resta quindi corretto.
+**Il disegno, già deciso:** `nftables` con `meta skuid hermes-tool`, catena di
+output, politica di rifiuto con le reti del perimetro in eccezione. La regola
+va tenuta coerente con il file di scope — due fonti per lo stesso confine sono
+due fonti che divergono, quindi conviene generarla da quel file invece di
+scriverla a mano.
 
-**Cosa è.** Un consumo di macchina che il gate non vede. Il tetto sui posti
-misura le esecuzioni che il gate controlla, non i processi che girano davvero:
-dopo dieci invocazioni di questo tipo il gate conta zero esecuzioni in corso e
-la VM ne ha dieci. Con `nmap` e `trivy`, che lanciano helper, è la forma
-realistica del problema — non quella del timeout.
+**Perché non nel passo 9:** avrebbe raddoppiato la superficie di un passo che
+già cambia il modo in cui i tool vengono eseguiti, e un errore in una regola di
+output si manifesta come «il tool non raggiunge niente» senza dire perché.
 
-**Perché non si chiude qui.** Terminare il gruppo anche in uscita pulita
-sembra ovvio e non lo è: un tool legittimo potrebbe lasciare un figlio di
-proposito, e il gate non ha modo di distinguerlo da un residuo. Il confine
-giusto non è il gruppo di processi ma il cgroup, che muore con lo scope
-qualunque cosa contenga.
-
-**Condizione di chiusura:** la stessa della voce qui sopra — la slice
-`systemd` di A1. `systemd-run --scope` uccide l'albero del cgroup alla fine
-dello scope, senza che il gate debba decidere quali figli siano legittimi.
-
-**Da rivalutare prima se:** un tool reale entrerà in M1 prima di A1. In quel
-caso serve almeno un controllo manuale (`pgrep` dopo le sessioni di lavoro),
-perché il sintomo — VM lenta, nessuna esecuzione in corso secondo il log — non
-punta alla causa.
+**Condizione di chiusura:** da fare insieme al primo tool che esce davvero in
+rete, così la regola si verifica su traffico reale invece che su un dummy.
 
 ---
 

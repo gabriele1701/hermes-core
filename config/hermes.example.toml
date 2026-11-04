@@ -83,6 +83,24 @@ log_path = "../logs/hermes-audit.jsonl"
 #
 # scope_file = "/etc/hermes/scope.toml"
 
+# Wrapper di root che esegue i tool sotto un uid dedicato e dentro limiti di
+# risorsa. Lo script è versionato in bin/hermes-tool-run.
+#
+# Senza questa chiave i tool girano con l'identità del SERVIZIO: possono
+# leggere e scrivere tutto ciò che il server possiede, il log d'audit
+# compreso — cioè la traccia che dovrebbe registrarli. Il preflight lo
+# segnala e il catalogo lo dichiara in tool_uid_separato.
+#
+# Configurato e non utilizzabile (assente, non di root, scrivibile da altri)
+# → il gate RIFIUTA ogni invocazione invece di ricadere sull'identità del
+# servizio: sarebbe l'isolamento promesso e non applicato, e nessuno saprebbe
+# di averlo perso.
+#
+# Richiede l'utente dei tool e la riga di sudoers (config/sudoers.example):
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-tool
+#
+# tool_runner = "/usr/local/sbin/hermes-tool-run"
+
 # Disponibilità del runtime isolato. A false, i tool che dichiarano
 # requires_container vengono NEGATI, non eseguiti sull'host.
 container_available = false

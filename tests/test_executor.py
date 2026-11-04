@@ -26,6 +26,7 @@ from mcp_server.contracts import (
 )
 from mcp_server.config import TOOL_PYTHON_DEFAULT
 from mcp_server.executor import (
+    MARGINE_TEMPO_LIMITE,
     ConcurrencyLimitReached,
     ConfirmationRequired,
     ContainerUnavailable,
@@ -34,6 +35,7 @@ from mcp_server.executor import (
     SharedSlotsUnusable,
     SubprocessRunner,
     ToolExecutor,
+    ToolRunnerUnusable,
     ambiente_minimo,
     risolvi_script,
     sha256_file,
@@ -1055,3 +1057,227 @@ def test_guasto_imprevisto_nel_pool_non_perde_il_posto_in_memoria(
         "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4()
     )
     assert call.outcome is CallOutcome.OK
+
+
+# --------------------------------------------------------------------------- #
+# Isolamento sotto un'altra identità (A1)
+# --------------------------------------------------------------------------- #
+
+#: Wrapper "valido" per i test: root-owned, 0755, su qualunque Linux. Usarlo
+#: invece di un file creato nella tmp evita che l'esito dipenda da chi lancia
+#: la suite — nel container è root, sulla VM è l'amministratore.
+WRAPPER_FINTO = Path("/bin/true")
+
+
+def test_senza_runner_i_tool_girano_come_prima(repo, registry, audit):
+    registry.register(_spec(repo))
+    ex = _executor(registry, audit, repo)
+    assert ex.uid_separato is False
+    runner = ex._runner
+    ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+    argv = runner.chiamate[0]["argv"]
+    assert "sudo" not in argv[0]
+    assert argv[0] == str(TOOL_PYTHON_DEFAULT)
+
+
+def test_con_runner_il_comando_passa_dal_wrapper(repo, registry, audit):
+    """Il wrapper davanti, il comando del tool dopo il separatore."""
+    registry.register(_spec(repo))
+    runner = RunnerFinto()
+    cid = uuid.uuid4()
+    ex = _executor(
+        registry, audit, repo, runner=runner, tool_runner=WRAPPER_FINTO
+    )
+    assert ex.uid_separato is True
+    ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=cid, timeout=60)
+
+    argv = runner.chiamate[0]["argv"]
+    assert argv[0] == "/usr/bin/sudo"
+    # -n: senza autorizzazione fallisce invece di chiedere una password a un
+    # canale non interattivo e restare appeso.
+    assert argv[1] == "-n"
+    assert argv[2] == str(WRAPPER_FINTO)
+    # Il nome dell'unità porta il correlation_id: un processo rimasto in giro
+    # si ricollega all'invocazione che l'ha generato.
+    assert argv[3] == f"hermes-tool-{cid}"
+    assert argv[5] == "--"
+    assert argv[6] == str(TOOL_PYTHON_DEFAULT)
+
+
+def test_il_tempo_limite_di_systemd_sta_sotto_quello_del_gate(
+    repo, registry, audit
+):
+    """L'ordine conta: systemd deve vincere per primo.
+
+    È l'unico che può terminare l'albero dentro il cgroup; il timeout del gate
+    resta la rete di riserva che scatta solo se systemd ha fallito.
+    """
+    registry.register(_spec(repo))
+    runner = RunnerFinto()
+    ex = _executor(
+        registry, audit, repo, runner=runner, tool_runner=WRAPPER_FINTO
+    )
+    ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4(), timeout=60
+    )
+    argv = runner.chiamate[0]["argv"]
+    assert int(argv[4]) == 60 - MARGINE_TEMPO_LIMITE
+    assert int(argv[4]) < runner.chiamate[0]["timeout"]
+
+
+def test_timeout_minuscolo_non_produce_un_limite_nullo(repo, registry, audit):
+    """Con un timeout sotto il margine il limite resterebbe <= 0."""
+    registry.register(_spec(repo))
+    runner = RunnerFinto()
+    _executor(
+        registry, audit, repo, runner=runner, tool_runner=WRAPPER_FINTO
+    ).execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4(), timeout=2
+    )
+    assert int(runner.chiamate[0]["argv"][4]) >= 1
+
+
+@pytest.mark.parametrize(
+    "prepara, atteso",
+    [
+        (lambda d: d / "mai-esistito", "non ispezionabile"),
+        (lambda d: d, "non è un file regolare"),
+    ],
+)
+def test_runner_inutilizzabile_nega_e_non_esegue(
+    repo, registry, audit, tmp_path, prepara, atteso
+):
+    """Promesso e non applicabile: si rifiuta, non si ricade sul servizio.
+
+    Ricadere significherebbe eseguire senza il confine che la configurazione
+    dichiara, e nessuno saprebbe di averlo perso.
+    """
+    registry.register(_spec(repo))
+    runner = RunnerFinto()
+    cid = uuid.uuid4()
+    ex = _executor(
+        registry, audit, repo, runner=runner, tool_runner=prepara(tmp_path)
+    )
+    with pytest.raises(ToolRunnerUnusable) as sollevata:
+        ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=cid)
+
+    assert atteso in str(sollevata.value)
+    assert "non eseguita" in str(sollevata.value)
+    assert runner.chiamate == []
+    righe = _negati(audit)
+    assert len(righe) == 1
+    assert righe[0].correlation_id == cid
+    assert righe[0].tool_id == "echo.ping"
+
+
+def test_wrapper_scrivibile_da_altri_rifiutato(tmp_path):
+    """Se il servizio può riscrivere il wrapper, la riga di sudoers che lo
+    autorizza diventa sudo pieno: la restrizione sarebbe custodita da chi la
+    subisce, per la quarta volta in questa patch.
+
+    Il file appartiene a chi lancia la suite — root nel container,
+    l'amministratore sulla VM — quindi qui ci sono due problemi insieme e il
+    messaggio deve contenerli entrambi. La prima versione si fermava al primo
+    e questo test passava in un ambiente e falliva nell'altro.
+    """
+    from mcp_server.executor import _wrapper_inutilizzabile
+
+    w = tmp_path / "wrapper"
+    w.write_text("#!/bin/sh\n", encoding="utf-8")
+    w.chmod(0o777)
+    guasto = _wrapper_inutilizzabile(w)
+    assert guasto is not None
+    assert "scrivibile da altri" in guasto
+
+
+def test_wrapper_non_eseguibile_rifiutato(tmp_path):
+    from mcp_server.executor import _wrapper_inutilizzabile
+
+    w = tmp_path / "wrapper"
+    w.write_text("#!/bin/sh\n", encoding="utf-8")
+    w.chmod(0o644)
+    guasto = _wrapper_inutilizzabile(w)
+    assert guasto is not None and "non è eseguibile" in guasto
+
+
+def test_il_wrapper_riporta_tutti_i_problemi_non_il_primo(tmp_path):
+    """Fermarsi al primo manda chi ripara a scoprirne un altro ogni volta.
+
+    Stessa lezione del controllo di perimetro nel preflight: un controllo che
+    smette di informare quando trova un problema informa meno proprio quando
+    serve.
+    """
+    from mcp_server.executor import _wrapper_inutilizzabile
+
+    w = tmp_path / "wrapper"
+    w.write_text("#!/bin/sh\n", encoding="utf-8")
+    w.chmod(0o666)  # né eseguibile né protetto dalla scrittura altrui
+    guasto = _wrapper_inutilizzabile(w)
+    assert guasto is not None
+    assert "non è eseguibile" in guasto
+    assert "scrivibile da altri" in guasto
+
+
+def test_wrapper_valido_accettato():
+    from mcp_server.executor import _wrapper_inutilizzabile
+
+    assert _wrapper_inutilizzabile(WRAPPER_FINTO) is None
+
+
+def test_al_timeout_di_riserva_si_ferma_l_unita(
+    repo, registry, audit, monkeypatch
+):
+    """Uccidere il gruppo di processi non raggiunge il tool.
+
+    Con un'unità transiente in mezzo il tool vive in un cgroup che il gate non
+    può toccare: al timeout di riserva va fermata l'unità, altrimenti resta un
+    orfano che consuma la macchina senza che niente lo dica.
+    """
+    from mcp_server import executor as mod
+
+    class RunnerLento:
+        def run(self, argv, *, cwd, env, timeout):
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    chiamate = []
+
+    def finto_run(argv, **kw):
+        chiamate.append(argv)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(mod.subprocess, "run", finto_run)
+    registry.register(_spec(repo))
+    cid = uuid.uuid4()
+    ex = _executor(
+        registry, audit, repo, runner=RunnerLento(), tool_runner=WRAPPER_FINTO
+    )
+    call, _ = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=cid, timeout=10
+    )
+
+    assert call.outcome is CallOutcome.ERROR
+    assert chiamate, "l'unità non è stata fermata"
+    assert chiamate[0][-2:] == ["--stop", f"hermes-tool-{cid}"]
+
+
+def test_unita_non_fermata_finisce_nel_log(repo, registry, audit, monkeypatch):
+    """Un residuo invisibile è peggio di un residuo noto."""
+    from mcp_server import executor as mod
+
+    class RunnerLento:
+        def run(self, argv, *, cwd, env, timeout):
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    def finto_run(argv, **kw):
+        return subprocess.CompletedProcess(argv, 1, b"", b"boom")
+
+    monkeypatch.setattr(mod.subprocess, "run", finto_run)
+    registry.register(_spec(repo))
+    ex = _executor(
+        registry, audit, repo, runner=RunnerLento(), tool_runner=WRAPPER_FINTO
+    )
+    ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+
+    righe = [r for r in audit.read_all() if "non fermata" in r.detail]
+    assert len(righe) == 1
+    assert "discendenza ancora attiva" in righe[0].detail

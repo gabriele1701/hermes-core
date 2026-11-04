@@ -36,6 +36,7 @@ _CHIAVI_SERVER = frozenset(
         "log_path",
         "state_dir",
         "scope_file",
+        "tool_runner",
         "tool_python",
         "tool_python_flags",
         "max_output_bytes",
@@ -113,6 +114,13 @@ class ServerConfig:
     #: proposito: lo stato è scrivibile dal servizio, e un tool compromesso
     #: che potesse riscrivere la propria allowlist non avrebbe un'allowlist.
     scope_file: Path | None = None
+    #: Wrapper di root che esegue i tool sotto un uid dedicato e dentro
+    #: limiti di risorsa (`bin/hermes-tool-run`). ``None`` significa **non
+    #: configurato**: i tool girano con l'identità del servizio, come prima,
+    #: e il preflight e il catalogo lo dichiarano. Configurato e non
+    #: utilizzabile → il gate rifiuta, perché sarebbe l'isolamento promesso e
+    #: non applicato.
+    tool_runner: Path | None = None
     #: Interprete dei tool: percorso assoluto, verificato all'avvio.
     tool_python: Path = TOOL_PYTHON_DEFAULT
     tool_python_flags: tuple[str, ...] = TOOL_PYTHON_FLAGS_DEFAULT
@@ -174,6 +182,7 @@ def load_config(path: str | Path) -> ServerConfig:
         container_available=container,
         state_dir=_percorso(server.get("state_dir"), percorso),
         scope_file=_percorso(server.get("scope_file"), percorso),
+        tool_runner=_percorso(server.get("tool_runner"), percorso),
         tool_python=_interprete(server.get("tool_python")),
         tool_python_flags=_flag_interprete(server.get("tool_python_flags")),
         max_output_bytes=_intero_positivo(

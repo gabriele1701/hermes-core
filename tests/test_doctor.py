@@ -46,10 +46,13 @@ def scrivi_config(
     state_dir: Path | str | None = None,
     scope_file: Path | str | None = None,
     target_kind: str | None = None,
+    tool_runner: Path | str | None = None,
 ) -> Path:
     riga_stato = f'state_dir = "{state_dir}"\n' if state_dir is not None else ""
     if scope_file is not None:
         riga_stato += f'scope_file = "{scope_file}"\n'
+    if tool_runner is not None:
+        riga_stato += f'tool_runner = "{tool_runner}"\n'
     riga_bersaglio = (
         f'target_kind = "{target_kind}"\n            '
         if target_kind is not None
@@ -1146,3 +1149,118 @@ def test_perimetro_leggibile_da_altri_ma_non_scrivibile_e_ok(
     percorso.chmod(0o644)
     referto = esegui(scrivi_config(tmp_path, radice, scope_file=percorso))
     assert _controllo(referto, "perimetro dei bersagli").esito is Esito.OK
+
+
+# --------------------------------------------------------------------------- #
+# Isolamento dei tool sotto un'altra identità (A1)
+# --------------------------------------------------------------------------- #
+
+#: Wrapper "valido" per i test: root-owned, 0755 su qualunque Linux.
+WRAPPER_FINTO = "/bin/true"
+
+
+def _sonda_ok(monkeypatch, codice: int = 0, stderr: str = "") -> None:
+    """Sostituisce la sonda `sudo -n`, che non va eseguita nei test.
+
+    La sonda vera esercita un privilegio sulla macchina: in una suite deve
+    essere finta, altrimenti l'esito dipende da come è configurato `sudo` di
+    chi lancia i test.
+    """
+    import subprocess as sp
+
+    from mcp_server import doctor as mod
+
+    def finto(argv, **kw):
+        return sp.CompletedProcess(argv, codice, "", stderr)
+
+    monkeypatch.setattr(mod.subprocess, "run", finto)
+
+
+def test_senza_tool_runner_e_avviso(tmp_path: Path, radice: Path):
+    """I tool girano come il servizio: manca una proprietà, non un pezzo."""
+    referto = esegui(scrivi_config(tmp_path, radice))
+    controllo = _controllo(referto, "wrapper di isolamento")
+    assert controllo.esito is Esito.AVVISO
+    assert "log d'audit compreso" in controllo.messaggio
+    assert referto.pronto is True
+
+
+def test_tool_runner_inutilizzabile_e_errore(tmp_path: Path, radice: Path):
+    referto = esegui(
+        scrivi_config(tmp_path, radice, tool_runner=tmp_path / "mai-esistito")
+    )
+    controllo = _controllo(referto, "wrapper di isolamento")
+    assert controllo.esito is Esito.ERRORE
+    assert referto.pronto is False
+    # La sonda non va nemmeno provata: non c'è niente da autorizzare.
+    assert not [
+        c for c in referto.controlli if c.nome.startswith("autorizzazione sudo")
+    ]
+
+
+def test_wrapper_valido_e_sonda_riuscita(tmp_path: Path, radice: Path, monkeypatch):
+    _sonda_ok(monkeypatch)
+    referto = esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+    assert _controllo(referto, "wrapper di isolamento").esito is Esito.OK
+    sonda = _controllo(referto, "autorizzazione sudo del wrapper")
+    assert sonda.esito is Esito.OK
+    assert "senza password" in sonda.messaggio
+
+
+def test_sonda_fallita_e_errore_con_la_riga_di_sudoers(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Scoprirlo adesso è l'intero scopo del preflight.
+
+    Senza autorizzazione ogni invocazione fallirebbe, e `sudo` senza NOPASSWD
+    lascerebbe il server in attesa di una password su un canale non
+    interattivo.
+    """
+    _sonda_ok(monkeypatch, codice=1, stderr="sudo: a password is required")
+    referto = esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+    sonda = _controllo(referto, "autorizzazione sudo del wrapper")
+    assert sonda.esito is Esito.ERRORE
+    assert "password is required" in sonda.messaggio
+    assert "NOPASSWD" in (sonda.rimedio or "")
+    assert referto.pronto is False
+
+
+def test_confine_dai_tool_ok_con_permessi_stretti(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    _sonda_ok(monkeypatch)
+    log = tmp_path / "audit.jsonl"
+    log.write_text("", encoding="utf-8")
+    log.chmod(0o600)
+    referto = esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+    assert _controllo(referto, "confine fra servizio e tool").esito is Esito.OK
+
+
+def test_log_leggibile_da_tutti_rompe_il_confine(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Separare l'identità serve a questo: che un tool non possa scrivere
+    righe false nella traccia che dovrebbe registrarlo."""
+    _sonda_ok(monkeypatch)
+    log = tmp_path / "audit.jsonl"
+    log.write_text("", encoding="utf-8")
+    log.chmod(0o606)
+    referto = esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+    controllo = _controllo(referto, "confine fra servizio e tool")
+    assert controllo.esito is Esito.ERRORE
+    assert "righe false" in controllo.messaggio
+    assert referto.pronto is False
+
+
+def test_utente_dei_tool_del_wrapper_e_quello_del_preflight(radice: Path):
+    """La stessa costante in due linguaggi: va verificata, non ricordata.
+
+    Il wrapper è uno script di shell e non può importare `UTENTE_TOOL`. La
+    duplicazione è inevitabile, quindi la si misura — è la lezione delle tre
+    copie della mappa status → esito, applicata fra linguaggi diversi.
+    """
+    from mcp_server.doctor import UTENTE_TOOL
+
+    testo = (radice / "bin" / "hermes-tool-run").read_text(encoding="utf-8")
+    assert f"TOOL_UID={UTENTE_TOOL}\n" in testo
+    assert f"TOOL_GID={UTENTE_TOOL}\n" in testo
