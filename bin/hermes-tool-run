@@ -1,0 +1,176 @@
+#!/bin/sh
+# Esegue un tool sotto un'identità separata e dentro limiti di risorsa.
+#
+# Perché esiste questo file
+# -------------------------
+#
+# Il server gira come l'utente di servizio (`hermes`) e i tool giravano con la
+# sua stessa identità: un tool compromesso poteva leggere e scrivere tutto ciò
+# che il server possiede — il log d'audit compreso, cioè la traccia che
+# dovrebbe registrarlo. A1 sposta i tool su un uid dedicato e senza shell.
+#
+# Avviare un processo sotto un altro uid è un'operazione privilegiata, quindi
+# serve un privilegio concesso a `hermes`. Questo script È quel privilegio, e
+# la sua forma è il punto: tutto ciò che non deve essere scelto dal chiamante
+# — l'uid, il gid, i limiti — è scritto QUI, in un file di root che il
+# servizio non può modificare. Dal chiamante arrivano solo il nome dell'unità
+# e il comando.
+#
+# Vale la stessa regola del canale SSH e del perimetro dei bersagli: una
+# restrizione custodita da chi la subisce non è una restrizione.
+#
+# Modello di minaccia
+# -------------------
+#
+# A1 confina il TOOL, non difende da un `hermes` compromesso. La riga di
+# sudoers permette qualunque argomento, e va bene: `hermes-tool` ha MENO
+# privilegi di `hermes`, quindi poter eseguire cose come `hermes-tool` non è
+# un'escalation. Ciò che conta è che l'uid non sia un parametro.
+#
+# Ne segue il requisito su questo file: root-owned e non scrivibile dal
+# servizio. Se `hermes` potesse riscriverlo, quella riga di sudoers
+# diventerebbe sudo pieno. Il preflight lo verifica.
+#
+# Perché un'unità di tipo servizio e non uno scope
+# ------------------------------------------------
+#
+# Con `--scope` il processo è lanciato da CHI CHIAMA e l'unità serve solo al
+# conteggio delle risorse: il cambio di uid lo dovrebbe fare systemd-run, che
+# gira non privilegiato, e fallisce con «Failed to change GID». Con un'unità
+# di tipo servizio il processo lo lancia PID 1, che può cambiare identità.
+# `--pipe` ricollega stdin/stdout/stderr al chiamante, `--wait` attende.
+#
+# `--quiet` non è cosmetico: senza, le righe di stato di systemd («Running as
+# unit…», «Finished with result…», «Memory peak…») finiscono sullo STDERR del
+# chiamante, e il gate le catturerebbe mescolate all'errore vero del tool.
+#
+# Perché MemorySwapMax=0
+# ----------------------
+#
+# `MemoryMax` da solo limita la memoria RESIDENTE. Misurato: un processo che
+# chiede 500 MB con `MemoryMax=64M` arriva in fondo con esito 0, spingendo
+# 444 MB nello swap. La macchina non va in OOM ma può essere portata a
+# nuotare nello swap, che è una negazione di servizio con un altro nome —
+# mentre il log dice che è andato tutto bene.
+
+set -eu
+
+SYSTEMD_RUN=/usr/bin/systemd-run
+SYSTEMCTL=/usr/bin/systemctl
+
+# --- Policy: fissata qui, non negoziabile dal chiamante -------------------- #
+
+TOOL_UID=hermes-tool
+TOOL_GID=hermes-tool
+
+MEMORY_MAX=1G
+MEMORY_SWAP_MAX=0
+TASKS_MAX=128
+
+# Tetto sul tempo che il chiamante può chiedere. Il gate chiede il proprio
+# timeout; questo è il massimo concedibile, perché il tempo è una risorsa come
+# le altre e il suo limite sta dove stanno gli altri.
+#
+# I valori qui sopra sono GENEROSI E NON CALIBRATI, di proposito: senza un
+# tool reale non si sa quanto consumi un `nmap -A` su una /24. Un tetto largo
+# e dichiarato è una misura onesta; un tetto stretto indovinato è il primo
+# nmap ucciso a metà, con un sintomo che non punta alla causa. Si stringono
+# quando c'è qualcosa da misurare — è una voce di debito aperta.
+RUNTIME_MAX_CEILING=600
+
+nome_unita_valido() {
+    # Solo il prefisso del progetto più un UUID: il chiamante non deve poter
+    # nominare un'unità altrui, e `--stop` agisce solo su queste.
+    printf '%s' "$1" | grep -Eq '^hermes-tool-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+}
+
+muori() {
+    printf 'hermes-tool-run: %s\n' "$1" >&2
+    exit 64
+}
+
+# --- Verbo: --stop --------------------------------------------------------- #
+#
+# Fermare un'unità è privilegiato, e il gate ne ha bisogno come rete di
+# riserva se il tempo limite di systemd non è scattato. Due verbi, un solo
+# privilegio concesso.
+
+if [ "${1:-}" = "--stop" ]; then
+    [ $# -eq 2 ] || muori "--stop richiede esattamente un nome di unità"
+    nome_unita_valido "$2" || muori "nome di unità non valido: $2"
+    "$SYSTEMCTL" stop "$2.service" >/dev/null 2>&1 || true
+    "$SYSTEMCTL" reset-failed "$2.service" >/dev/null 2>&1 || true
+    exit 0
+fi
+
+# --- Verbo implicito: esegui ----------------------------------------------- #
+
+[ $# -ge 4 ] || muori "uso: hermes-tool-run <unita> <timeout> -- <comando...>"
+
+UNITA="$1"
+shift
+TIMEOUT="$1"
+shift
+[ "$1" = "--" ] || muori "il comando deve essere introdotto da '--'"
+shift
+
+nome_unita_valido "$UNITA" || muori "nome di unità non valido: $UNITA"
+
+printf '%s' "$TIMEOUT" | grep -Eq '^[0-9]+$' || muori "timeout non numerico: $TIMEOUT"
+[ "$TIMEOUT" -ge 1 ] || muori "timeout non positivo"
+[ "$TIMEOUT" -le "$RUNTIME_MAX_CEILING" ] || TIMEOUT="$RUNTIME_MAX_CEILING"
+
+# `--` prima del comando: senza, un argomento del tool che inizia per '-'
+# verrebbe letto come opzione di systemd-run. È lo stesso ruolo del `--` che
+# il gate mette prima del bersaglio validato.
+#
+# Niente --collect: l'unità va interrogata PRIMA di essere rimossa, altrimenti
+# la causa di un'uccisione si perde e il gate può solo dire «uscito con 1».
+set +e
+"$SYSTEMD_RUN" \
+    --pipe --wait --quiet \
+    --unit="$UNITA" \
+    --uid="$TOOL_UID" --gid="$TOOL_GID" \
+    -p MemoryMax="$MEMORY_MAX" \
+    -p MemorySwapMax="$MEMORY_SWAP_MAX" \
+    -p TasksMax="$TASKS_MAX" \
+    -p RuntimeMaxSec="$TIMEOUT" \
+    -- "$@"
+ESITO_RUN=$?
+set -e
+
+# --- Esito: il segnale, non un 1 generico ---------------------------------- #
+#
+# systemd-run --wait torna 1 sia per un tool che falliva da sé, sia per uno
+# ucciso dal tetto di memoria, sia per uno fermato dal tempo limite. Tre cause
+# con rimedi diversi dietro lo stesso numero: con `nmap` vero, un'esecuzione
+# uccisa dal cgroup sembrerebbe un bug di nmap.
+#
+# systemd l'informazione la ha: ExecMainCode=2 significa «ucciso», e
+# ExecMainStatus porta il segnale. Si propaga con la convenzione della shell
+# (128+segnale), così OOM diventa 137 e il tempo limite 143.
+#
+# Un'unità conclusa con successo viene raccolta subito e può non essere più
+# interrogabile: in quel caso i campi sono vuoti e vale l'esito di
+# systemd-run, che per un successo è quello giusto.
+PROPRIETA=$("$SYSTEMCTL" show "$UNITA.service" \
+    --property=ExecMainCode --property=ExecMainStatus 2>/dev/null || true)
+CODICE=$(printf '%s\n' "$PROPRIETA" | sed -n 's/^ExecMainCode=//p')
+STATO=$(printf '%s\n' "$PROPRIETA" | sed -n 's/^ExecMainStatus=//p')
+
+"$SYSTEMCTL" reset-failed "$UNITA.service" >/dev/null 2>&1 || true
+
+case "$CODICE" in
+    1)  # CLD_EXITED: uscito da sé, con il proprio codice.
+        exit "${STATO:-$ESITO_RUN}"
+        ;;
+    2|3|4)  # CLD_KILLED / CLD_DUMPED / CLD_TRAPPED: ucciso da un segnale.
+        if printf '%s' "$STATO" | grep -Eq '^[0-9]+$'; then
+            exit $((128 + STATO))
+        fi
+        exit "$ESITO_RUN"
+        ;;
+    *)
+        exit "$ESITO_RUN"
+        ;;
+esac

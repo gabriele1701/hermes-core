@@ -77,6 +77,7 @@ from mcp_server.executor import (
     SharedSlotsUnusable,
     TargetOutOfScope,
     ToolExecutor,
+    ToolRunnerUnusable,
 )
 from mcp_server.overrides import OverrideScope, OverrideStore
 from mcp_server.registry import (
@@ -194,6 +195,11 @@ class HermesServer:
             # e non applicabile è peggio di un perimetro assente: nessuno
             # saprebbe di averlo perso.
             scope=self._carica_perimetro(config),
+            # Assente → i tool girano con l'identità del servizio, come
+            # prima, e il catalogo lo dichiara. Configurato e non utilizzabile
+            # → il gate rifiuta, invocazione per invocazione, perché un
+            # wrapper può diventare inutilizzabile anche dopo l'avvio.
+            tool_runner=config.tool_runner,
         )
         self._carica_tool()
         self._mcp = self._costruisci_mcp()
@@ -337,6 +343,9 @@ class HermesServer:
             # legge. False significa che i tool con bersaglio non sono
             # invocabili su questa installazione.
             "scope_configured": self._executor.perimetro_configurato,
+            # False significa che i tool girano con l'identità del server:
+            # un presidio che non c'è si dichiara dove lo si legge.
+            "tool_uid_separato": self._executor.uid_separato,
             "tools": elenco,
         }
 
@@ -406,6 +415,7 @@ class HermesServer:
             ConcurrencyLimitReached,
             SharedSlotsUnusable,
             TargetOutOfScope,
+            ToolRunnerUnusable,
         ) as err:
             # Tutte decisioni del gate, non guasti dell'invocazione: il gate
             # ha già scritto la sua riga `denied`, e un risultato di tipo

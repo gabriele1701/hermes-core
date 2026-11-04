@@ -40,8 +40,13 @@ ciascuno, i tool di proprietà, i tool altrui invisibili), e aprire proprio qui
 un canale di denial-of-service fra agenti sarebbe il male peggiore fra i due.
 
 La conseguenza va detta: il tetto di macchina è ``N × agenti``, non ``N``. Un
-tetto di macchina vero non è lavoro di questo processo — lo danno una slice
-systemd o un cgroup, che contano CPU e memoria reali invece di esecuzioni.
+tetto di macchina vero non è lavoro di questo modulo, che conta esecuzioni e
+non risorse: tre ``nmap -A`` su una /24 e trenta ``echo.ping`` sono lo stesso
+numero. Dal passo 9 lo dà il cgroup dell'unità transiente sotto cui ogni tool
+viene eseguito (``bin/hermes-tool-run``), che misura memoria e processi reali.
+I posti restano il tetto sulle **esecuzioni concorrenti per agente**, che è una
+cosa diversa e serve ancora: il cgroup limita quanto può consumare una
+singola invocazione, non quante possono partire insieme.
 
 Assente è diverso da rotto
 -------------------------

@@ -28,7 +28,12 @@ from pathlib import Path
 
 from mcp_server.config import ConfigError, ServerConfig, load_config
 from mcp_server.contracts import RiskTier, ToolSpec
-from mcp_server.executor import risolvi_script, sha256_file
+from mcp_server.executor import (
+    SUDO,
+    _wrapper_inutilizzabile,
+    risolvi_script,
+    sha256_file,
+)
 from mcp_server.overrides import NOME_FILE as NOME_FILE_OVERRIDE
 from mcp_server.overrides import OverrideStore, OverrideStoreError
 from mcp_server.scope import ScopeAllowlist, ScopeError
@@ -37,6 +42,10 @@ from mcp_server.slots import SlotPool
 from mcp_server.tiers import derive_policy_for
 
 _TIMEOUT_HANDSHAKE = 30
+
+#: Tetto sulla sonda di autorizzazione: `sudo -n` non attende input, quindi
+#: se non torna in fretta c'è un problema che va detto invece di aspettato.
+_TIMEOUT_SONDA = 10
 
 
 class Esito(StrEnum):
@@ -1047,6 +1056,7 @@ def esegui(percorso_config: str | Path) -> Referto:
     _interprete(referto, cfg)
     _limiti(referto, cfg)
     _perimetro(referto, cfg, percorso)
+    _isolamento_dei_tool(referto, cfg)
     _scrivibilita(referto, cfg)
     _vault(referto, cfg)
     _container(referto, cfg)
@@ -1214,6 +1224,205 @@ def _perimetro(referto: Referto, cfg: ServerConfig, percorso_config: Path) -> No
             f"come non averne uno",
             f"sudo chown root: {cfg.scope_file} && "
             f"sudo chmod 644 {cfg.scope_file}",
+        )
+
+
+#: Utente sotto cui girano i tool. **Deve coincidere con `TOOL_UID` nel
+#: wrapper**, che è uno script di shell e non può importare questa costante:
+#: la duplicazione è inevitabile, quindi è almeno nominata e verificata da un
+#: test che legge il wrapper e confronta. La lezione di ieri sulle tre copie
+#: della stessa mappa vale anche fra linguaggi diversi.
+UTENTE_TOOL = "hermes-tool"
+
+#: Unità riservata alla sonda del preflight: un UUID nullo che nessuna
+#: invocazione reale produce. `--stop` su un'unità inesistente è un'operazione
+#: innocua, e serve a verificare l'AUTORIZZAZIONE senza eseguire un tool.
+UNITA_SONDA = "hermes-tool-00000000-0000-0000-0000-000000000000"
+
+
+def _isolamento_dei_tool(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica che i tool girino sotto un'identità separata (A1).
+
+    Quattro fatti distinti, e tenerli separati è il punto: il wrapper esiste
+    ed è di root; l'utente dei tool esiste; l'autorizzazione `sudo` funziona
+    **senza chiedere una password**; e i file del servizio restano fuori dalla
+    portata dei tool. Un referto che li fondesse in un solo verde direbbe meno
+    di quanto sembra.
+    """
+    if cfg.tool_runner is None:
+        referto.aggiungi(
+            "wrapper di isolamento",
+            Esito.AVVISO,
+            "server.tool_runner non configurato: i tool girano con l'identità "
+            "del servizio, quindi possono leggere e scrivere tutto ciò che il "
+            "server possiede — il log d'audit compreso",
+            "sudo install -m 755 -o root -g root bin/hermes-tool-run "
+            "/opt/hermes-core/bin/hermes-tool-run\n"
+            "             poi in [server]: tool_runner = \"…/bin/hermes-tool-run\"\n"
+            "             Procedura completa in docs/setup-vm-hermes.md.",
+        )
+        return
+
+    guasto = _wrapper_inutilizzabile(cfg.tool_runner)
+    if guasto is not None:
+        referto.aggiungi(
+            "wrapper di isolamento",
+            Esito.ERRORE,
+            f"wrapper configurato e non utilizzabile: {guasto}",
+            f"sudo install -m 755 -o root -g root bin/hermes-tool-run "
+            f"{cfg.tool_runner}\n"
+            "             Finché non è riparato il gate rifiuta ogni "
+            "invocazione: l'isolamento è dichiarato e non applicabile, e "
+            "ricadere sull'identità del servizio sarebbe peggio.",
+        )
+        return
+
+    referto.aggiungi(
+        "wrapper di isolamento",
+        Esito.OK,
+        f"{cfg.tool_runner} (di root, non scrivibile da altri) · "
+        f"{_limiti_dal_wrapper(cfg.tool_runner)}",
+    )
+
+    # -- l'utente dei tool -------------------------------------------------- #
+
+    try:
+        info = pwd.getpwnam(UTENTE_TOOL)
+    except KeyError:
+        referto.aggiungi(
+            "utente dei tool",
+            Esito.ERRORE,
+            f"l'utente {UTENTE_TOOL!r} non esiste: il wrapper non potrà "
+            f"cambiare identità e ogni invocazione fallirà",
+            f"sudo useradd --system --no-create-home "
+            f"--shell /usr/sbin/nologin {UTENTE_TOOL}",
+        )
+    else:
+        shell = Path(info.pw_shell or "")
+        if shell.name not in {"nologin", "false"}:
+            referto.aggiungi(
+                "utente dei tool",
+                Esito.AVVISO,
+                f"{UTENTE_TOOL} ha una shell ({info.pw_shell}): se un giorno "
+                f"acquisisse credenziali, potrebbe accedere invece di non "
+                f"poter fare nulla",
+                f"sudo usermod --shell /usr/sbin/nologin {UTENTE_TOOL}",
+            )
+        else:
+            referto.aggiungi(
+                "utente dei tool",
+                Esito.OK,
+                f"{UTENTE_TOOL} (uid {info.pw_uid}), nessuna shell",
+            )
+
+    # -- l'autorizzazione, provata davvero ---------------------------------- #
+    #
+    # `--stop` su un'unità inesistente non fa niente: è il modo di esercitare
+    # il privilegio senza eseguire un tool. Se `sudo` non è autorizzato,
+    # fallisce qui — e scoprirlo adesso è l'intero scopo del preflight.
+    try:
+        esito = subprocess.run(  # noqa: S603 - argv esplicito, shell=False
+            [str(SUDO), "-n", str(cfg.tool_runner), "--stop", UNITA_SONDA],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT_SONDA,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        referto.aggiungi(
+            "autorizzazione sudo del wrapper",
+            Esito.ERRORE,
+            f"sonda non eseguibile: {type(err).__name__}: {err}",
+        )
+    else:
+        if esito.returncode == 0:
+            referto.aggiungi(
+                "autorizzazione sudo del wrapper",
+                Esito.OK,
+                "sudo -n sul wrapper riesce senza password",
+            )
+        else:
+            motivo = (esito.stderr or "").strip().splitlines()
+            referto.aggiungi(
+                "autorizzazione sudo del wrapper",
+                Esito.ERRORE,
+                f"sudo -n sul wrapper fallisce (esito {esito.returncode}): "
+                f"{motivo[-1] if motivo else 'nessun messaggio'}",
+                f"In /etc/sudoers.d/hermes-core:\n"
+                f"             {_utente_di_servizio(cfg) or '<utente-di-servizio>'} "
+                f"ALL=(root) NOPASSWD: {cfg.tool_runner}\n"
+                "             Verificare con 'sudo visudo -c'. Senza "
+                "NOPASSWD il server resterebbe in attesa di una password su "
+                "un canale non interattivo.",
+            )
+
+    # -- i file del servizio, fuori dalla portata dei tool ------------------ #
+
+    _confine_dai_tool(referto, cfg)
+
+
+def _limiti_dal_wrapper(percorso: Path) -> str:
+    """I limiti dichiarati nel wrapper, per renderli visibili nel referto.
+
+    Lettura testuale: un operatore che non sa quali tetti sono in vigore non
+    sa interpretare un'esecuzione uccisa. Se il formato non combacia si dice
+    che non sono determinabili, invece di inventare un valore.
+    """
+    try:
+        testo = percorso.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "limiti non determinabili"
+    trovati = []
+    for chiave in ("MEMORY_MAX", "MEMORY_SWAP_MAX", "TASKS_MAX"):
+        for riga in testo.splitlines():
+            pulita = riga.strip()
+            if pulita.startswith(f"{chiave}="):
+                trovati.append(f"{chiave.lower()}={pulita.split('=', 1)[1]}")
+                break
+    if not trovati:
+        return "limiti non determinabili dal wrapper"
+    return " · ".join(trovati) + " (provvisori, non calibrati)"
+
+
+def _confine_dai_tool(referto: Referto, cfg: ServerConfig) -> None:
+    """Il log e lo stato non devono essere raggiungibili dall'utente dei tool.
+
+    È metà di A1, e la metà che si dimentica: separare l'identità serve a
+    impedire che un tool scriva righe false nella traccia che dovrebbe
+    registrarlo. Oggi è vero per costruzione — quei file sono dell'utente di
+    servizio — ma va misurato, perché un `chmod` di comodo lo annullerebbe
+    senza che niente lo dica.
+    """
+    da_proteggere = [("log d'audit", cfg.log_path)]
+    if cfg.state_dir is not None:
+        da_proteggere.append(("stato", cfg.state_dir))
+
+    problemi = []
+    for nome, percorso in da_proteggere:
+        st = _stat(percorso)
+        if st is None:
+            continue  # non ancora creato: lo segnalano i controlli dedicati
+        modo = stat.S_IMODE(st.st_mode)
+        if modo & 0o007:
+            problemi.append(f"{nome} ({percorso}) ha permessi {modo:04o}")
+        elif _utente(st.st_uid) == UTENTE_TOOL:
+            problemi.append(f"{nome} ({percorso}) è di {UTENTE_TOOL}")
+
+    if problemi:
+        referto.aggiungi(
+            "confine fra servizio e tool",
+            Esito.ERRORE,
+            f"{'; '.join(problemi)}: un tool potrebbe scrivere righe false "
+            f"nella traccia che dovrebbe registrarlo",
+            f"chmod o700 {cfg.state_dir or '<state_dir>'} e "
+            f"chmod 600 {cfg.log_path}",
+        )
+    else:
+        referto.aggiungi(
+            "confine fra servizio e tool",
+            Esito.OK,
+            f"log e stato non raggiungibili da {UTENTE_TOOL}",
         )
 
 

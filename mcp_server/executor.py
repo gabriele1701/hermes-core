@@ -84,6 +84,7 @@ from __future__ import annotations
 import hashlib
 import os
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -130,6 +131,22 @@ _ENV_CONSENTITE = ("PATH", "LANG", "LC_ALL", "TZ")
 
 _CHUNK = 1024 * 1024
 
+#: Percorso assoluto di ``sudo``. Assoluto per lo stesso motivo
+#: dell'interprete dei tool: lasciarlo al ``PATH`` significa non sapere quale
+#: binario sta concedendo il privilegio.
+SUDO = Path("/usr/bin/sudo")
+
+#: Prefisso del nome delle unità transienti. Il nome contiene il
+#: ``correlation_id`` dell'invocazione, quindi un processo rimasto in giro si
+#: ricollega a chi l'ha generato: oggi un orfano è anonimo.
+PREFISSO_UNITA = "hermes-tool"
+
+#: Di quanto il tempo limite di systemd sta SOTTO quello del gate.
+#: L'ordine conta: systemd deve vincere per primo, perché è l'unico che può
+#: terminare l'albero dentro il cgroup. Il timeout del gate resta la rete di
+#: riserva che scatta solo se systemd ha fallito.
+MARGINE_TEMPO_LIMITE = 5
+
 
 # --------------------------------------------------------------------------- #
 # Errori
@@ -150,6 +167,15 @@ class IntegrityMismatch(ExecutionError):
 
 class ConcurrencyLimitReached(ExecutionError):
     """Troppe esecuzioni contemporanee in questo processo."""
+
+
+class ToolRunnerUnusable(ExecutionError):
+    """Il wrapper di isolamento è configurato ma non si riesce a usarlo.
+
+    Non si ricade sull'identità del servizio: sarebbe l'isolamento promesso e
+    non applicato, e nessuno saprebbe di averlo perso. Stessa regola del
+    container assente e dei posti condivisi rotti.
+    """
 
 
 class TargetOutOfScope(ExecutionError):
@@ -335,6 +361,37 @@ def _decodifica(grezzo: bytes | str | None) -> str:
     return grezzo.decode("utf-8", errors="replace")
 
 
+def _wrapper_inutilizzabile(percorso: Path) -> str | None:
+    """Perché il wrapper non è usabile, o ``None`` se lo è.
+
+    Si guarda ciò che si può misurare senza eseguire nulla: esiste, è un file,
+    è eseguibile, ed è di root e non scrivibile da altri. Le ultime due non
+    sono igiene: se l'utente di servizio potesse riscrivere il wrapper, la
+    riga di sudoers che lo autorizza diventerebbe sudo pieno — la restrizione
+    sarebbe custodita da chi la subisce, per la quarta volta in questa patch.
+
+    Non si verifica qui che ``sudo -n`` funzioni: richiederebbe di eseguire
+    qualcosa a ogni invocazione. Quello lo fa il preflight, una volta.
+    """
+    try:
+        st = percorso.stat()
+    except OSError as err:
+        return f"{percorso} non ispezionabile: {err}"
+    if not stat.S_ISREG(st.st_mode):
+        return f"{percorso} non è un file regolare"
+    modo = stat.S_IMODE(st.st_mode)
+    if not modo & 0o111:
+        return f"{percorso} non è eseguibile (permessi {modo:04o})"
+    if st.st_uid != 0:
+        return f"{percorso} non è di root (uid {st.st_uid})"
+    if modo & 0o022:
+        return (
+            f"{percorso} è scrivibile da altri (permessi {modo:04o}): chi "
+            f"esegue i tool potrebbe riscrivere il proprio confine"
+        )
+    return None
+
+
 def ambiente_minimo() -> dict[str, str]:
     """Ambiente ridotto alla lista bianca.
 
@@ -437,6 +494,7 @@ class ToolExecutor:
         max_concurrent: int = MAX_CONCURRENT_DEFAULT,
         slots: SlotPool | None = None,
         scope: ScopeAllowlist | None = None,
+        tool_runner: Path | None = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
@@ -458,6 +516,11 @@ class ToolExecutor:
         # è `valida_bersaglio` a rifiutare i tool con bersaglio, e lo fa
         # con un motivo leggibile invece di lasciar passare.
         self._scope = scope
+        # ``None`` → i tool girano con l'identità del servizio, come prima, e
+        # il preflight e il catalogo lo dichiarano. Non è un default
+        # inventato: è il comportamento che c'era, con la sua conseguenza
+        # detta.
+        self._tool_runner = tool_runner
 
     @property
     def container_available(self) -> bool:
@@ -479,6 +542,11 @@ class ToolExecutor:
     @property
     def max_concurrent(self) -> int:
         return self._max_concurrent
+
+    @property
+    def uid_separato(self) -> bool:
+        """Se i tool girano sotto un'identità diversa da quella del server."""
+        return self._tool_runner is not None
 
     @property
     def perimetro_configurato(self) -> bool:
@@ -510,6 +578,42 @@ class ToolExecutor:
         if self._slots is None:
             return None
         return self._slots.acquire()
+
+    def _ferma_unita(self, unita: str, correlation_id: uuid.UUID) -> None:
+        """Ferma l'unità transiente, e registra se non ci riesce.
+
+        Chiamata solo quando il tempo limite di systemd non è scattato: a quel
+        punto il tool vive in un cgroup che il gate non può toccare
+        direttamente, e lasciarlo lì sarebbe un orfano che consuma la macchina
+        senza che niente lo dica. Se anche questo fallisce, la cosa va nel log
+        — un residuo invisibile è peggio di un residuo noto.
+        """
+        if self._tool_runner is None:  # pragma: no cover - chiamata solo con runner
+            return
+        try:
+            esito = subprocess.run(  # noqa: S603 - argv esplicito, shell=False
+                [str(SUDO), "-n", str(self._tool_runner), "--stop", unita],
+                env=ambiente_minimo(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=GRAZIA_SIGTERM + 5,
+                check=False,
+            )
+            if esito.returncode == 0:
+                return
+            dettaglio = f"esito {esito.returncode}"
+        except (OSError, subprocess.SubprocessError) as err:
+            dettaglio = f"{type(err).__name__}: {err}"
+        self._audit.log(
+            correlation_id=correlation_id,
+            action=LogAction.TOOL_CALL,
+            outcome=CallOutcome.ERROR,
+            detail=(
+                f"unità {unita} non fermata ({dettaglio}): possibile "
+                f"discendenza ancora attiva. Verificare con "
+                f"'systemctl status {unita}.service'."
+            ),
+        )
 
     # -- preparazione -------------------------------------------------------- #
 
@@ -556,7 +660,26 @@ class ToolExecutor:
             )
             raise TargetOutOfScope(f"bersaglio rifiutato: {err}") from None
 
-        # 4. Isolamento: mai degradare silenziosamente verso l'host.
+        # 4. Isolamento sotto un'altra identità, se promesso.
+        #
+        # Si controlla qui e non allo spawn perché un wrapper inutilizzabile è
+        # una decisione del gate, non un guasto dell'esecuzione: va rifiutata
+        # e registrata prima che qualcosa parta.
+        if self._tool_runner is not None:
+            guasto = _wrapper_inutilizzabile(self._tool_runner)
+            if guasto is not None:
+                motivo = (
+                    f"isolamento dei tool promesso e non applicabile: "
+                    f"{guasto}. Invocazione rifiutata, non eseguita: ricadere "
+                    f"sull'identità del servizio significherebbe eseguire "
+                    f"senza il confine che la configurazione dichiara. "
+                    f"Riprovare non cambia l'esito finché il wrapper non è "
+                    f"riparato."
+                )
+                self._nega(spec, agent, tier, correlation_id, target, motivo)
+                raise ToolRunnerUnusable(motivo)
+
+        # 5. Isolamento nel container: mai degradare silenziosamente verso l'host.
         if spec.requires_container and not self._container_available:
             self._nega(
                 spec,
@@ -571,7 +694,7 @@ class ToolExecutor:
                 f"{tool_id!r} richiede il container isolato, non disponibile"
             )
 
-        # 5. Integrità, dopo il perimetro: rifiutare fuori confine è più
+        # 6. Integrità, dopo il perimetro: rifiutare fuori confine è più
         #    economico e più indipendente dal tool che hashare uno script.
         try:
             script = risolvi_script(self._repo_root, spec.exec_path)
@@ -599,7 +722,7 @@ class ToolExecutor:
                 f"{tool_id!r}: lo script non corrisponde allo SHA dichiarato"
             )
 
-        # 6. Autorizzazione.
+        # 7. Autorizzazione.
         if policy.requires_confirmation and not confirmed:
             self._audit.log(
                 correlation_id=correlation_id,
@@ -766,6 +889,24 @@ class ToolExecutor:
         ]
         if pronta.target_risolto is not None:
             argv += ["--", pronta.target_risolto]
+
+        # Isolamento sotto un'altra identità, se configurato. Il nome
+        # dell'unità porta il correlation_id: serve al percorso di
+        # terminazione, e fa sì che un processo rimasto in giro si ricolleghi
+        # all'invocazione che l'ha generato.
+        unita = f"{PREFISSO_UNITA}-{correlation_id}"
+        if self._tool_runner is not None:
+            argv = [
+                str(SUDO),
+                # -n: senza autorizzazione FALLISCE, invece di chiedere una
+                # password a un canale non interattivo e restare appeso.
+                "-n",
+                str(self._tool_runner),
+                unita,
+                str(max(1, timeout - MARGINE_TEMPO_LIMITE)),
+                "--",
+                *argv,
+            ]
         try:
             esito = self._runner.run(
                 argv,
@@ -774,6 +915,12 @@ class ToolExecutor:
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
+            # Rete di riserva: il tempo limite di systemd sta sotto il nostro,
+            # quindi se siamo qui systemd non ha fatto il suo lavoro. Uccidere
+            # il gruppo di processi — che il runner ha già fatto — non
+            # raggiunge il tool, che vive nel cgroup dell'unità: va fermata
+            # l'unità.
+            self._ferma_unita(unita, correlation_id)
             return self._esito_non_riuscito(
                 pronta, f"timeout dopo {timeout}s", "timeout"
             )
@@ -877,6 +1024,7 @@ __all__ = [
     "TIMEOUT_DEFAULT",
     "TargetOutOfScope",
     "ToolExecutor",
+    "ToolRunnerUnusable",
     "ambiente_minimo",
     "risolvi_script",
     "sha256_file",

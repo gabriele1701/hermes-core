@@ -1,0 +1,36 @@
+# hermes-core — il solo privilegio concesso all'utente di servizio (A1)
+#
+#   sudo install -m 440 -o root -g root config/sudoers.example \
+#       /etc/sudoers.d/hermes-core
+#   sudo visudo -c          # verificare la sintassi PRIMA di fidarsi
+#
+# I permessi 0440 non sono decorativi: sudo rifiuta di leggere un file di
+# /etc/sudoers.d scrivibile da altri, e lo fa in silenzio dal punto di vista
+# di chi aspetta che la regola funzioni.
+#
+# Sostituire 'hermes' se l'utente di servizio ha un altro nome, e il percorso
+# se il repo non è in /opt/hermes-core. Il percorso deve essere ASSOLUTO: una
+# regola su un percorso relativo non vincola nulla.
+hermes ALL=(root) NOPASSWD: /opt/hermes-core/bin/hermes-tool-run
+
+# Perché questa riga non è un buco
+# --------------------------------
+#
+# Permette qualunque argomento, quindi `hermes` può far eseguire qualunque
+# comando — ma sotto l'identità che il wrapper fissa al suo interno, cioè
+# `hermes-tool`, che ha MENO privilegi di `hermes`. Non è un'escalation.
+#
+# Il modello di minaccia di A1 è il TOOL, non il server: si confina il codice
+# che viene eseguito, non si difende da un `hermes` già compromesso. Se
+# `hermes` fosse compromesso, questa riga non gli darebbe niente che non abbia
+# già.
+#
+# Quello che invece sarebbe un buco: un wrapper scrivibile da `hermes`. Allora
+# potrebbe riscriverlo e questa riga diventerebbe sudo pieno — la restrizione
+# custodita da chi la subisce. Per questo il wrapper è di root, e per questo
+# il gate RIFIUTA di eseguire se non lo è, invece di procedere.
+#
+# E quello che non va fatto: allargare la regola a `systemd-run` o a
+# `systemctl`. Con `systemd-run` libero, `hermes` potrebbe avviare un'unità
+# `--uid=root`; con `systemctl` libero, fermare qualunque servizio della
+# macchina. Il wrapper esiste per non concedere nessuna delle due cose.
