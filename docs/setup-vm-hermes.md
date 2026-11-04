@@ -687,13 +687,26 @@ con rimedi diversi dietro lo stesso numero. Il wrapper legge `ExecMainCode` e
 convenzione della shell — ucciso da segnale → `128+segnale`. Quindi OOM
 diventa `137` e il tempo limite `143`.
 
-Per la causa esatta c'è il journal, e il nome dell'unità contiene il
-`correlation_id` dell'invocazione:
+Per la causa esatta c'è il **journal**, e il nome dell'unità contiene il
+`correlation_id` che si legge nel log d'audit:
 
 ```sh
-journalctl -u hermes-tool-<correlation_id>
-systemctl status hermes-tool-<correlation_id>.service
+journalctl -u hermes-tool-<correlation_id> --no-pager
 ```
+
+Deve comparire una riga come `Failed with result 'oom-kill'`, insieme al
+consumo di picco.
+
+> **Non usare `systemctl show` o `systemctl status` dopo il fatto.** Il wrapper
+> rimuove l'unità con `reset-failed` appena ne ha letto l'esito, e `systemctl
+> show` su un'unità **inesistente** non dà errore: restituisce i valori di
+> default, cioè `Result=success` e `ExecMainStatus=0`. Su un'esecuzione uccisa
+> dal tetto di memoria risponderebbe «successo».
+>
+> Misurato durante il collaudo del passo 9: `systemctl show` diceva `success`
+> mentre il journal, per la stessa unità e lo stesso istante, diceva
+> `oom-kill`. Il journal è l'autorità; il wrapper legge l'esito **prima** di
+> ripulire, ed è per questo che il `137` arriva corretto al chiamante.
 
 Guadagno collaterale: un processo rimasto in giro si ricollega all'invocazione
 che l'ha generato. Prima un orfano era anonimo.
