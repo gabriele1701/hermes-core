@@ -666,7 +666,45 @@ Poi la configurazione, in `[server]`:
 tool_runner = "/usr/local/sbin/hermes-tool-run"
 ```
 
-### 6.4 Il tempo limite, su due livelli
+### 6.4 L'accesso agli script
+
+I tool ora girano come `hermes-tool`, che **non è nel gruppo `hermes`**: i
+permessi del punto 3 (`o-rwx,g-w,g+rX`) non gli danno nulla, nemmeno il
+transito sulla radice del repo. Senza una concessione esplicita il primo tool
+fallisce con `Permission denied`, e quell'errore arriva dal tool: non nomina
+la causa, e manda a cercare un bug dove c'è un'ACL mancante.
+
+La concessione è mirata e va letta come tale: transito sulla radice e nient'altro,
+lettura solo di `agents/`.
+
+```sh
+sudo setfacl -m u:hermes-tool:--x /opt/hermes-core
+sudo setfacl -R -m u:hermes-tool:rX /opt/hermes-core/agents
+sudo setfacl -R -d -m u:hermes-tool:rX /opt/hermes-core/agents
+```
+
+`--x` sulla radice dà l'attraversamento senza la lettura: `hermes-tool` può
+scendere verso `agents/`, non elencare il repo. `rX` dà lettura e
+attraversamento delle directory senza aggiungere il bit di esecuzione ai file
+che non ce l'hanno. La terza riga imposta l'ACL **di default**, cioè quella
+che i file creati dopo erediteranno: senza, il primo tool aggiunto in futuro
+ripeterebbe lo stesso guasto.
+
+Restano fuori portata `config/` (che contiene i percorsi e i nomi dei
+segreti), `docs/`, `mcp_server/` e il virtualenv. È minimo privilegio
+applicato al codice: un tool ha bisogno di leggere *gli script dei tool*, non
+il server che decide se può essere eseguito.
+
+Verificare con `getfacl`, oppure — meglio — lasciando che sia il preflight a
+leggere davvero un byte (vedi 6.7).
+
+> **`test -r` e `getfacl` rispondono a due domande diverse.** `test -r`
+> interroga `access(2)`, che con le ACL POSIX ha già negato una lettura che
+> **funzionava**. Un controllo deve riprodurre l'operazione che diagnostica,
+> ed è per questo che il preflight apre il file invece di chiedere se
+> potrebbe.
+
+### 6.5 Il tempo limite, su due livelli
 
 `RuntimeMaxSec` sta deliberatamente **sotto** il timeout del gate, così systemd
 vince sempre per primo. È l'unico che può terminare l'albero dei processi
@@ -678,7 +716,7 @@ fallito: in quel caso il gate chiama `hermes-tool-run --stop <unità>`. Se anche
 quello non riesce, la cosa finisce nel log — un residuo invisibile è peggio di
 un residuo noto.
 
-### 6.5 La causa nel log, non un «1» generico
+### 6.6 La causa nel log, non un «1» generico
 
 `systemd-run --wait` torna 1 sia per un tool che fallisce da sé, sia per uno
 ucciso dal tetto di memoria, sia per uno fermato dal tempo limite: tre cause
@@ -711,23 +749,35 @@ consumo di picco.
 Guadagno collaterale: un processo rimasto in giro si ricollega all'invocazione
 che l'ha generato. Prima un orfano era anonimo.
 
-### 6.6 Verificare
+### 6.7 Verificare
 
 ```sh
 sudo -u hermes /opt/hermes-core/.venv/bin/python \
      -m mcp_server.doctor /opt/hermes-core/config/hermes.toml
 ```
 
-Quattro controlli distinti, e sono distinti di proposito: il wrapper esiste ed
+Cinque controlli distinti, e sono distinti di proposito: il wrapper esiste ed
 è di root; l'utente dei tool esiste e non ha shell; `sudo -n` sul wrapper
-riesce **senza password**; log e stato restano fuori dalla portata dei tool.
+riesce **senza password**; `hermes-tool` riesce ad aprire gli script
+registrati; log e stato restano fuori dalla portata dei tool.
 
-La terza è una sonda vera: il preflight esegue `hermes-tool-run --stop` su
-un'unità riservata e inesistente, che non fa nulla ma esercita esattamente il
-privilegio. Se `sudo` non è autorizzato si scopre lì, invece che alla prima
-invocazione.
+Le ultime due del primo gruppo sono sonde vere, non ispezioni.
 
-Un controllo visto solo verde non dice molto. Vale la pena vederlo dire no:
+La terza esegue `hermes-tool-run --stop` su un'unità riservata e inesistente,
+che non fa nulla ma esercita esattamente il privilegio. Se `sudo` non è
+autorizzato si scopre lì, invece che alla prima invocazione.
+
+La quarta percorre la **stessa catena del gate** — `sudo` → wrapper → unità
+transiente → interprete con `-I -S` — cambiando solo l'ultimo anello: legge un
+byte dello script invece di eseguirlo. Chiederlo in un altro modo risponderebbe
+su un altro utente, perché il servizio legge il repo tramite la propria ACL e
+vedrebbe verde su una macchina dove i tool non partono. Si prova solo se la
+terza è riuscita: senza autorizzazione fallirebbe per la causa già riportata
+sopra, e due errori sulla stessa causa mandano a cercare due guasti.
+
+Un controllo visto solo verde non dice molto. Vale la pena vederli dire no.
+
+Il wrapper:
 
 ```sh
 sudo chmod 644 /usr/local/sbin/hermes-tool-run   # non più eseguibile
@@ -737,6 +787,18 @@ sudo chmod 755 /usr/local/sbin/hermes-tool-run   # ripristino
 
 Deve dare `[ERRORE] wrapper di isolamento`, e in quello stato il gate rifiuta
 ogni invocazione invece di ricadere sull'identità del servizio.
+
+L'accesso agli script:
+
+```sh
+sudo setfacl -R -x u:hermes-tool /opt/hermes-core/agents   # ACL rimossa
+sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml | grep -i lettura
+# ripristino: i tre comandi di 6.4
+```
+
+Deve dare `[ERRORE] lettura degli script dai tool`, con i `setfacl` nel
+rimedio. È il guasto che il 4 novembre si è visto per la prima volta come
+`Permission denied` da un tool, cioè nel momento peggiore e senza la causa.
 
 ---
 

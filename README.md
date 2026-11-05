@@ -82,9 +82,10 @@ bin/hermes-core-server                             # resta in attesa su stdio
 ```
 
 Il **preflight** verifica configurazione, percorsi, permessi del log,
-integrità degli script e handshake MCP reale, e dice cosa fare per ogni
-problema che trova. Vale la pena eseguirlo prima di cercare un guasto
-altrove.
+integrità degli script, isolamento dei tool — fino a leggere davvero un byte
+di uno script sotto l'identità con cui verrà eseguito — e handshake MCP
+reale, e dice cosa fare per ogni problema che trova. Vale la pena eseguirlo
+prima di cercare un guasto altrove.
 
 Il server non è pensato per essere usato a mano: parla il protocollo MCP sul
 proprio stdin/stdout e si aspetta un client. L'orchestratore in
