@@ -666,7 +666,88 @@ Poi la configurazione, in `[server]`:
 tool_runner = "/usr/local/sbin/hermes-tool-run"
 ```
 
-### 6.4 Il tempo limite, su due livelli
+### 6.4 L'accesso agli script
+
+I tool ora girano come `hermes-tool`, che **non è nel gruppo `hermes`**: i
+permessi del punto 3 (`o-rwx,g-w,g+rX`) non gli danno nulla, nemmeno il
+transito sulla radice del repo. Senza una concessione esplicita il primo tool
+fallisce con `Permission denied`, e quell'errore arriva dal tool: non nomina
+la causa, e manda a cercare un bug dove c'è un'ACL mancante.
+
+La concessione è mirata e va letta come tale: transito sulla radice e nient'altro,
+lettura solo di `agents/`.
+
+```sh
+sudo setfacl -m u:hermes-tool:--x /opt/hermes-core
+sudo setfacl -R -m u:hermes-tool:rX /opt/hermes-core/agents
+sudo setfacl -R -d -m u:hermes-tool:rX /opt/hermes-core/agents
+```
+
+`--x` sulla radice dà l'attraversamento senza la lettura: `hermes-tool` può
+scendere verso `agents/`, non elencare il repo. `rX` dà lettura e
+attraversamento delle directory senza aggiungere il bit di esecuzione ai file
+che non ce l'hanno. La terza riga imposta l'ACL **di default**, cioè quella
+che i file creati dopo erediteranno: senza, il primo tool aggiunto in futuro
+ripeterebbe lo stesso guasto.
+
+Restano fuori portata `config/` (che contiene i percorsi e i nomi dei
+segreti), `docs/`, `mcp_server/` e il virtualenv. È minimo privilegio
+applicato al codice: un tool ha bisogno di leggere *gli script dei tool*, non
+il server che decide se può essere eseguito.
+
+Verificare con `getfacl`, oppure — meglio — lasciando che sia il preflight a
+leggere davvero un byte (vedi 6.7).
+
+> **`test -r` e `getfacl` rispondono a due domande diverse.** `test -r`
+> interroga `access(2)`, che con le ACL POSIX ha già negato una lettura che
+> **funzionava**. Un controllo deve riprodurre l'operazione che diagnostica,
+> ed è per questo che il preflight apre il file invece di chiedere se
+> potrebbe.
+
+#### Due cause, un sintomo solo
+
+Le concessioni sono due — il transito sulla radice e la lettura di `agents/` —
+e se ne manca una qualsiasi il preflight dà lo stesso errore, con lo stesso
+percorso e lo stesso rimedio:
+
+```
+[ERRORE] lettura degli script dai tool: hermes-tool non riesce ad aprire
+         1 script su 1 provati: /opt/hermes-core/agents/echo_agent/run.py
+         (echo.bersaglio, echo.ping): PermissionError: [Errno 13]
+         Permission denied: '/opt/hermes-core/agents/echo_agent/run.py'
+```
+
+Non è una sciatteria del messaggio: **il kernel non distingue i due casi**.
+`open()` su un percorso di cui un antenato non è attraversabile restituisce
+`EACCES` sul percorso intero, identico a quello di un file non leggibile. La
+sonda riporta ciò che ha misurato invece di dedurre quale delle due sia — una
+causa plausibile ma non verificata, qui, sarebbe peggio del silenzio, perché
+verrebbe creduta.
+
+Il rimedio elenca **entrambe** le concessioni, quindi riapplicandolo si ripara
+in ogni caso: i tre comandi sono idempotenti e rimetterli tutti e tre non ha
+controindicazioni. Chi vuole sapere *quale* mancava lo chiede a `getfacl`,
+che qui è lo strumento giusto perché la domanda è «com'è configurato», non
+«funziona»:
+
+```sh
+getfacl -p /opt/hermes-core        | grep hermes-tool   # atteso: user:hermes-tool:--x
+getfacl -p /opt/hermes-core/agents | grep hermes-tool   # atteso: user:hermes-tool:r-x
+```
+
+Quello che manca è quello che non compare. Attenzione a leggere la riga
+giusta: su `agents/` compaiono sia `user:hermes-tool:r-x` sia
+`default:user:hermes-tool:r-x`, e sono due cose diverse — la prima vale per i
+file che ci sono, la seconda per quelli che verranno.
+
+Distinguerle nel preflight costerebbe una sonda per ogni componente del
+percorso, eseguita solo nel ramo di guasto. Non si fa finché gli script
+stanno tutti sotto `agents/`: sostituirebbe un rimedio completo con un rimedio
+più corto, al prezzo di codice che si esercita solo quando qualcosa è già
+rotto. Se un giorno gli script vivranno in più rami dell'albero, la domanda
+torna.
+
+### 6.5 Il tempo limite, su due livelli
 
 `RuntimeMaxSec` sta deliberatamente **sotto** il timeout del gate, così systemd
 vince sempre per primo. È l'unico che può terminare l'albero dei processi
@@ -678,7 +759,7 @@ fallito: in quel caso il gate chiama `hermes-tool-run --stop <unità>`. Se anche
 quello non riesce, la cosa finisce nel log — un residuo invisibile è peggio di
 un residuo noto.
 
-### 6.5 La causa nel log, non un «1» generico
+### 6.6 La causa nel log, non un «1» generico
 
 `systemd-run --wait` torna 1 sia per un tool che fallisce da sé, sia per uno
 ucciso dal tetto di memoria, sia per uno fermato dal tempo limite: tre cause
@@ -711,23 +792,35 @@ consumo di picco.
 Guadagno collaterale: un processo rimasto in giro si ricollega all'invocazione
 che l'ha generato. Prima un orfano era anonimo.
 
-### 6.6 Verificare
+### 6.7 Verificare
 
 ```sh
 sudo -u hermes /opt/hermes-core/.venv/bin/python \
      -m mcp_server.doctor /opt/hermes-core/config/hermes.toml
 ```
 
-Quattro controlli distinti, e sono distinti di proposito: il wrapper esiste ed
+Cinque controlli distinti, e sono distinti di proposito: il wrapper esiste ed
 è di root; l'utente dei tool esiste e non ha shell; `sudo -n` sul wrapper
-riesce **senza password**; log e stato restano fuori dalla portata dei tool.
+riesce **senza password**; `hermes-tool` riesce ad aprire gli script
+registrati; log e stato restano fuori dalla portata dei tool.
 
-La terza è una sonda vera: il preflight esegue `hermes-tool-run --stop` su
-un'unità riservata e inesistente, che non fa nulla ma esercita esattamente il
-privilegio. Se `sudo` non è autorizzato si scopre lì, invece che alla prima
-invocazione.
+Le ultime due del primo gruppo sono sonde vere, non ispezioni.
 
-Un controllo visto solo verde non dice molto. Vale la pena vederlo dire no:
+La terza esegue `hermes-tool-run --stop` su un'unità riservata e inesistente,
+che non fa nulla ma esercita esattamente il privilegio. Se `sudo` non è
+autorizzato si scopre lì, invece che alla prima invocazione.
+
+La quarta percorre la **stessa catena del gate** — `sudo` → wrapper → unità
+transiente → interprete con `-I -S` — cambiando solo l'ultimo anello: legge un
+byte dello script invece di eseguirlo. Chiederlo in un altro modo risponderebbe
+su un altro utente, perché il servizio legge il repo tramite la propria ACL e
+vedrebbe verde su una macchina dove i tool non partono. Si prova solo se la
+terza è riuscita: senza autorizzazione fallirebbe per la causa già riportata
+sopra, e due errori sulla stessa causa mandano a cercare due guasti.
+
+Un controllo visto solo verde non dice molto. Vale la pena vederli dire no.
+
+Il wrapper:
 
 ```sh
 sudo chmod 644 /usr/local/sbin/hermes-tool-run   # non più eseguibile
@@ -737,6 +830,34 @@ sudo chmod 755 /usr/local/sbin/hermes-tool-run   # ripristino
 
 Deve dare `[ERRORE] wrapper di isolamento`, e in quello stato il gate rifiuta
 ogni invocazione invece di ricadere sull'identità del servizio.
+
+L'accesso agli script:
+
+```sh
+sudo setfacl -R -x u:hermes-tool /opt/hermes-core/agents      # entry di accesso
+sudo setfacl -R -d -x u:hermes-tool /opt/hermes-core/agents   # entry di default
+sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml | grep -iA6 lettura
+# ripristino: i tre comandi di 6.4
+```
+
+Deve dare `[ERRORE] lettura degli script dai tool`, con i `setfacl` nel
+rimedio. È il guasto che il 4 novembre si è visto per la prima volta come
+`Permission denied` da un tool, cioè nel momento peggiore e senza la causa.
+
+**Servono due righe, non una.** `setfacl -R -x` toglie le entry di accesso ma
+**non** quelle di default: senza la seconda riga si riproduce «ACL applicata e
+poi tolta a metà», non «ACL mai applicata», che è lo stato in cui si trova chi
+installa da zero. Per i file che già esistono il risultato è lo stesso, ma uno
+stato riprodotto a metà è un test che verifica meno di quanto dichiara.
+
+L'altra causa, il transito sulla radice, si esercita a parte — e dà lo stesso
+messaggio, per la ragione spiegata in 6.4:
+
+```sh
+sudo setfacl -x u:hermes-tool /opt/hermes-core
+sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml | grep -iA6 lettura
+sudo setfacl -m u:hermes-tool:--x /opt/hermes-core   # ripristino
+```
 
 ---
 

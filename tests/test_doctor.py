@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import os
 import shutil
+import sys
 import textwrap
 from pathlib import Path
 
@@ -556,7 +557,7 @@ def test_wrapper_segnala_package_non_importabile(radice: Path, tmp_path: Path):
     (finto / ".venv" / "bin").mkdir(parents=True)
     shutil.copy(radice / "bin" / "hermes-core-server", finto / "bin")
     (finto / ".venv" / "bin" / "python").symlink_to(
-        Path(os.sys.executable).resolve()
+        Path(sys.executable).resolve()
     )
     (finto / "config" / "hermes.toml").write_text(
         '[server]\nagent = "echo_dummy"\nrepo_root = "."\n', encoding="utf-8"
@@ -1264,3 +1265,242 @@ def test_utente_dei_tool_del_wrapper_e_quello_del_preflight(radice: Path):
     testo = (radice / "bin" / "hermes-tool-run").read_text(encoding="utf-8")
     assert f"TOOL_UID={UTENTE_TOOL}\n" in testo
     assert f"TOOL_GID={UTENTE_TOOL}\n" in testo
+
+
+# --------------------------------------------------------------------------- #
+# Lettura degli script dall'utente dei tool (ACL su agents/)
+#
+# La lacuna che questi test coprono è arrivata da un'invocazione reale, non da
+# un test: l'ACL che dà a `hermes-tool` la lettura degli script non è un
+# artefatto applicato dal repo, e chi installa saltandola vede il primo tool
+# fallire con un «Permission denied» che non nomina la causa.
+# --------------------------------------------------------------------------- #
+
+
+def _sonde(
+    monkeypatch,
+    *,
+    sudo: int = 0,
+    lettura: int = 0,
+    stderr_lettura: str = "",
+    registro: list | None = None,
+) -> None:
+    """Sostituisce le DUE sonde, distinguendole per argv.
+
+    Un finto che risponde lo stesso a tutto renderebbe indistinguibili la
+    sonda di autorizzazione e quella di lettura, cioè proprio le due cose che
+    questi test devono poter separare.
+    """
+    import subprocess as sp
+
+    from mcp_server import doctor as mod
+
+    def finto(argv, **kw):
+        if registro is not None:
+            registro.append(list(argv))
+        if "--stop" in argv:
+            return sp.CompletedProcess(argv, sudo, "", "")
+        if mod.SONDA_LETTURA in argv:
+            return sp.CompletedProcess(argv, lettura, "", stderr_lettura)
+        return sp.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(mod.subprocess, "run", finto)
+
+
+def test_la_sonda_di_lettura_distingue_apribile_da_non_apribile(tmp_path: Path):
+    """Il programma della sonda, provato da sé prima di fidarsene.
+
+    Un esito atteso che non si verifica mai non è una verifica: qui si misura
+    che la sonda dica davvero due cose diverse nei due casi, senza passare
+    dal wrapper e senza `sudo`.
+    """
+    import subprocess
+
+    from mcp_server.doctor import ESITO_SONDA_NON_LEGGIBILE, SONDA_LETTURA
+
+    leggibile = tmp_path / "c-e.py"
+    leggibile.write_text("# qualcosa\n", encoding="utf-8")
+
+    ok = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", SONDA_LETTURA, str(leggibile)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ok.returncode == 0, ok.stderr
+
+    assente = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", SONDA_LETTURA, str(tmp_path / "mai")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert assente.returncode == ESITO_SONDA_NON_LEGGIBILE
+    assert "FileNotFoundError" in assente.stderr
+
+
+def test_lettura_degli_script_confermata(tmp_path: Path, radice: Path, monkeypatch):
+    _sonde(monkeypatch)
+    referto = esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+    controllo = _controllo(referto, "lettura degli script dai tool")
+    assert controllo.esito is Esito.OK
+    assert "un byte letto davvero" in controllo.messaggio
+
+
+def test_script_non_leggibile_dai_tool_e_errore_con_le_acl(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """È il guasto del 4 novembre, visto dal preflight invece che dal tool."""
+    from mcp_server.doctor import ESITO_SONDA_NON_LEGGIBILE, UTENTE_TOOL
+
+    _sonde(
+        monkeypatch,
+        lettura=ESITO_SONDA_NON_LEGGIBILE,
+        stderr_lettura="PermissionError: [Errno 13] Permission denied: 'run.py'",
+    )
+    referto = esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+    controllo = _controllo(referto, "lettura degli script dai tool")
+    assert controllo.esito is Esito.ERRORE
+    assert "echo.ping" in controllo.messaggio
+    assert "Permission denied" in controllo.messaggio
+    assert f"setfacl -m u:{UTENTE_TOOL}:--x" in controllo.rimedio
+    assert f"setfacl -R -d -m u:{UTENTE_TOOL}:rX" in controllo.rimedio
+    assert referto.pronto is False
+
+
+def test_sonda_non_arrivata_alla_lettura_non_accusa_le_acl(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Un wrapper che rifiuta non è uno script illeggibile.
+
+    Confonderli manderebbe a riparare delle ACL che vanno bene — che è la
+    forma «un controllo che indica una causa plausibile ma falsa» già vista
+    nel rimedio del log.
+    """
+    from mcp_server.doctor import UTENTE_TOOL
+
+    _sonde(
+        monkeypatch,
+        lettura=64,
+        stderr_lettura="hermes-tool-run: nome di unità non valido",
+    )
+    referto = esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+    controllo = _controllo(referto, "lettura degli script dai tool")
+    assert controllo.esito is Esito.ERRORE
+    assert "non è arrivata a leggere" in controllo.messaggio
+    assert "setfacl" not in controllo.rimedio
+    assert f"u:{UTENTE_TOOL}" not in controllo.rimedio
+    # E soprattutto: nessun verde accanto. Una catena rotta a metà non
+    # autorizza a dire «tutti leggibili» avendone provato uno.
+    assert not [
+        c
+        for c in referto.controlli
+        if c.nome.startswith("lettura degli script") and c.esito is Esito.OK
+    ]
+
+
+def test_senza_autorizzazione_sudo_la_lettura_non_si_prova(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Due errori sulla stessa causa mandano a cercare due guasti."""
+    _sonde(monkeypatch, sudo=1)
+    referto = esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+    assert _controllo(referto, "autorizzazione sudo del wrapper").esito is Esito.ERRORE
+    assert not [
+        c for c in referto.controlli if c.nome.startswith("lettura degli script")
+    ]
+
+
+def test_senza_wrapper_non_si_prova_la_lettura(tmp_path: Path, radice: Path):
+    """Senza isolamento i tool girano come il servizio: altra domanda."""
+    referto = esegui(scrivi_config(tmp_path, radice))
+    assert not [
+        c for c in referto.controlli if c.nome.startswith("lettura degli script")
+    ]
+
+
+def test_la_sonda_legge_lo_script_senza_eseguirlo(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """La catena è quella del gate; l'ultimo anello no, ed è il punto.
+
+    Si verifica anche che l'unità non sia `UNITA_SONDA`: quella è riservata
+    alla sonda di autorizzazione, e riusarla farebbe fermare a due preflight
+    concorrenti l'unità l'uno dell'altro.
+    """
+    import uuid as mod_uuid
+
+    from mcp_server.doctor import SONDA_LETTURA, UNITA_SONDA
+    from mcp_server.executor import PREFISSO_UNITA
+
+    registro: list[list[str]] = []
+    _sonde(monkeypatch, registro=registro)
+    esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+
+    letture = [a for a in registro if SONDA_LETTURA in a]
+    assert len(letture) == 1
+    argv = letture[0]
+
+    assert argv[:2] == ["/usr/bin/sudo", "-n"]
+    assert Path(argv[2]).resolve() == Path(WRAPPER_FINTO).resolve()
+    unita = argv[3]
+    assert unita != UNITA_SONDA
+    assert unita.startswith(f"{PREFISSO_UNITA}-")
+    mod_uuid.UUID(unita.removeprefix(f"{PREFISSO_UNITA}-"))
+    assert argv[5] == "--"
+    # L'interprete e i suoi flag sono gli stessi con cui girerebbe il tool.
+    assert argv[6] == "/usr/bin/python3"
+    assert argv[7:9] == ["-I", "-S"]
+    # Lo script arriva come ARGOMENTO della sonda, non come programma.
+    assert argv[9] == "-c"
+    assert argv[-1].endswith("run.py")
+
+
+def test_un_solo_script_condiviso_da_piu_tool_si_prova_una_volta(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """La domanda «è leggibile?» riguarda il file, non la registrazione."""
+    from mcp_server.doctor import SONDA_LETTURA
+
+    sha = sha256_file(radice / SCRIPT)
+    percorso = tmp_path / "hermes.toml"
+    percorso.write_text(
+        textwrap.dedent(f"""\
+            [server]
+            agent = "echo_dummy"
+            repo_root = "{radice}"
+            log_path = "{tmp_path}/audit.jsonl"
+            container_available = false
+            tool_runner = "{WRAPPER_FINTO}"
+
+            [vault]
+            backend = "stub"
+            stub_secrets = ["ssh/lab-kali"]
+
+            [[tool]]
+            tool_id = "echo.ping"
+            owner_agent = "echo_dummy"
+            default_tier = "verde"
+            exec_path = "{SCRIPT}"
+            exec_sha256 = "{sha}"
+            description = "Dummy."
+
+            [[tool]]
+            tool_id = "echo.altro"
+            owner_agent = "echo_dummy"
+            default_tier = "verde"
+            exec_path = "{SCRIPT}"
+            exec_sha256 = "{sha}"
+            exec_args = ["--altro"]
+            description = "Stesso script, identità diversa."
+            """),
+        encoding="utf-8",
+    )
+    registro: list[list[str]] = []
+    _sonde(monkeypatch, registro=registro)
+    referto = esegui(percorso)
+
+    assert len([a for a in registro if SONDA_LETTURA in a]) == 1
+    controllo = _controllo(referto, "lettura degli script dai tool")
+    assert controllo.esito is Esito.OK
+    assert "1 script" in controllo.messaggio

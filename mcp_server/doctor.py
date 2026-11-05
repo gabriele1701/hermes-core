@@ -22,6 +22,7 @@ import pwd
 import stat
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -29,6 +30,7 @@ from pathlib import Path
 from mcp_server.config import ConfigError, ServerConfig, load_config
 from mcp_server.contracts import RiskTier, ToolSpec
 from mcp_server.executor import (
+    PREFISSO_UNITA,
     SUDO,
     _wrapper_inutilizzabile,
     risolvi_script,
@@ -1239,6 +1241,42 @@ UTENTE_TOOL = "hermes-tool"
 #: innocua, e serve a verificare l'AUTORIZZAZIONE senza eseguire un tool.
 UNITA_SONDA = "hermes-tool-00000000-0000-0000-0000-000000000000"
 
+#: Esito con cui la sonda di lettura dichiara «lo script non si apre». Un
+#: codice dedicato e non `1`: un fallimento di lettura e un wrapper che
+#: rifiuta l'invocazione hanno rimedi diversi, e confonderli dietro lo stesso
+#: numero è il difetto che il wrapper stesso esiste per non ripetere.
+ESITO_SONDA_NON_LEGGIBILE = 3
+
+#: Programma della sonda di lettura. Fisso **qui**, e non proveniente dalla
+#: configurazione: con questo controllo il preflight acquista la capacità di
+#: eseguire qualcosa sotto l'identità dei tool, e ciò che esegue dev'essere
+#: una decisione del codice, non un valore che un file può cambiare.
+#:
+#: Legge un byte e non chiede se potrebbe leggerlo. `test -r` e `os.access`
+#: interrogano `access(2)`, che con le ACL POSIX ha già negato una lettura che
+#: **funzionava**: un controllo deve riprodurre l'operazione che diagnostica.
+#:
+#: Non esegue lo script del tool: riproduce la lettura, non l'esecuzione. La
+#: domanda è se `hermes-tool` riesce ad aprire quel file, e la risposta non
+#: deve costare l'esecuzione di un tool durante un preflight.
+SONDA_LETTURA = (
+    "import sys\n"
+    "try:\n"
+    "    with open(sys.argv[1], 'rb') as f:\n"
+    "        f.read(1)\n"
+    "except OSError as err:\n"
+    "    print(f'{type(err).__name__}: {err}', file=sys.stderr)\n"
+    "    raise SystemExit(" + str(ESITO_SONDA_NON_LEGGIBILE) + ")\n"
+)
+
+#: Secondi concessi al wrapper per la sonda. Leggere un byte non richiede
+#: tempo: se non torna, il problema non è la durata del lavoro.
+_TEMPO_SONDA_LETTURA = 10
+
+#: Tetto locale, più alto di quello passato al wrapper perché comprende
+#: l'avvio dell'unità transiente, che il tempo del wrapper non conta.
+_TIMEOUT_SONDA_LETTURA = 30
+
 
 def _isolamento_dei_tool(referto: Referto, cfg: ServerConfig) -> None:
     """Verifica che i tool girino sotto un'identità separata (A1).
@@ -1342,6 +1380,11 @@ def _isolamento_dei_tool(referto: Referto, cfg: ServerConfig) -> None:
                 Esito.OK,
                 "sudo -n sul wrapper riesce senza password",
             )
+            # Solo ora ha senso chiedere se i tool LEGGONO i propri script:
+            # senza autorizzazione la sonda fallirebbe per la causa già
+            # riportata qui sopra, e un secondo errore sulla stessa causa
+            # manda a cercare due guasti dove ce n'è uno.
+            _accesso_agli_script(referto, cfg)
         else:
             motivo = (esito.stderr or "").strip().splitlines()
             referto.aggiungi(
@@ -1360,6 +1403,174 @@ def _isolamento_dei_tool(referto: Referto, cfg: ServerConfig) -> None:
     # -- i file del servizio, fuori dalla portata dei tool ------------------ #
 
     _confine_dai_tool(referto, cfg)
+
+
+def _script_dei_tool(cfg: ServerConfig) -> dict[Path, list[str]]:
+    """Gli script registrati, risolti, con i tool_id che li usano.
+
+    Più tool possono condividere uno script — due sottocomandi dello stesso
+    eseguibile sono identità diverse ma un file solo — e la domanda «è
+    leggibile?» riguarda il file. Si raggruppa per percorso, e nel referto si
+    nominano i tool coinvolti, perché è da quelli che si parte quando
+    qualcosa non parte.
+
+    Le spec che non risolvono vengono saltate in silenzio: le riporta già
+    ``_integrita``, con il rimedio giusto per quel guasto.
+    """
+    scripts: dict[Path, list[str]] = {}
+    for payload in cfg.tools:
+        exec_path = payload.get("exec_path")
+        if not isinstance(exec_path, str):
+            continue
+        try:
+            script = risolvi_script(cfg.repo_root, exec_path)
+        except Exception:
+            continue
+        scripts.setdefault(script, []).append(
+            str(payload.get("tool_id", "<senza tool_id>"))
+        )
+    return scripts
+
+
+def _accesso_agli_script(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica che l'utente dei tool riesca davvero ad aprire gli script.
+
+    È la lacuna che il passo 9 ha lasciato aperta e che il collaudo del 4
+    novembre ha trovato nel modo peggiore: l'ACL che concede a
+    ``hermes-tool`` la lettura di ``agents/`` non è un artefatto del repo ma
+    un comando da dare a mano, e chi installa saltandolo scopre il problema
+    alla **prima invocazione reale**, con un ``Permission denied`` che arriva
+    dal tool e non dice che la causa è un'ACL mancante.
+
+    Il repo è in sola lettura per il gruppo del servizio (``g+rX``), e
+    ``hermes-tool`` non è in quel gruppo: senza ACL esplicita non attraversa
+    nemmeno la radice. È voluto — ``config/``, ``docs/`` e ``mcp_server/``
+    devono restargli fuori portata — ma significa che l'accesso agli script è
+    una concessione puntuale, e una concessione puntuale si può dimenticare.
+
+    Perché la sonda passa dal wrapper
+    ---------------------------------
+
+    La domanda non è «questo file è leggibile», ma «è leggibile **da chi lo
+    eseguirà**». Chiederlo da qui, come utente di servizio, risponderebbe su
+    un altro utente: il servizio legge il repo tramite la propria ACL, e
+    vedrebbe verde su una macchina dove i tool non partono. L'unico modo di
+    rispondere alla domanda giusta è attraversare la stessa catena che
+    attraversa il gate — ``sudo`` → wrapper → unità transiente → interprete —
+    cambiando solo l'ultimo anello: leggere un byte invece di eseguire.
+    """
+    scripts = _script_dei_tool(cfg)
+    if not scripts:
+        return
+
+    falliti: list[str] = []
+    catena_rotta = False
+    provati = 0
+    for script in sorted(scripts):
+        tool_ids = ", ".join(sorted(scripts[script]))
+        esito, motivo = _prova_lettura(cfg, script)
+        provati += 1
+
+        if esito == 0:
+            continue
+        if esito == ESITO_SONDA_NON_LEGGIBILE:
+            falliti.append(f"{script} ({tool_ids}): {motivo or 'non apribile'}")
+            continue
+
+        # Qualunque altro esito non è una risposta alla domanda posta: la
+        # catena si è rotta prima della lettura. Dirlo è diverso da dire che
+        # lo script non è leggibile, e confonderli manderebbe a riparare
+        # delle ACL che vanno bene.
+        #
+        # Si smette di sondare — una catena rotta risponderebbe allo stesso
+        # modo per ogni script, e N errori sulla stessa causa fanno cercare N
+        # guasti — ma NON si smette di riferire: ciò che è già stato trovato
+        # viene riportato sotto, perché un controllo che tace su quanto
+        # sapeva già informa meno proprio quando serve.
+        referto.aggiungi(
+            "lettura degli script dai tool",
+            Esito.ERRORE,
+            f"la sonda non è arrivata a leggere {script.name} "
+            f"({tool_ids}): esito {esito}, {motivo or 'nessun messaggio'}",
+            f"Provare a mano la stessa catena:\n"
+            f"             sudo -n {cfg.tool_runner} {PREFISSO_UNITA}-"
+            f"{uuid.uuid4()} {_TEMPO_SONDA_LETTURA} -- "
+            f"{cfg.tool_python} {' '.join(cfg.tool_python_flags)} "
+            f"-c 'print(1)'\n"
+            "             Se fallisce anche così, il problema è nel wrapper o "
+            "in systemd, non nei permessi degli script.",
+        )
+        catena_rotta = True
+        break
+
+    if falliti:
+        referto.aggiungi(
+            "lettura degli script dai tool",
+            Esito.ERRORE,
+            f"{UTENTE_TOOL} non riesce ad aprire {len(falliti)} script su "
+            f"{provati} provati: {'; '.join(falliti)}",
+            f"Concedere il transito sulla radice e la lettura di agents/, "
+            f"con l'ereditarietà per gli script futuri:\n"
+            f"             sudo setfacl -m u:{UTENTE_TOOL}:--x {cfg.repo_root}\n"
+            f"             sudo setfacl -R -m u:{UTENTE_TOOL}:rX "
+            f"{cfg.repo_root / 'agents'}\n"
+            f"             sudo setfacl -R -d -m u:{UTENTE_TOOL}:rX "
+            f"{cfg.repo_root / 'agents'}\n"
+            f"             Solo agents/: config/, docs/ e mcp_server/ devono "
+            f"restare fuori portata. Senza questo, ogni invocazione fallisce "
+            f"con un «Permission denied» che arriva dal tool e non nomina "
+            f"l'ACL.",
+        )
+        return
+
+    # Nessuno script illeggibile, ma la catena si è rotta a metà: il verde
+    # direbbe «tutti leggibili» avendone provati solo alcuni, ed è il falso
+    # verde che questo preflight esiste per non produrre.
+    if catena_rotta:
+        return
+
+    referto.aggiungi(
+        "lettura degli script dai tool",
+        Esito.OK,
+        f"{UTENTE_TOOL} legge {len(scripts)} script registrati "
+        f"(un byte letto davvero, non un test di permessi)",
+    )
+
+
+def _prova_lettura(cfg: ServerConfig, script: Path) -> tuple[int, str]:
+    """``(esito, motivo)`` dell'apertura di ``script`` come utente dei tool.
+
+    L'unità porta un UUID generato e non ``UNITA_SONDA``: quello è riservato
+    alla sonda di autorizzazione, e riusarlo farebbe collidere due preflight
+    lanciati insieme — uno fermerebbe l'unità dell'altro.
+    """
+    argv = [
+        str(SUDO),
+        "-n",
+        str(cfg.tool_runner),
+        f"{PREFISSO_UNITA}-{uuid.uuid4()}",
+        str(_TEMPO_SONDA_LETTURA),
+        "--",
+        str(cfg.tool_python),
+        *cfg.tool_python_flags,
+        "-c",
+        SONDA_LETTURA,
+        str(script),
+    ]
+    try:
+        esito = subprocess.run(  # noqa: S603 - argv esplicito, shell=False
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT_SONDA_LETTURA,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return -1, f"nessuna risposta entro {_TIMEOUT_SONDA_LETTURA}s"
+    except (OSError, subprocess.SubprocessError) as err:
+        return -1, f"{type(err).__name__}: {err}"
+    return esito.returncode, _errore_da_stderr(esito.stderr or "")
 
 
 def _limiti_dal_wrapper(percorso: Path) -> str:
