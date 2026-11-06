@@ -7,6 +7,7 @@ ingiustificata. I test verificano soprattutto che i guasti vengano
 
 from __future__ import annotations
 
+import importlib.metadata
 import io
 import os
 import shutil
@@ -1654,3 +1655,124 @@ def test_il_referto_dice_su_quale_ambiente_ha_risposto(tmp_path: Path, radice: P
     referto = esegui(scrivi_config(tmp_path, radice, senza_tool=True, repo_root=repo))
     controllo = _controllo(referto, "lockfile delle dipendenze")
     assert sys.executable in controllo.messaggio
+
+
+# --------------------------------------------------------------------------- #
+# Dipendenze di INSTALLAZIONE
+#
+# Difetto trovato il 6 novembre, e trovato dal file vero: con il lockfile
+# reale in posizione, 9 test sono diventati rossi perché `setuptools` non è
+# installato — `python3 -m venv` non lo mette da Python 3.12. Il controllo
+# trattava tutto il lock come runtime e avrebbe detto NON PRONTO a un
+# dispiegamento che funziona. Il falso rosso insegna a ignorare i rossi.
+# --------------------------------------------------------------------------- #
+
+
+BUILD_IN_FINTO = """\
+# commento che non dichiara niente
+setuptools>=68
+"""
+
+
+def test_dipendenze_di_build_lette_senza_i_vincoli():
+    from mcp_server.doctor import leggi_dipendenze_di_build
+
+    assert leggi_dipendenze_di_build(BUILD_IN_FINTO) == frozenset({"setuptools"})
+
+
+def test_dipendenza_di_build_assente_non_e_grave():
+    """Il server gira senza: dirlo NON PRONTO sarebbe un falso rosso."""
+    from mcp_server.doctor import confronta_dipendenze
+
+    deriva = confronta_dipendenze(
+        {"mcp": "2.3.0", "setuptools": "84.2.1"},
+        {"mcp": "2.3.0"},
+        frozenset({"setuptools"}),
+    )
+    assert deriva.mancanti_di_build == ["setuptools"]
+    assert deriva.mancanti == []
+    assert deriva.grave is False
+
+
+def test_dipendenza_di_build_a_versione_diversa_resta_grave():
+    """Se c'è, è quella che `pip install -e .` eseguirebbe."""
+    from mcp_server.doctor import confronta_dipendenze
+
+    deriva = confronta_dipendenze(
+        {"setuptools": "84.2.1"},
+        {"setuptools": "70.0.0"},
+        frozenset({"setuptools"}),
+    )
+    assert deriva.diverse == [("setuptools", "84.2.1", "70.0.0")]
+    assert deriva.grave is True
+
+
+def test_senza_la_dichiarazione_di_build_si_confronta_tutto():
+    """Il lato prudente: dice troppo, non troppo poco."""
+    from mcp_server.doctor import confronta_dipendenze
+
+    deriva = confronta_dipendenze({"setuptools": "84.2.1"}, {})
+    assert deriva.mancanti == ["setuptools"]
+    assert deriva.grave is True
+
+
+def test_build_assente_e_avviso_separato_e_referto_pronto(
+    tmp_path: Path, radice: Path
+):
+    """Il caso reale del 6 novembre, in forma di regressione.
+
+    Il lock fissa una dipendenza di build che l'ambiente non ha. Deve
+    uscirne un AVVISO con un nome proprio — non confuso con la deriva di
+    runtime — e il referto deve restare PRONTO.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "requirements-build.in").write_text(BUILD_IN_FINTO, encoding="utf-8")
+    # Il pin di runtime deve combaciare con l'ambiente, altrimenti il test
+    # misurerebbe la deriva di runtime invece di quella di build.
+    versione = importlib.metadata.version("mcp")
+    (repo / "requirements.lock").write_text(
+        f"mcp=={versione}\nsetuptools==0.0.1-inesistente\n", encoding="utf-8"
+    )
+
+    referto = esegui(scrivi_config(tmp_path, radice, senza_tool=True, repo_root=repo))
+
+    runtime = _controllo(referto, "lockfile delle dipendenze")
+    assert runtime.esito is Esito.OK
+    assert "di runtime" in runtime.messaggio
+
+    build = _controllo(referto, "dipendenze di installazione")
+    assert build.esito is Esito.AVVISO
+    assert "setuptools" in build.messaggio
+    assert "non è un guasto" in build.rimedio
+    assert referto.pronto is True
+
+
+def test_il_lock_reale_del_repo_combacia_con_questo_ambiente(radice: Path):
+    """Il lock versionato descrive l'ambiente in cui girano i test.
+
+    Non è una tautologia: se qualcuno aggiorna una dipendenza in
+    pyproject.toml senza rigenerare il lock, oppure rigenera il lock senza
+    reinstallare, questo test lo dice — ed è il solo posto dove la coerenza
+    fra i due file viene misurata invece che assunta.
+    """
+    from mcp_server.doctor import (
+        confronta_dipendenze,
+        leggi_dipendenze_di_build,
+        leggi_lockfile,
+        _installate,
+    )
+
+    lock = radice / "requirements.lock"
+    if not lock.exists():  # pragma: no cover - il lock è versionato
+        pytest.skip("lockfile assente")
+
+    deriva = confronta_dipendenze(
+        leggi_lockfile(lock.read_text(encoding="utf-8")),
+        _installate(),
+        leggi_dipendenze_di_build(
+            (radice / "requirements-build.in").read_text(encoding="utf-8")
+        ),
+    )
+    assert deriva.diverse == [], f"versioni divergenti: {deriva.diverse}"
+    assert deriva.mancanti == [], f"pacchetti di runtime mancanti: {deriva.mancanti}"

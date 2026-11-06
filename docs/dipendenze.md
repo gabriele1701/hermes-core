@@ -193,8 +193,38 @@ configurazione:
 |---|---|
 | Lock assente | **Avviso**. Il server parte, ma l'installazione prende le ultime versioni compatibili con gli intervalli |
 | Lock presente e senza pin leggibili | **Errore**. Un lock illeggibile non blocca niente, ma sembra che lo faccia |
-| Pacchetto fissato e non installato, o a versione diversa | **Errore**. Ciò che è stato rivisto e ciò che gira sono due cose diverse |
+| Pacchetto di runtime fissato e non installato, o a versione diversa | **Errore**. Ciò che è stato rivisto e ciò che gira sono due cose diverse |
+| Dipendenza di **installazione** assente | **Avviso**, con un nome proprio. Vedi sotto |
 | Pacchetto installato e non fissato | **Avviso**. Non smentisce il lock, ma qualcuno l'ha messo lì a mano |
+
+### Le dipendenze di installazione sono un caso a parte
+
+`setuptools` è nel lock per essere verificato **quando `pip install -e .` lo
+esegue**, non perché il server lo importi: a runtime non serve a nessuno, e da
+Python 3.12 `python3 -m venv` non lo installa nemmeno. Trattare la sua assenza
+come una mancanza grave direbbe **`NON PRONTO`** a un dispiegamento che
+funziona.
+
+Questo è il *falso rosso* — l'immagine speculare del falso verde inseguito per
+tutta la patch, e con un difetto in più: un rosso che si sa essere ingiusto
+insegna a ignorare i rossi.
+
+Il controllo legge quindi `requirements-build.in` per sapere quali pacchetti
+sono di installazione. Non c'è un elenco ricopiato nel codice: una seconda
+fonte per lo stesso confine divergerebbe dalla prima, ed è la regola già
+applicata al perimetro e a `nftables`.
+
+Una dipendenza di build a **versione diversa** resta un errore: se c'è, è
+quella che `pip install -e .` eseguirebbe, e il lock dice quale dovrebbe
+essere. Se `requirements-build.in` manca, si confronta tutto e l'assenza
+risulta grave — il lato prudente: dice troppo, non troppo poco.
+
+> **Come è stato trovato.** Mettendo il lockfile reale in posizione, 9 test
+> sono diventati rossi: il controllo segnalava `setuptools` mancante e il
+> referto passava a non pronto. Non l'ha trovato un test scritto per
+> l'occasione, l'ha trovato il file vero appena è entrato nel repo. I test
+> coprivano il meccanismo del confronto, non il significato di ciò che
+> confrontava.
 
 Il referto nomina **l'interprete** su cui ha risposto. Lanciare il preflight con
 il Python di sistema invece che con quello del venv risponderebbe sulla
@@ -205,6 +235,19 @@ L'avviso sui pacchetti in più compare su un dispiegamento installato con
 `pip install -e '.[dev]'`, perché `pytest` e le sue dipendenze non sono nel
 lock. Non è un falso positivo: è la regola «senza gli extra di sviluppo» che
 chiede di essere applicata.
+
+### Il lock è verificato anche dalla suite
+
+`tests/test_doctor.py` confronta il lock **versionato** con l'ambiente in cui
+girano i test. Non è una tautologia: se qualcuno aggiorna una dipendenza in
+`pyproject.toml` senza rigenerare il lock, o rigenera il lock senza
+reinstallare, quel test lo dice. È il solo posto dove la coerenza fra i due
+file viene misurata invece che assunta.
+
+Ne segue che la suite **non è ermetica** rispetto all'ambiente, e questo è
+voluto: come i controlli sui permessi e sull'interprete, quel test interroga
+la macchina vera. Un ambiente di sviluppo che devia dal lock fa diventare
+rossi quei test — e l'informazione è corretta, non un disturbo.
 
 ---
 
