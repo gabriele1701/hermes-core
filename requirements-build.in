@@ -1,0 +1,20 @@
+# Dipendenze di INSTALLAZIONE, non di runtime.
+#
+# `setuptools` non compare in pyproject.toml fra le dependencies, e non deve:
+# il server non lo importa. Sta qui perché `pip install -e .` lo **esegue**.
+#
+# Con l'isolamento di build attivo — il default — pip costruisce un ambiente
+# temporaneo e vi scarica il backend dichiarato in [build-system] al momento,
+# senza hash e senza pin. Quel codice gira: un backend di build esegue codice
+# arbitrario durante l'installazione. Sarebbe l'ultimo comando di una
+# procedura intitolata «installazione con hash obbligatori» a scaricare ed
+# eseguire un pacchetto non verificato.
+#
+# Pinnandolo qui entra nel lockfile, e l'installazione usa
+# `--no-build-isolation` per prendere quello invece di scaricarne un altro.
+#
+# Attenzione: `pip-compile` considera setuptools, pip e wheel «unsafe to
+# pin» e li lascia fuori per default, scrivendo solo un'avvertenza in fondo
+# al file. Serve `--allow-unsafe`. La procedura in docs/dipendenze.md la
+# riporta; un lock senza la riga `setuptools==` non chiude niente.
+setuptools>=68
