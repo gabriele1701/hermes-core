@@ -16,9 +16,11 @@ Esiti: ``OK`` tutto a posto · ``AVVISO`` funziona ma c'è qualcosa da sapere ·
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import pwd
+import re
 import stat
 import subprocess
 import sys
@@ -793,6 +795,252 @@ def _scrivibilita(referto: Referto, cfg: ServerConfig) -> None:
     referto.aggiungi("scrivibilità del codice", Esito.OK, dettaglio)
 
 
+#: Nome del file di blocco, relativo alla radice del repo.
+NOME_LOCKFILE = "requirements.lock"
+
+#: Dichiarazione delle dipendenze di INSTALLAZIONE, relativa alla radice.
+#: Sono nel lock per essere verificate quando `pip install -e .` le esegue,
+#: non perché il server le importi: a runtime `setuptools` non serve a
+#: nessuno. Il file esiste già e dichiara esattamente quell'insieme, quindi
+#: la distinzione si legge da lì invece di essere ricopiata qui — una
+#: seconda fonte per lo stesso confine divergerebbe dalla prima.
+NOME_BUILD_IN = "requirements-build.in"
+
+#: Una riga utile di `requirements-build.in`: il nome del pacchetto, prima
+#: di qualunque vincolo di versione.
+_RIGA_REQUISITO = re.compile(r"^([A-Za-z0-9._-]+)")
+
+#: Pacchetti che stanno nel virtualenv senza essere dipendenze dichiarate:
+#: `pip` e `wheel` li mette l'ambiente, e il progetto stesso entra con
+#: `pip install -e .`. Segnalarli come «in più» sarebbe rumore su ogni
+#: installazione sana, e un avviso che compare sempre smette di essere letto.
+FUORI_CONFRONTO = frozenset({"pip", "wheel", "hermes-core"})
+
+#: Una riga di pin in un file prodotto da `pip-compile`. Le righe di
+#: continuazione (`--hash=…`) iniziano con spazi e i commenti con `#`:
+#: entrambe vengono scartate prima di arrivare qui.
+_RIGA_PIN = re.compile(r"^([A-Za-z0-9._-]+)==([^\s\\;]+)")
+
+
+def _normalizza(nome: str) -> str:
+    """Nome di pacchetto in forma canonica (PEP 503).
+
+    `typing_extensions` e `typing-extensions` sono lo stesso pacchetto, e
+    confrontarli alla lettera produrrebbe una deriva inventata.
+    """
+    return re.sub(r"[-_.]+", "-", nome).lower()
+
+
+def leggi_lockfile(testo: str) -> dict[str, str]:
+    """Nome normalizzato → versione, per ogni pacchetto fissato nel lock."""
+    pin: dict[str, str] = {}
+    for riga in testo.splitlines():
+        if not riga or riga[0].isspace() or riga.lstrip().startswith("#"):
+            continue
+        combacia = _RIGA_PIN.match(riga.strip())
+        if combacia:
+            pin[_normalizza(combacia.group(1))] = combacia.group(2)
+    return pin
+
+
+def leggi_dipendenze_di_build(testo: str) -> frozenset[str]:
+    """I nomi dichiarati in `requirements-build.in`, in forma canonica."""
+    nomi: set[str] = set()
+    for riga in testo.splitlines():
+        riga = riga.strip()
+        if not riga or riga.startswith("#"):
+            continue
+        combacia = _RIGA_REQUISITO.match(riga)
+        if combacia:
+            nomi.add(_normalizza(combacia.group(1)))
+    return frozenset(nomi)
+
+
+@dataclass(slots=True)
+class Deriva:
+    """Scostamento fra ciò che il lock fissa e ciò che è installato."""
+
+    mancanti: list[str] = field(default_factory=list)
+    mancanti_di_build: list[str] = field(default_factory=list)
+    diverse: list[tuple[str, str, str]] = field(default_factory=list)
+    in_piu: list[str] = field(default_factory=list)
+
+    @property
+    def grave(self) -> bool:
+        """Se l'ambiente non è quello che il lock descrive.
+
+        Due esclusioni, per due ragioni diverse.
+
+        `in_piu` non rientra: un pacchetto in più non smentisce il lock, ma
+        racconta che qualcuno ha installato qualcosa a mano — cosa da sapere,
+        non da bloccare.
+
+        `mancanti_di_build` non rientra perché quei pacchetti sono nel lock
+        per essere verificati **durante l'installazione**, non per essere
+        importati dopo: il server gira senza `setuptools`, e da Python 3.12
+        `python3 -m venv` non lo installa nemmeno. Trattarli come mancanze
+        gravi direbbe NON PRONTO a un dispiegamento che funziona — il falso
+        rosso, che è l'immagine speculare del falso verde e ha il difetto in
+        più di insegnare a ignorare i rossi.
+        """
+        return bool(self.mancanti or self.diverse)
+
+
+def confronta_dipendenze(
+    pin: dict[str, str],
+    installate: dict[str, str],
+    di_build: frozenset[str] = frozenset(),
+) -> Deriva:
+    """Confronta il lock con l'ambiente, senza toccare né l'uno né l'altro.
+
+    Funzione pura, come la derivazione della policy dai due assi: il
+    confronto è la parte che si può sbagliare, e isolarla la rende
+    verificabile senza costruire un virtualenv per ogni caso.
+
+    ``di_build`` sono le dipendenze di installazione: una loro assenza viene
+    riportata a parte, perché non dice che l'ambiente è sbagliato.
+    """
+    deriva = Deriva()
+    for nome, atteso in sorted(pin.items()):
+        trovato = installate.get(nome)
+        if trovato is None:
+            if nome in di_build:
+                deriva.mancanti_di_build.append(nome)
+            else:
+                deriva.mancanti.append(nome)
+        elif trovato != atteso:
+            # Una versione DIVERSA resta grave anche per una dipendenza di
+            # build: se c'è, è quella che `pip install -e .` eseguirebbe, e
+            # il lock dice quale dovrebbe essere.
+            deriva.diverse.append((nome, atteso, trovato))
+    for nome in sorted(installate):
+        if nome not in pin and nome not in FUORI_CONFRONTO:
+            deriva.in_piu.append(nome)
+    return deriva
+
+
+def _installate() -> dict[str, str]:
+    """Cosa c'è davvero nell'ambiente che sta eseguendo questo preflight."""
+    trovate: dict[str, str] = {}
+    for dist in importlib.metadata.distributions():
+        nome = dist.metadata["Name"]
+        if nome:
+            trovate[_normalizza(nome)] = dist.version
+    return trovate
+
+
+def _dipendenze(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica che l'ambiente sia ancora quello che il lockfile descrive.
+
+    `--require-hashes` garantisce il **momento** dell'installazione, non i
+    mesi successivi: un `pip install` dato a mano per provare qualcosa non
+    lascia tracce da nessuna parte, e il server continuerebbe a girare con
+    dipendenze che nessuno ha rivisto. Il lock è una dichiarazione di cosa
+    deve esserci; questo controllo è ciò che la rende verificabile dopo.
+
+    Si guarda l'ambiente **vero**, non la configurazione: `importlib.metadata`
+    elenca ciò che l'interprete in esecuzione importerebbe. Ne segue che la
+    risposta vale per l'interprete che lancia il preflight, e per questo il
+    referto lo nomina — un controllo che non dice su cosa ha risposto può
+    rispondere sulla macchina giusta e sull'ambiente sbagliato.
+    """
+    percorso = cfg.repo_root / NOME_LOCKFILE
+    try:
+        testo = percorso.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        referto.aggiungi(
+            "lockfile delle dipendenze",
+            Esito.AVVISO,
+            f"{percorso} assente: l'installazione prende le ultime versioni "
+            f"compatibili con gli intervalli di pyproject.toml, e un rilascio "
+            f"manomesso a monte entrerebbe al primo aggiornamento",
+            "Generarlo sulla macchina che esegue il server "
+            "(vedere docs/dipendenze.md).",
+        )
+        return
+
+    pin = leggi_lockfile(testo)
+    if not pin:
+        referto.aggiungi(
+            "lockfile delle dipendenze",
+            Esito.ERRORE,
+            f"{percorso} non contiene nessun pin riconoscibile: un lockfile "
+            f"illeggibile non blocca niente, ma sembra che lo faccia",
+            "Rigenerarlo con pip-compile (vedere docs/dipendenze.md).",
+        )
+        return
+
+    try:
+        di_build = leggi_dipendenze_di_build(
+            (cfg.repo_root / NOME_BUILD_IN).read_text(encoding="utf-8")
+        )
+    except OSError:
+        # Senza la dichiarazione non si inventa quali siano: si confronta
+        # tutto, e una dipendenza di build assente risulta grave. È il lato
+        # prudente — dice troppo, non troppo poco — e il rimedio nomina il
+        # file che manca.
+        di_build = frozenset()
+
+    deriva = confronta_dipendenze(pin, _installate(), di_build)
+    dove = f"ambiente di {sys.executable}"
+
+    if deriva.grave:
+        dettagli = [
+            f"{nome}: atteso {atteso}, installato {trovato}"
+            for nome, atteso, trovato in deriva.diverse
+        ]
+        dettagli += [f"{nome}: fissato nel lock, non installato" for nome in deriva.mancanti]
+        referto.aggiungi(
+            "lockfile delle dipendenze",
+            Esito.ERRORE,
+            f"{len(dettagli)} scostamenti su {len(pin)} pacchetti ({dove}): "
+            + "; ".join(dettagli[:_MAX_SEGNALATI])
+            + (" …" if len(dettagli) > _MAX_SEGNALATI else ""),
+            f"Se l'ambiente è giusto e il lock è vecchio, rigenerare il lock.\n"
+            f"             Se il lock è giusto, riallineare l'ambiente:\n"
+            f"             <venv>/bin/pip install --require-hashes --no-deps "
+            f"-r {percorso}\n"
+            "             Il server gira con le dipendenze installate, non "
+            "con quelle scritte nel lock: finché divergono, ciò che è stato "
+            "rivisto e ciò che è in esecuzione sono due cose diverse.",
+        )
+    else:
+        quante = len(pin) - len(deriva.mancanti_di_build)
+        referto.aggiungi(
+            "lockfile delle dipendenze",
+            Esito.OK,
+            f"{quante} pacchetti di runtime fissati, tutti installati alla "
+            f"versione attesa ({dove})",
+        )
+
+    if deriva.mancanti_di_build:
+        referto.aggiungi(
+            "dipendenze di installazione",
+            Esito.AVVISO,
+            f"{', '.join(deriva.mancanti_di_build)}: fissate nel lock e non "
+            f"presenti nell'ambiente",
+            f"Non serve al server in esecuzione, e da Python 3.12 "
+            f"`python3 -m venv` non lo installa: non è un guasto.\n"
+            f"             Serve però a `pip install --no-build-isolation -e .`, "
+            f"che senza di esso fallisce. Se il prossimo aggiornamento del "
+            f"dispiegamento userà quel comando, installarlo prima dal lock:\n"
+            f"             <venv>/bin/pip install --require-hashes --no-deps "
+            f"-r {percorso}",
+        )
+
+    if deriva.in_piu:
+        referto.aggiungi(
+            "pacchetti fuori dal lock",
+            Esito.AVVISO,
+            f"{len(deriva.in_piu)} installati e non fissati: "
+            + ", ".join(deriva.in_piu[:_MAX_SEGNALATI])
+            + (" …" if len(deriva.in_piu) > _MAX_SEGNALATI else ""),
+            "Non smentiscono il lock, ma qualcuno li ha messi lì a mano: "
+            "sono codice che gira nel processo che custodisce log e vault, e "
+            "che nessuna revisione ha visto.",
+        )
+
+
 def _tool(referto: Referto, cfg: ServerConfig) -> None:
     if not cfg.tools:
         referto.aggiungi(
@@ -1060,6 +1308,7 @@ def esegui(percorso_config: str | Path) -> Referto:
     _perimetro(referto, cfg, percorso)
     _isolamento_dei_tool(referto, cfg)
     _scrivibilita(referto, cfg)
+    _dipendenze(referto, cfg)
     _vault(referto, cfg)
     _container(referto, cfg)
     _tool(referto, cfg)
