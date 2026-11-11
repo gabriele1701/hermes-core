@@ -1755,25 +1755,37 @@ def test_senza_la_dichiarazione_di_build_si_confronta_tutto():
     assert deriva.grave is True
 
 
-@pytest.mark.dipendenze_reali
 def test_build_assente_e_avviso_separato_e_referto_pronto(
-    tmp_path: Path, radice: Path
+    tmp_path: Path, radice: Path, monkeypatch
 ):
     """Il caso reale del 6 novembre, in forma di regressione.
 
     Il lock fissa una dipendenza di build che l'ambiente non ha. Deve
     uscirne un AVVISO con un nome proprio — non confuso con la deriva di
     runtime — e il referto deve restare PRONTO.
+
+    L'ambiente è **imposto qui**, e la prima stesura sbagliava proprio su
+    questo: dava per scontato che `setuptools` non fosse installato, cosa
+    vera su un venv appena creato e falsa appena il dispiegamento viene
+    riallineato al lock — che è l'esito corretto. Il test è caduto l'11
+    novembre per quell'allineamento, cioè per una macchina che era stata
+    *riparata*.
+
+    Era anche marcato `dipendenze_reali`, dichiarando un soggetto che non
+    ha: il soggetto è l'assenza di una dipendenza di build, che un test
+    deve imporre, non sperare dalla macchina su cui gira.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "requirements-build.in").write_text(BUILD_IN_FINTO, encoding="utf-8")
-    # Il pin di runtime deve combaciare con l'ambiente, altrimenti il test
-    # misurerebbe la deriva di runtime invece di quella di build.
-    versione = importlib.metadata.version("mcp")
     (repo / "requirements.lock").write_text(
-        f"mcp=={versione}\nsetuptools==0.0.1-inesistente\n", encoding="utf-8"
+        "mcp==2.3.0\nsetuptools==84.2.1\n", encoding="utf-8"
     )
+    from mcp_server import doctor as mod
+
+    # Il runtime combacia, la dipendenza di build manca: esattamente la
+    # situazione da misurare, e nessun'altra.
+    monkeypatch.setattr(mod, "_installate", lambda: {"mcp": "2.3.0"})
 
     referto = esegui(scrivi_config(tmp_path, radice, senza_tool=True, repo_root=repo))
 
