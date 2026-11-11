@@ -40,4 +40,5 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "slow: avvia processi veri e parla MCP su stdio (~1.5s l'uno). Saltabili durante l'iterazione con: pytest -m 'not slow'",
+    "dipendenze_reali: il soggetto del test è l'ambiente installato davvero, non il lock. Senza questo marker le dipendenze viste dai test sono quelle fissate dal lockfile, così una deriva reale fa cadere un test che la nomina invece di tutti quelli che leggono la radice del repo.",
 ]

@@ -156,6 +156,17 @@ superficie in più.
 .venv/bin/pip install --require-hashes --no-deps -r requirements.lock
 ```
 
+> **Lo stesso comando riallinea un ambiente che ha derivato.** Un `.venv`
+> creato *prima* del lockfile ha le versioni più recenti di allora, non quelle
+> fissate: è la situazione trovata sulla VM l'11 novembre, nove pacchetti
+> indietro di una patch o due. Il preflight la riporta come errore, e il
+> rimedio è questo comando.
+>
+> Non è un'operazione neutra: cambia le versioni di ciò che gira. Vale la pena
+> guardare l'elenco degli scostamenti che il preflight stampa **prima** di
+> lanciarlo, perché quello è il momento in cui l'aggiornamento viene rivisto —
+> e dopo non ci sarà un altro.
+
 **Senza isolamento di build.** È il passo che rende vera la frase «con gli hash
 obbligatori»:
 
@@ -244,10 +255,33 @@ girano i test. Non è una tautologia: se qualcuno aggiorna una dipendenza in
 reinstallare, quel test lo dice. È il solo posto dove la coerenza fra i due
 file viene misurata invece che assunta.
 
-Ne segue che la suite **non è ermetica** rispetto all'ambiente, e questo è
-voluto: come i controlli sui permessi e sull'interprete, quel test interroga
-la macchina vera. Un ambiente di sviluppo che devia dal lock fa diventare
-rossi quei test — e l'informazione è corretta, non un disturbo.
+Quel test è **uno**, e di proposito. La prima stesura non isolava gli altri:
+molti test usano la radice vera del repo, quindi leggevano il lock vero e
+confrontavano con l'ambiente vero. Eseguita sulla VM, dove il `.venv` era
+stato creato prima del lockfile, la suite ha prodotto **nove** rossi su
+configurazione, store, perimetro e wrapper — nessuno dei quali riguardava le
+dipendenze.
+
+Il controllo aveva ragione: la deriva c'era. Era la suite a essere accoppiata
+a uno stato che non dichiarava. Ora una fixture `autouse` presenta ai test le
+dipendenze **fissate dal lock**, e i casi il cui soggetto è l'ambiente vero si
+marcano `dipendenze_reali`:
+
+```sh
+pytest -m dipendenze_reali      # solo i casi che interrogano la macchina
+```
+
+Così una deriva reale fa cadere **un** test che la nomina, con le versioni
+divergenti nel messaggio, invece di nove che la nascondono. Il controllo resta
+nel referto del preflight: quello guarda sempre la macchina vera, ed è il suo
+mestiere.
+
+> **Il precedente.** Il 4 novembre «scrivibilità del codice» aveva rotto
+> quattro test allo stesso modo, e la risposta fu correggere il controllo,
+> perché non sapeva rispondere quando lo lanciava il proprietario del repo.
+> Qui il controllo sa rispondere e dice il vero, quindi la correzione va
+> dall'altra parte. Distinguere i due casi è il punto: un controllo che
+> sbaglia si corregge, un controllo che ha ragione si ascolta.
 
 ---
 

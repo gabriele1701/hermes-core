@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_server.doctor import Esito, esegui, main, stampa
+from mcp_server.doctor import NOME_LOCKFILE, Esito, esegui, main, stampa
 from mcp_server.executor import sha256_file
 
 #: Tutto il modulo è integrazione: ogni controllo che arriva all'handshake
@@ -31,6 +31,44 @@ SCRIPT = "agents/echo_agent/run.py"
 @pytest.fixture()
 def radice() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def dipendenze_conformi(request, monkeypatch):
+    """Isola i test dallo stato delle dipendenze installate.
+
+    Difetto trovato l'11 novembre eseguendo la suite sulla VM: il `.venv`
+    del dispiegamento era stato creato prima del lockfile e aveva nove
+    pacchetti a versioni più vecchie. Il controllo lo ha riportato — ed era
+    **corretto** — ma i test che usano la radice vera del repo leggono quel
+    lock, quindi **nove test** su configurazione, store, perimetro e wrapper
+    sono diventati rossi per una ragione che non ha nulla a che vedere con
+    ciò che verificano.
+
+    Il precedente è lo stesso del 4 novembre con «scrivibilità del codice»:
+    un fatto dell'ambiente che fa cadere test su altri argomenti. Lì la
+    risposta fu correggere il controllo, perché non sapeva rispondere. Qui
+    il controllo sa rispondere e dice il vero: è la **suite** a essere
+    accoppiata a uno stato che non dichiara.
+
+    Quindi le dipendenze installate diventano, per default, esattamente
+    quelle che il lock fissa: il controllo resta nel referto, ma non è più
+    una terza variabile nei test di altri. I casi il cui soggetto *è*
+    l'ambiente vero si marcano `dipendenze_reali` e vedono la macchina come
+    è. Una deriva reale fa cadere **un** test che la nomina, invece di nove
+    che la nascondono.
+    """
+    if request.node.get_closest_marker("dipendenze_reali"):
+        return
+
+    from mcp_server import doctor as mod
+
+    lock = Path(__file__).resolve().parent.parent / NOME_LOCKFILE
+    try:
+        pin = mod.leggi_lockfile(lock.read_text(encoding="utf-8"))
+    except OSError:  # pragma: no cover - il lock è versionato
+        pin = {}
+    monkeypatch.setattr(mod, "_installate", lambda: dict(pin))
 
 
 def scrivi_config(
@@ -1622,6 +1660,7 @@ def test_lockfile_illeggibile_e_errore(tmp_path: Path, radice: Path):
     assert referto.pronto is False
 
 
+@pytest.mark.dipendenze_reali
 def test_deriva_dall_ambiente_reale_rilevata(tmp_path: Path, radice: Path):
     """Un pin che l'ambiente non può soddisfare deve diventare un ERRORE.
 
@@ -1716,6 +1755,7 @@ def test_senza_la_dichiarazione_di_build_si_confronta_tutto():
     assert deriva.grave is True
 
 
+@pytest.mark.dipendenze_reali
 def test_build_assente_e_avviso_separato_e_referto_pronto(
     tmp_path: Path, radice: Path
 ):
@@ -1748,6 +1788,7 @@ def test_build_assente_e_avviso_separato_e_referto_pronto(
     assert referto.pronto is True
 
 
+@pytest.mark.dipendenze_reali
 def test_il_lock_reale_del_repo_combacia_con_questo_ambiente(radice: Path):
     """Il lock versionato descrive l'ambiente in cui girano i test.
 
