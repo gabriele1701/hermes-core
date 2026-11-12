@@ -2172,10 +2172,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if referto.pronto else 1
 
 
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
-
-
 # --------------------------------------------------------------------------- #
 # Spedizione del log a una seconda macchina (A5)
 #
@@ -2634,3 +2630,5 @@ def _ultimo_giro(referto: Referto, sped: Spedizione) -> None:
             Esito.OK,
             f"copia remota a {remoto} byte{quando}{coda}",
         )
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

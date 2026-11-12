@@ -11,6 +11,7 @@ import importlib.metadata
 import io
 import os
 import shutil
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -1873,3 +1874,41 @@ def test_il_lock_reale_del_repo_combacia_con_questo_ambiente(radice: Path):
     )
     assert deriva.diverse == [], f"versioni divergenti: {deriva.diverse}"
     assert deriva.mancanti == [], f"pacchetti di runtime mancanti: {deriva.mancanti}"
+
+
+# --------------------------------------------------------------------------- #
+# Il preflight come PROGRAMMA, non come modulo importato
+# --------------------------------------------------------------------------- #
+
+
+def test_il_preflight_gira_anche_lanciato_come_programma(tmp_path: Path, radice: Path):
+    """Importarlo e lanciarlo non sono la stessa cosa, e la differenza morde.
+
+    Difetto trovato sulla VM, non qui: una funzione nuova era finita in
+    fondo al file, **dopo** il blocco ``if __name__ == "__main__"``. Da
+    importato il modulo si carica tutto e la funzione esiste; lanciato con
+    ``python -m``, l'esecuzione arriva al guardiano, chiama ``main()``, e la
+    funzione non è ancora stata definita: ``NameError`` al posto del referto.
+
+    Tutta la suite importava ``esegui`` e ``main``, quindi non poteva
+    vederlo. Questo test lancia un processo vero, che è il modo in cui il
+    preflight viene usato davvero:
+
+        sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml
+
+    Non si verifica l'esito — dipende dalla macchina — ma che il programma
+    arrivi in fondo e stampi un referto invece di un traceback.
+    """
+    percorso = scrivi_config(tmp_path, radice)
+
+    esito = subprocess.run(
+        [sys.executable, "-m", "mcp_server.doctor", str(percorso)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        cwd=radice,
+    )
+
+    assert "Traceback" not in esito.stderr, esito.stderr[-800:]
+    ultima = esito.stdout.strip().splitlines()[-1]
+    assert ultima.startswith(("PRONTO", "NON PRONTO")), esito.stdout[-500:]
