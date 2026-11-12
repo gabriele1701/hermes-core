@@ -17,4 +17,4 @@
 # pin» e li lascia fuori per default, scrivendo solo un'avvertenza in fondo
 # al file. Serve `--allow-unsafe`. La procedura in docs/dipendenze.md la
 # riporta; un lock senza la riga `setuptools==` non chiude niente.
-setuptools>=68
+setuptools>=84.2.1
