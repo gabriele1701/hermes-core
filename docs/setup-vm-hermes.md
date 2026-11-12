@@ -1203,8 +1203,11 @@ appoggia un momento in chiaro — è pubblica, non è un segreto:
 sudo install -m 644 -o root -g root \
      /var/lib/hermes-ship/id_ed25519.pub /tmp/hermes-ship.pub
 scp /tmp/hermes-ship.pub "$COLLECTOR":~/
-rm /tmp/hermes-ship.pub
+sudo rm /tmp/hermes-ship.pub
 ```
+
+Il `sudo` sulla rimozione serve davvero: `install -o root` intesta il file a
+root, e lo sticky bit di `/tmp` lascia cancellare solo al proprietario.
 
 ```sh
 # sul collector
