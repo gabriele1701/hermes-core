@@ -2377,6 +2377,11 @@ def _spedizione(
     modo = stat.S_IMODE(st.st_mode)
     servizio = _utente_di_servizio(cfg)
     if proprietario != "root" or modo & 0o022:
+        # Si segnala e si PROSEGUE. Una destinazione riscrivibile è un
+        # errore grave, ma non impedisce di leggere il file e dire anche il
+        # resto: fermarsi qui manderebbe chi ripara a scoprire il problema
+        # successivo solo dopo aver corretto questo, che è il difetto già
+        # trovato due volte altrove in questo preflight.
         referto.aggiungi(
             "configurazione della spedizione",
             Esito.ERRORE,
@@ -2388,7 +2393,6 @@ def _spedizione(
             f"o dal mittente non è una destinazione: un compromesso "
             f"spedirebbe le prove a sé stesso.",
         )
-        return
 
     try:
         sped = leggi_spedizione(testo)

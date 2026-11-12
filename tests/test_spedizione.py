@@ -467,6 +467,37 @@ def test_una_destinazione_riscrivibile_e_un_errore(tmp_path: Path):
 
 
 @pytest.mark.slow
+def test_una_destinazione_riscrivibile_non_zittisce_gli_altri_controlli(
+    tmp_path: Path,
+):
+    """Chi ripara deve vedere tutti i problemi, non il primo.
+
+    Trovato dalla CI, e per il motivo giusto: i primi test di questo blocco
+    speravano di girare da root — dove il file di configurazione nasce di
+    root e il controllo sulla proprietà non scatta — invece di imporre la
+    proprietà che stavano misurando. Sul runner scattava, il preflight si
+    fermava lì, e i controlli successivi non esistevano.
+
+    La correzione non è stata nel test: quel controllo segnala e prosegue,
+    che è la regola già applicata al perimetro e al wrapper.
+    """
+    spedizione = tmp_path / "log-shipping.conf"
+    spedizione.write_text(
+        "COLLECTOR_HOST=h\nCOLLECTOR_UTENTE=u\nCHIAVE=/k\n"
+        "KNOWN_HOSTS=/kh\nSTATO_DIR=/s\n"
+        "CANALE_audit=/var/log/un-altro-file.jsonl\n",
+        encoding="utf-8",
+    )
+    spedizione.chmod(0o666)
+
+    referto = esegui(_config_con_spedizione(tmp_path, spedizione))
+
+    assert _controllo(referto, "configurazione della spedizione").esito is Esito.ERRORE
+    secondo = _controllo(referto, "canale del log d'audit")
+    assert secondo.esito is Esito.ERRORE, "il secondo problema è stato zittito"
+
+
+@pytest.mark.slow
 def test_spedire_un_file_diverso_da_quello_che_si_scrive_e_un_errore(tmp_path: Path):
     """Due fonti per lo stesso file sono due fonti che divergono.
 
