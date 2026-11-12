@@ -45,6 +45,7 @@ from mcp_server.executor import (
 )
 from mcp_server.overrides import NOME_FILE as NOME_FILE_OVERRIDE
 from mcp_server.overrides import OverrideStore, OverrideStoreError
+from mcp_server.permessi import LETTURA, accesso
 from mcp_server.scope import ScopeAllowlist, ScopeError
 from mcp_server.slots import NOME_DIR as NOME_DIR_POSTI
 from mcp_server.slots import SlotPool
@@ -137,6 +138,66 @@ def _radice(referto: Referto, cfg: ServerConfig) -> None:
     referto.aggiungi("repo_root", Esito.OK, str(cfg.repo_root))
 
 
+def _permessi_riservati(referto: Referto, nome: str, percorso: Path) -> None:
+    """Riporta chi legge un file che dovrebbe leggere il solo proprietario.
+
+    Non basta guardare ``modo & 0o077``. Su un percorso con ACL POSIX i bit
+    di gruppo **sono la maschera**, non i permessi del gruppo proprietario:
+    un file ``0600`` a cui è stata concessa la lettura a un utente singolo si
+    presenta come ``0640``. Letto con i soli bit, quel file sembra una fuga,
+    e il rimedio ovvio — ``chmod 600`` — azzera la maschera e con essa i
+    permessi effettivi della concessione, lasciandola elencata in ``getfacl``
+    come se valesse ancora.
+
+    Era il comportamento di prima, in tutte e due le direzioni: il writer
+    annullava l'ACL a ogni avvio, e questo controllo suggeriva di rifarlo a
+    mano. Un rimedio che disattiva un altro controllo è peggio di un
+    controllo assente, perché chi lo esegue crede di aver sistemato qualcosa.
+
+    Quindi si distingue: ``other`` e il gruppo proprietario sono accessi
+    larghi e restano un avviso; una voce **nominata** è una concessione
+    deliberata di chi amministra la macchina, si dichiara e si elenca.
+
+    L'elenco dei lettori è lo stesso nei due casi, e completo: un avviso che
+    nominasse solo il primo problema trovato manderebbe chi ripara a
+    scoprire il secondo dopo la correzione.
+    """
+    acc = accesso(percorso)
+    rimedi = []
+    if acc.altri & LETTURA:
+        rimedi.append(f"chmod o-rwx {percorso}")
+    if acc.gruppo_proprietario & LETTURA:
+        # Il rimedio cambia con la forma: una chmod su un percorso con ACL
+        # riscriverebbe la maschera invece dei permessi del gruppo.
+        rimedi.append(
+            f"setfacl -m g::--- {percorso}"
+            if acc.estesa
+            else f"chmod g-rwx {percorso}"
+        )
+
+    if rimedi:
+        referto.aggiungi(
+            nome,
+            Esito.AVVISO,
+            f"permessi {acc.modo:04o}: oltre al proprietario legge "
+            f"{acc.descrivi_lettori()}",
+            "; ".join(rimedi),
+        )
+        return
+
+    if acc.lettori_nominati:
+        referto.aggiungi(
+            nome,
+            Esito.OK,
+            f"{percorso} (permessi {acc.modo:04o}: i bit di gruppo sono la "
+            f"maschera dell'ACL; oltre al proprietario legge "
+            f"{acc.descrivi_lettori()})",
+        )
+        return
+
+    referto.aggiungi(nome, Esito.OK, f"{percorso} (permessi {acc.modo:04o})")
+
+
 def _log(
     referto: Referto, cfg: ServerConfig, percorso_config: Path | None = None
 ) -> None:
@@ -154,16 +215,7 @@ def _log(
         )
         return
 
-    modo = stat.S_IMODE(percorso.stat().st_mode)
-    if modo & 0o077:
-        referto.aggiungi(
-            "log d'audit",
-            Esito.AVVISO,
-            f"permessi {modo:04o}: leggibile da altri utenti",
-            f"chmod 600 {percorso}",
-        )
-    else:
-        referto.aggiungi("log d'audit", Esito.OK, f"{percorso} (permessi {modo:04o})")
+    _permessi_riservati(referto, "log d'audit", percorso)
 
     if not _append_only(percorso):
         referto.aggiungi(
@@ -283,7 +335,6 @@ def _stato(
         )
         return
 
-    modo = stat.S_IMODE(st.st_mode)
     proprietario = _utente(st.st_uid)
     servizio = _utente_di_servizio(cfg)
     if servizio is not None and proprietario != servizio:
@@ -304,13 +355,7 @@ def _stato(
             f"il file così.",
         )
 
-    if modo & 0o077:
-        referto.aggiungi(
-            "permessi dello store",
-            Esito.AVVISO,
-            f"permessi {modo:04o}: leggibile da altri utenti",
-            f"chmod 600 {percorso}",
-        )
+    _permessi_riservati(referto, "permessi dello store", percorso)
 
     if esito.scartate:
         referto.aggiungi(
@@ -327,7 +372,7 @@ def _stato(
             Esito.OK,
             f"{percorso}: {esito.righe} righe, "
             f"{len(esito.tiers)} tool con innalzamento persistente "
-            f"(permessi {modo:04o})",
+            f"(permessi {stat.S_IMODE(st.st_mode):04o})",
         )
 
 

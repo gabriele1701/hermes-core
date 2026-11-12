@@ -72,11 +72,11 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
-import stat
 from pathlib import Path
 from types import TracebackType
 
 from mcp_server.contracts import OwnerAgent
+from mcp_server.permessi import restringi
 
 _FILE_MODE = 0o600
 _DIR_MODE = 0o700
@@ -139,7 +139,7 @@ class SlotPool:
             perché un pool che fallisce in silenzio diventa «nessun limite».
         """
         self._directory.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
-        _restringi(self._directory, _DIR_MODE)
+        restringi(self._directory, _DIR_MODE)
 
         for indice in range(self._posti):
             percorso = self.percorso(indice)
@@ -151,7 +151,7 @@ class SlotPool:
                 if err.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
                     continue  # occupato da un altro processo
                 raise
-            _restringi(percorso, _FILE_MODE)
+            restringi(percorso, _FILE_MODE)
             # Il pid serve solo a chi guarda: il lock vale di per sé, e il
             # contenuto non viene mai letto per decidere qualcosa.
             _annota_pid(fd)
@@ -244,14 +244,6 @@ def _annota_pid(fd: int) -> None:
     except OSError:  # pragma: no cover
         pass
 
-
-def _restringi(percorso: Path, modo: int) -> None:
-    """Impone i permessi se non sono già quelli, tollerando un rifiuto."""
-    try:
-        if stat.S_IMODE(percorso.stat().st_mode) != modo:
-            os.chmod(percorso, modo)
-    except OSError:
-        pass
 
 
 __all__ = ["NOME_DIR", "Posto", "SlotPool", "SlotUnavailable"]

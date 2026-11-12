@@ -100,13 +100,13 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
-import stat
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
 from mcp_server.contracts import OwnerAgent, RiskTier
+from mcp_server.permessi import restringi
 
 _FILE_MODE = 0o600
 _DIR_MODE = 0o700
@@ -301,8 +301,8 @@ class OverrideStore:
             os.fsync(fd)
         finally:
             os.close(fd)
-        _restringi(self._path, _FILE_MODE)
-        _restringi(self._path.parent, _DIR_MODE)
+        restringi(self._path, _FILE_MODE)
+        restringi(self._path.parent, _DIR_MODE)
 
 
 def _interpreta(riga: str) -> tuple[str, RiskTier] | None:
@@ -316,20 +316,6 @@ def _interpreta(riga: str) -> tuple[str, RiskTier] | None:
     if not isinstance(tool_id, str) or not tool_id:
         return None
     return tool_id, tier
-
-
-def _restringi(percorso: Path, modo: int) -> None:
-    """Impone i permessi se non sono già quelli, tollerando un rifiuto.
-
-    Stessa ragione di ``audit.py``: un file irrigidito con ``chattr +a``
-    rifiuta la ``chmod`` anche al proprietario, e insistere renderebbe lo store
-    non scrivibile dal proprio scrittore.
-    """
-    try:
-        if stat.S_IMODE(percorso.stat().st_mode) != modo:
-            os.chmod(percorso, modo)
-    except OSError:
-        pass
 
 
 __all__ = [

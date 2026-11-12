@@ -50,19 +50,28 @@ Un verde qui dice che **il codice è coerente**, non che il dispiegamento è
 sicuro. La distinzione non è accademica: quasi tutti i presidi di sicurezza
 di questo progetto stanno fuori dalla portata di un runner.
 
-Misurato, non supposto: nella suite, **due soli test** eseguono un'operazione
-privilegiata (`chattr +a`), e saltano da soli dove non si può. Tutto il
-resto che riguarda `sudo`, `systemd-run` e le ACL verifica **stringhe** —
-l'`argv` che costruiremmo, o il testo del rimedio. Nessuno di quei comandi
-viene eseguito.
+Misurato, non supposto: nella suite, **tre test** hanno bisogno di
+privilegi — due per `chattr +a`, uno per leggere un file sotto un'altra
+identità — e saltano da soli dove non si può. Tutto il resto che riguarda
+`sudo` e `systemd-run` verifica **stringhe**: l'`argv` che costruiremmo, o
+il testo del rimedio. Nessuno di quei comandi viene eseguito.
+
+Un'eccezione, dal novembre 2026: la **semantica** delle ACL POSIX è
+verificata davvero, perché `tests/test_permessi.py` scrive e rilegge
+`system.posix_acl_access` sul filesystem del runner. È così che si misura
+che una `chmod` azzera la maschera — il difetto che faceva annullare dal
+writer del log ogni concessione di lettura su quel log. Verificata è la
+regola; **non** la sua applicazione su una macchina vera, che resta sotto.
 
 Quindi la CI non dice niente su:
 
 - **l'isolamento dei tool**: che `sudo` sia autorizzato, che il wrapper sia
   di root, che `systemd-run` applichi davvero `MemoryMax` e `TasksMax`, che
   l'utente dei tool non abbia una shell;
-- **le ACL**: che `hermes-tool` riesca ad aprire gli script e **non** riesca
-  a leggere `config/`, `docs/`, `mcp_server/`;
+- **le ACL della macchina**: che `hermes-tool` riesca ad aprire gli script e
+  **non** riesca a leggere `config/`, `docs/`, `mcp_server/`. Che la regola
+  sulla maschera sia giusta lo dice la CI; che l'ACL giusta sia stata messa
+  su `/opt/hermes-core` no;
 - **l'append-only** del log d'audit (`chattr +a`): il test salta sui runner;
 - **il canale SSH**: drop-in, `ForceCommand`, chiavi fuori dalla home;
 - **il perimetro** come fatto di rete: `scope.toml` è validato come dato, non
