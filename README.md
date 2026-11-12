@@ -47,7 +47,9 @@ hermes-core/
 ├── agents/
 │   ├── orchestrator/  # orchestratore minimo (invoca un agente, riceve risultato)
 │   └── echo_agent/    # agente dummy conforme al contratto (per i test e2e)
-├── config/            # *.example.yaml versionati; copie reali ignorate
+├── bin/               # avvio del server, wrapper dei tool, spedizione del log
+├── config/            # *.example.* versionati; copie reali ignorate
+├── docs/              # setup della VM, debito di sicurezza, CI, dipendenze
 ├── logs/              # log d'audit JSONL a runtime (non versionati)
 └── tests/             # unit + end-to-end
 ```

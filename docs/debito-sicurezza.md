@@ -105,17 +105,23 @@ strutturale. Ragionando su quel confronto è diventato evidente che la crescita
 illimitata resta vera, e non registrata, per il log d'audit: lì ogni
 invocazione scrive, comprese le richieste ripetute che lo store non memorizza.
 
-**Perché non si risolve con una rotazione locale.** Ruotare il log in locale
-significa poter perdere righe, cioè perdere la traccia che il log esiste per
-conservare. Il problema e la soluzione sono gli stessi della tamper-evidence:
-serve una **copia fuori dall'host**.
+**Perché non si risolveva con una rotazione locale.** Ruotare il log in
+locale significa poter perdere righe, cioè perdere la traccia che il log
+esiste per conservare. Il problema e la soluzione erano gli stessi della
+tamper-evidence: serviva una **copia fuori dall'host**.
 
-**Condizione di chiusura:** spedizione a un collector esterno (già prevista in
-`docs/setup-vm-hermes.md`). Con la copia remota al sicuro, la rotazione della
-copia locale diventa un'operazione ordinaria e non una perdita di prove.
+**La copia c'è, da A5** (`docs/setup-vm-hermes.md` §10). Il blocco è quindi
+caduto: ruotare non è più una perdita di prove, perché le righe sono già
+altrove. Resta aperto il resto della voce, e ora è una cosa più piccola.
+
+**Cosa manca:** la rotazione vera e propria, che è **deliberatamente
+manuale**. Un rotatore automatico che sbagliasse l'offset distruggerebbe
+prove da solo, ogni notte, senza che nessuno guardi. La regola quando la si
+farà: si tronca **solo fino all'offset confermato dal collector**, mai oltre.
 
 **Mitigazione intanto:** sorvegliare lo spazio e, quando serve, ruotare a mano
-con `chattr -a`, copia, troncamento, `chattr +a` — annotando l'intervento.
+con `chattr -a`, copia, troncamento, `chattr +a` — annotando l'intervento, e
+dopo aver verificato che la copia remota sia allineata.
 
 ---
 
@@ -181,10 +187,25 @@ concorrente; e senza un ancoraggio esterno dell'hash di coda non sposta il
 modello di minaccia, perché chi controlla file e codice ricalcola l'intera
 catena.
 
-**Mitigazione:** `chattr +a` sul file di log (root per metterlo o toglierlo,
-quindi efficace contro un processo non privilegiato) e spedizione a un
-collector esterno, dove una copia già uscita dall'host non è raggiungibile da
-una manomissione locale.
+**Mitigazione, dal novembre 2026 in due pezzi.** `chattr +a` sul file (root
+per metterlo o toglierlo, quindi efficace contro un processo non
+privilegiato); e **A5**, che non si limita a tenere una copia fuori
+dall'host ma la rende un rilevatore: il ricevente rifiuta qualunque offset
+che non sia la dimensione della sua copia, quindi un troncamento o una
+riscrittura locale producono un **sintomo** invece di un silenzio. Una copia
+che nessuno confronta sarebbe un backup, non una prova.
+
+**Cosa resta scoperto, e va saputo:**
+
+* **le righe false.** A5 difende dalla cancellazione a posteriori, non da un
+  `hermes` compromesso che appende righe mentite. Quelle finiscono anche
+  nella copia;
+* **la finestra di cinque minuti.** Chi ottiene root e ripulisce prima della
+  spedizione successiva cancella le righe di quella finestra, e nessuno lo
+  saprà. Stringere la cadenza stringe la finestra e non la chiude;
+* **fermare il mittente.** Root può disabilitare il timer. Non è silenzioso —
+  il preflight riporta l'età dell'ultimo giro riuscito — ma è un avviso da
+  guardare, non un blocco.
 
 **Da rivalutare se:** il log dovrà reggere da solo come prova davanti a
 terzi. In quel caso la strada è un digest periodico firmato con chiave

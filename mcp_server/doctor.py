@@ -16,6 +16,7 @@ Esiti: ``OK`` tutto a posto · ``AVVISO`` funziona ma c'è qualcosa da sapere ·
 
 from __future__ import annotations
 
+import datetime as _dt
 import importlib.metadata
 import json
 import os
@@ -1369,6 +1370,7 @@ def esegui(percorso_config: str | Path) -> Referto:
     _container(referto, cfg)
     _tool(referto, cfg)
     _canale_ssh(referto, cfg)
+    _spedizione(referto, cfg, percorso)
     _handshake(referto, percorso)
     return referto
 
@@ -2172,3 +2174,447 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
+
+
+# --------------------------------------------------------------------------- #
+# Spedizione del log a una seconda macchina (A5)
+#
+# Questo blocco ha un limite che va detto prima di leggerlo: gira su
+# `hermesmcp`, e la copia remota non sta qui. Può dire che il mittente è
+# installato, che punta al file giusto, che l'identità che spedisce riesce a
+# leggerlo e com'è andato l'ultimo giro. NON può dire che la copia esista —
+# per quello serve guardare dal collector, ed è l'unica macchina la cui
+# parola non sia riscrivibile da chi manomette questa.
+# --------------------------------------------------------------------------- #
+
+#: Identità che spedisce. Vive anche in `bin/hermes-log-ship` (nell'unità di
+#: systemd) e in `config/log-shipping.example.conf`: un test confronta le
+#: copie, come per `hermes-tool`.
+UTENTE_SPEDIZIONE = "hermes-ship"
+
+#: Il mittente si installa fuori dall'albero di git, come il wrapper dei
+#: tool, e per la stessa ragione: un `git checkout` cambierebbe il codice che
+#: custodisce le prove.
+MITTENTE_INSTALLATO = Path("/usr/local/sbin/hermes-log-ship")
+MITTENTE_NEL_REPO = Path("bin/hermes-log-ship")
+
+_CHIAVI_SPEDIZIONE = frozenset(
+    {"COLLECTOR_HOST", "COLLECTOR_UTENTE", "CHIAVE", "KNOWN_HOSTS", "STATO_DIR"}
+)
+_NOME_CANALE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+#: Oltre questa età l'ultima spedizione riuscita è un avviso. Non è la
+#: cadenza del timer moltiplicata per qualcosa, di proposito: legare questo
+#: numero alla cadenza significherebbe tenerne una terza copia, e cambiare
+#: il timer renderebbe muto il controllo senza che nessuno se ne accorga. È
+#: un tetto largo, buono per qualunque cadenza ragionevole.
+SPEDIZIONE_VECCHIA_SEC = 1800
+
+
+class SpedizioneError(Exception):
+    """Configurazione della spedizione assente, malformata o incoerente."""
+
+
+@dataclass(frozen=True, slots=True)
+class Spedizione:
+    """Ciò che il mittente userà, letto dalla stessa fonte che userà lui."""
+
+    collector_host: str
+    collector_utente: str
+    chiave: Path
+    known_hosts: Path
+    stato_dir: Path
+    canali: tuple[tuple[str, Path], ...]
+
+
+def leggi_spedizione(testo: str) -> Spedizione:
+    """Legge `log-shipping.conf` con le stesse regole dello script di shell.
+
+    Una chiave ignota è un errore e non un campo da ignorare: è la regola
+    del caricatore della configurazione del server, applicata qui perché il
+    file è lo stesso che decide dove finiscono le prove.
+    """
+    valori: dict[str, str] = {}
+    canali: list[tuple[str, Path]] = []
+
+    for numero, riga in enumerate(testo.splitlines(), start=1):
+        riga = riga.strip()
+        if not riga or riga.startswith("#"):
+            continue
+        if "=" not in riga:
+            raise SpedizioneError(f"riga {numero}: manca '='")
+        chiave, _, valore = riga.partition("=")
+        chiave, valore = chiave.strip(), valore.strip()
+        if chiave.startswith("CANALE_"):
+            nome = chiave[len("CANALE_") :]
+            if not _NOME_CANALE.match(nome):
+                raise SpedizioneError(f"riga {numero}: nome di canale non valido: {nome}")
+            if not valore.startswith("/"):
+                raise SpedizioneError(
+                    f"riga {numero}: il canale {nome} non ha un percorso assoluto"
+                )
+            canali.append((nome, risolvi_percorso(Path(valore))))
+            continue
+        if chiave not in _CHIAVI_SPEDIZIONE:
+            raise SpedizioneError(f"riga {numero}: chiave non riconosciuta: {chiave}")
+        valori[chiave] = valore
+
+    mancanti = sorted(_CHIAVI_SPEDIZIONE - set(valori))
+    if mancanti:
+        raise SpedizioneError(f"chiavi obbligatorie assenti: {', '.join(mancanti)}")
+    if not canali:
+        raise SpedizioneError("nessun canale dichiarato")
+
+    return Spedizione(
+        collector_host=valori["COLLECTOR_HOST"],
+        collector_utente=valori["COLLECTOR_UTENTE"],
+        chiave=Path(valori["CHIAVE"]),
+        known_hosts=Path(valori["KNOWN_HOSTS"]),
+        stato_dir=Path(valori["STATO_DIR"]),
+        canali=tuple(canali),
+    )
+
+
+def _ostacoli_alla_lettura(percorso: Path, utente: str) -> list[str]:
+    """Cosa impedirebbe a ``utente`` di leggere ``percorso``, se qualcosa.
+
+    Guarda i permessi **effettivi**, maschera dell'ACL applicata: è il meglio
+    che si possa fare da qui, e dal novembre 2026 è accurato — prima un'ACL
+    si sarebbe letta come un permesso di gruppo.
+
+    Resta uno sguardo, non una lettura. La lettura vera la fa il mittente
+    ogni volta che gira, e il suo esito sta nel file di stato: è quello il
+    controllo che riproduce l'operazione, e questo serve a dire **perché**
+    quando il mittente non ci riesce.
+    """
+    problemi: list[str] = []
+
+    def legge(acc, bit: int) -> bool:
+        if acc.altri & bit:
+            return True
+        return any(n.permessi & bit for n in acc.nominati if n.nome == utente)
+
+    for directory in reversed([*percorso.parents]):
+        try:
+            acc = accesso(directory)
+        except OSError:
+            # Una directory che non riusciamo a interrogare non è una
+            # risposta: si dice, non si deduce.
+            problemi.append(f"{directory}: non interrogabile da qui")
+            continue
+        if not legge(acc, 0o1):
+            problemi.append(f"{directory}: nessun transito")
+
+    try:
+        acc = accesso(percorso)
+    except OSError as err:
+        problemi.append(f"{percorso}: {err.strerror}")
+        return problemi
+    if not legge(acc, 0o4):
+        problemi.append(f"{percorso}: nessuna lettura")
+    return problemi
+
+
+def _stato_di_un_canale(stato_dir: Path, canale: str) -> dict[str, str] | None:
+    percorso = stato_dir / f"{canale}.stato"
+    try:
+        testo = percorso.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    valori: dict[str, str] = {}
+    for riga in testo.splitlines():
+        chiave, _, valore = riga.partition("=")
+        valori[chiave.strip()] = valore.strip()
+    return valori
+
+
+def _eta(ts: str) -> float | None:
+    try:
+        istante = _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.UTC
+        )
+    except ValueError:
+        return None
+    return (_dt.datetime.now(tz=_dt.UTC) - istante).total_seconds()
+
+
+def _spedizione(
+    referto: Referto, cfg: ServerConfig, percorso_config: Path | None = None
+) -> None:
+    """Verifica che la traccia esca davvero da questa macchina.
+
+    Vale l'invariante applicata a perimetro e isolamento: **assente è
+    diverso da rotto**. Non configurata è un AVVISO — il server funziona e
+    il log vive solo qui, che è una proprietà in meno. Configurata e
+    incoerente è un ERRORE, perché lì qualcuno crede di avere una copia
+    fuori dall'host e non ce l'ha, che è il caso peggiore dei due.
+    """
+    if cfg.log_shipping is None:
+        referto.aggiungi(
+            "spedizione del log",
+            Esito.AVVISO,
+            "non configurata: il log d'audit vive solo su questa macchina",
+            "Finché la copia sta solo qui, chi ottiene root può riscriverla "
+            "e il log non è né ruotabile né a prova di manomissione.\n"
+            "             Procedura in docs/setup-vm-hermes.md §10.",
+        )
+        return
+
+    try:
+        testo = cfg.log_shipping.read_text(encoding="utf-8")
+        st = cfg.log_shipping.stat()
+    except OSError as err:
+        referto.aggiungi(
+            "spedizione del log",
+            Esito.ERRORE,
+            f"configurata ma non leggibile: {err}",
+            f"Attesa in {cfg.log_shipping}, di root e 0644. "
+            f"Modello: config/log-shipping.example.conf",
+        )
+        return
+
+    proprietario = _utente(st.st_uid)
+    modo = stat.S_IMODE(st.st_mode)
+    servizio = _utente_di_servizio(cfg)
+    if proprietario != "root" or modo & 0o022:
+        referto.aggiungi(
+            "configurazione della spedizione",
+            Esito.ERRORE,
+            f"{cfg.log_shipping} è di {proprietario} con permessi {modo:04o}: "
+            f"chi spedisce può riscrivere dove spedisce",
+            f"sudo chown root: {cfg.log_shipping} && "
+            f"sudo chmod 644 {cfg.log_shipping}\n"
+            f"             Una destinazione riscrivibile da {servizio or 'il servizio'} "
+            f"o dal mittente non è una destinazione: un compromesso "
+            f"spedirebbe le prove a sé stesso.",
+        )
+        return
+
+    try:
+        sped = leggi_spedizione(testo)
+    except SpedizioneError as err:
+        referto.aggiungi(
+            "configurazione della spedizione",
+            Esito.ERRORE,
+            f"non interpretabile: {err}",
+            "Il mittente leggerà lo stesso file con le stesse regole: "
+            "finché non è valido, non spedisce niente.",
+        )
+        return
+
+    nomi = ", ".join(nome for nome, _ in sped.canali)
+    referto.aggiungi(
+        "spedizione del log",
+        Esito.OK,
+        f"{sped.collector_utente}@{sped.collector_host} · canali: {nomi} · "
+        f"la copia remota NON è verificabile da qui (va guardata dal collector)",
+    )
+
+    # -- il canale `audit` e `log_path` devono essere lo stesso file -------- #
+    canali = dict(sped.canali)
+    atteso = canali.get("audit")
+    if atteso is None:
+        referto.aggiungi(
+            "canale del log d'audit",
+            Esito.ERRORE,
+            "nessun canale 'audit' dichiarato: il log d'audit non viene spedito",
+            f"Aggiungere CANALE_audit = {cfg.log_path} a {cfg.log_shipping}",
+        )
+    elif atteso != risolvi_percorso(cfg.log_path):
+        referto.aggiungi(
+            "canale del log d'audit",
+            Esito.ERRORE,
+            f"spedisce {atteso}, ma il server scrive su {cfg.log_path}",
+            "Due fonti per lo stesso file sono due fonti che divergono. "
+            "Spedire diligentemente il file sbagliato è il modo peggiore di "
+            "avere una copia: allineare CANALE_audit a server.log_path.",
+        )
+    else:
+        referto.aggiungi(
+            "canale del log d'audit",
+            Esito.OK,
+            f"coincide con server.log_path ({cfg.log_path})",
+        )
+
+    _mittente_installato(referto, cfg)
+    _identita_che_spedisce(referto, sped)
+    _ultimo_giro(referto, sped)
+
+
+def _mittente_installato(referto: Referto, cfg: ServerConfig) -> None:
+    """Il mittente in esecuzione deve essere quello del repo.
+
+    Stessa regola del wrapper dei tool, e stesso motivo: il programma vive
+    fuori dall'albero di git perché un `git checkout` non debba poterlo
+    cambiare, e il prezzo è che dopo un aggiornamento va reinstallato. Il
+    `diff` fra i due percorsi è la domanda, e questo controllo è il `diff`.
+    """
+    nel_repo = cfg.repo_root / MITTENTE_NEL_REPO
+    try:
+        installato = MITTENTE_INSTALLATO.read_bytes()
+        st = MITTENTE_INSTALLATO.stat()
+    except OSError as err:
+        referto.aggiungi(
+            "mittente installato",
+            Esito.ERRORE,
+            f"{MITTENTE_INSTALLATO}: {err.strerror}",
+            f"sudo install -m 755 -o root -g root {nel_repo} {MITTENTE_INSTALLATO}",
+        )
+        return
+
+    proprietario = _utente(st.st_uid)
+    modo = stat.S_IMODE(st.st_mode)
+    if proprietario != "root" or modo & 0o022:
+        referto.aggiungi(
+            "mittente installato",
+            Esito.ERRORE,
+            f"{MITTENTE_INSTALLATO} è di {proprietario} con permessi {modo:04o}: "
+            f"scrivibile da chi non deve",
+            f"sudo chown root: {MITTENTE_INSTALLATO} && "
+            f"sudo chmod 755 {MITTENTE_INSTALLATO}",
+        )
+        return
+
+    try:
+        atteso = nel_repo.read_bytes()
+    except OSError:
+        referto.aggiungi(
+            "mittente installato",
+            Esito.AVVISO,
+            f"{MITTENTE_INSTALLATO} presente, ma {nel_repo} non è leggibile: "
+            f"non si può dire se sono la stessa cosa",
+        )
+        return
+
+    if installato != atteso:
+        referto.aggiungi(
+            "mittente installato",
+            Esito.AVVISO,
+            f"{MITTENTE_INSTALLATO} è diverso da {nel_repo}",
+            f"diff {nel_repo} {MITTENTE_INSTALLATO}\n"
+            f"             Se il repo è più recente: "
+            f"sudo install -m 755 -o root -g root {nel_repo} {MITTENTE_INSTALLATO}",
+        )
+        return
+
+    referto.aggiungi(
+        "mittente installato",
+        Esito.OK,
+        f"{MITTENTE_INSTALLATO} (di root, 0{modo:o}) identico alla copia del repo",
+    )
+
+
+def _identita_che_spedisce(referto: Referto, sped: Spedizione) -> None:
+    """Chi spedisce deve esistere, leggere i canali, e non essere il servizio."""
+    try:
+        pwd.getpwnam(UTENTE_SPEDIZIONE)
+    except KeyError:
+        referto.aggiungi(
+            "identità che spedisce",
+            Esito.ERRORE,
+            f"l'utente {UTENTE_SPEDIZIONE!r} non esiste: il timer non partirà",
+            f"sudo useradd --system --no-create-home "
+            f"--shell /usr/sbin/nologin {UTENTE_SPEDIZIONE}",
+        )
+        return
+
+    problemi: list[str] = []
+    for nome, percorso in sped.canali:
+        for guasto in _ostacoli_alla_lettura(percorso, UTENTE_SPEDIZIONE):
+            problemi.append(f"{nome}: {guasto}")
+
+    if problemi:
+        referto.aggiungi(
+            "lettura dei canali dal mittente",
+            Esito.ERRORE,
+            f"{UTENTE_SPEDIZIONE} non arriva a {len(problemi)} percorsi: "
+            + " · ".join(problemi),
+            "Un file append-only rifiuta anche setfacl, quindi la "
+            "concessione va data in una finestra senza +a:\n"
+            "             sudo setfacl -m u:" + UTENTE_SPEDIZIONE + ":--x <directory>\n"
+            "             sudo chattr -a <file>\n"
+            "             sudo setfacl -m u:" + UTENTE_SPEDIZIONE + ":r <file>\n"
+            "             sudo chattr +a <file>\n"
+            "             Transito mancante e lettura mancante danno lo stesso "
+            "EACCES: il rimedio copre entrambi ed è idempotente.",
+        )
+        return
+
+    referto.aggiungi(
+        "lettura dei canali dal mittente",
+        Esito.OK,
+        f"{UTENTE_SPEDIZIONE} raggiunge {len(sped.canali)} canali "
+        f"(permessi effettivi, maschera ACL applicata; la lettura vera la fa "
+        f"il mittente a ogni giro)",
+    )
+
+
+def _ultimo_giro(referto: Referto, sped: Spedizione) -> None:
+    """Com'è andata l'ultima spedizione, e quanto è rimasto indietro.
+
+    `divergenza` è un ERRORE e deve restare rumoroso: significa che la copia
+    remota non è più un prefisso del file locale, cioè che il file locale è
+    stato accorciato o riscritto. È l'unico sintomo che una manomissione
+    produce, e un sintomo che non si vede non è un sintomo.
+    """
+    for nome, percorso in sped.canali:
+        valori = _stato_di_un_canale(sped.stato_dir, nome)
+        if valori is None:
+            referto.aggiungi(
+                f"spedizione di {nome}",
+                Esito.AVVISO,
+                f"nessuno stato in {sped.stato_dir}: il mittente non è mai girato",
+                "sudo systemctl enable --now hermes-log-ship.timer\n"
+                "             Un giro a mano: "
+                "sudo systemctl start hermes-log-ship.service",
+            )
+            continue
+
+        esito = valori.get("esito", "?")
+        remoto = valori.get("remoto", "?")
+        eta = _eta(valori.get("ts", ""))
+
+        if esito == "divergenza":
+            referto.aggiungi(
+                f"spedizione di {nome}",
+                Esito.ERRORE,
+                f"DIVERGENZA: la copia remota ({remoto} byte) non corrisponde "
+                f"più a {percorso}",
+                "Il file locale è stato accorciato o riscritto dopo essere "
+                "stato spedito. La copia sul collector è la versione da "
+                "credere.\n"
+                "             Non si 'ripara' riallineando: si guarda cosa "
+                "manca, confrontando i due file.",
+            )
+            continue
+
+        if esito != "ok":
+            referto.aggiungi(
+                f"spedizione di {nome}",
+                Esito.AVVISO,
+                f"ultimo giro: {esito}",
+                "journalctl -u hermes-log-ship.service -n 50",
+            )
+            continue
+
+        try:
+            indietro = max(0, percorso.stat().st_size - int(remoto))
+        except (OSError, ValueError):
+            indietro = None
+
+        coda = "" if indietro is None else f" · {indietro} byte non ancora spediti"
+        if eta is not None and eta > SPEDIZIONE_VECCHIA_SEC:
+            referto.aggiungi(
+                f"spedizione di {nome}",
+                Esito.AVVISO,
+                f"l'ultimo giro riuscito è di {int(eta // 60)} minuti fa{coda}",
+                "systemctl status hermes-log-ship.timer",
+            )
+            continue
+
+        quando = "" if eta is None else f" ({int(eta // 60)} minuti fa)"
+        referto.aggiungi(
+            f"spedizione di {nome}",
+            Esito.OK,
+            f"copia remota a {remoto} byte{quando}{coda}",
+        )

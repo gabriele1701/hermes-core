@@ -1,0 +1,25 @@
+# Cadenza della spedizione.
+#
+# Cinque minuti è un compromesso esplicito, non un default: è la FINESTRA DI
+# PERDITA. Chi prende root su questa macchina e ripulisce il log entro
+# cinque minuti dall'ultima spedizione cancella le righe di quella finestra,
+# e nessuno lo saprà — tutto ciò che è già uscito, invece, è fuori portata e
+# una sua eventuale sparizione diventa una divergenza rilevata.
+#
+# Stringerla costa una connessione SSH in più ogni volta; allargarla costa
+# prove. Si cambia qui, e si dichiara.
+
+[Unit]
+Description=Spedizione del log d'audit ogni cinque minuti
+Documentation=file:/opt/hermes-core/docs/setup-vm-hermes.md
+
+[Timer]
+# Non da `OnCalendar=*:0/5`: ancorare la cadenza all'orologio farebbe
+# partire tutti i mittenti di tutte le macchine allo stesso istante.
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=hermes-log-ship.service
+
+[Install]
+WantedBy=timers.target

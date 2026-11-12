@@ -1,0 +1,70 @@
+# Spedizione del log d'audit alla copia su un'altra macchina.
+#
+#     sudo install -m 644 -o root -g root \
+#          config/systemd/hermes-log-ship.service \
+#          config/systemd/hermes-log-ship.timer /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now hermes-log-ship.timer
+#
+# Si abilita il TIMER, non il servizio: il servizio è un'esecuzione singola
+# che il timer fa partire. `systemctl start hermes-log-ship.service` resta il
+# modo di forzarne una a mano.
+
+[Unit]
+Description=Spedisce il log d'audit di hermes-core al collector
+Documentation=file:/opt/hermes-core/docs/setup-vm-hermes.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# NON l'utente di servizio. `hermes` compromesso non deve poter fermare la
+# spedizione né prendersi la chiave che la autorizza: la traccia serve
+# soprattutto contro chi è già dentro.
+User=hermes-ship
+Group=hermes-ship
+
+ExecStart=/usr/local/sbin/hermes-log-ship
+
+# `hermes-ship` è creato senza home. Senza questa riga `ssh` lascerebbe a
+# ogni giro un avviso su una directory inesistente nel journal, e un rumore
+# ricorrente su un presidio è un ottimo modo per smettere di leggerlo.
+# Non serve a `ssh` per funzionare: chiave e known_hosts glieli passa il
+# mittente con percorsi assoluti.
+Environment=HOME=/var/lib/hermes-ship
+
+# Un processo che sorveglia una macchina non deve poterla mettere in
+# ginocchio. I tetti sono gli stessi in spirito di quelli del wrapper dei
+# tool: generosi e dichiarati, non stretti e indovinati.
+MemoryMax=256M
+MemorySwapMax=0
+TasksMax=32
+
+# Più del doppio della cadenza: se un giro resta appeso, il timer non deve
+# accumulare esecuzioni sovrapposte.
+RuntimeMaxSec=120
+
+# Il mittente legge due file e ne scrive uno. Tutto il resto del filesystem
+# gli è di sola lettura, e la sua unica area scrivibile è lo stato.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/hermes-ship/stato
+
+# Nessuna sezione [Install]: questo servizio non si abilita da sé, lo fa
+# partire il timer. Un `enable` su un oneshot lo farebbe girare anche
+# all'avvio e basta, che è il contrario di una spedizione periodica.
+#
+# Gli esiti diversi da 0 restano fallimenti, ed è voluto: l'esito 3 è la
+# DIVERGENZA, e un rifiuto che `systemctl status` mostrasse come successo
+# sarebbe esattamente il falso verde che questo presidio esiste per evitare.
+# Il numero preciso sta nel journal.

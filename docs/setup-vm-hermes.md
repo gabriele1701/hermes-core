@@ -1010,7 +1010,319 @@ devono comparire le righe della catena sotto un unico `correlation_id`.
 
 ---
 
-## 10. Cosa resta per le milestone successive
+## 10. Spedizione del log a una seconda macchina (A5)
+
+### Cosa compra, e cosa no
+
+Il log d'audit è `chattr +a`: nessun processo non privilegiato può troncarlo,
+nemmeno il nostro. Resta scoperto chi ottiene **root**, che toglie `+a` e
+riscrive quello che vuole. Contro di lui l'unica cosa che funziona è una
+copia **già uscita** dalla macchina.
+
+| Chi | Cosa può già fare al log | Cosa cambia con A5 |
+|---|---|---|
+| un tool compromesso (`hermes-tool`) | niente: non lo apre nemmeno | niente |
+| il servizio compromesso (`hermes`) | appendere righe false; **non** troncare | niente sulle righe false |
+| root su questa macchina | `chattr -a`, riscrivere tutto, disinstallare la spedizione | **tutto**: è l'unico livello che A5 affronta |
+
+Va detto chiaro: **A5 non difende dalle righe false.** Difende dalla
+cancellazione a posteriori, e lo fa in due modi — le righe già spedite sono
+fuori portata, e una manomissione locale produce un **sintomo**.
+
+### Perché si spinge invece di tirare
+
+Tirando dal collector ogni N minuti, chi entra e ripulisce entro quella
+finestra non lascia traccia di sé. Spingendo, le righe sono al sicuro dal
+momento in cui partono.
+
+Il costo è una chiave privata sulla macchina esposta. Si accetta perché il
+raggio d'azione di quella chiave è quasi nullo: il `ForceCommand` sul
+collector permette **solo di appendere byte a un file**. Niente shell,
+niente lettura, niente cancellazione. È una differenza di sostanza rispetto
+a una credenziale di scrittura su git, che altrove in questo progetto è
+stata rifiutata: chi scrive nel repo cambia il codice dei tool *e* il loro
+SHA dichiarato nella stessa commit.
+
+### La regola che rende la copia una prova
+
+Il ricevente **rifiuta qualunque offset che non sia la dimensione attuale
+della sua copia**. Ne seguono tre proprietà:
+
+- una connessione caduta a metà non duplica né lascia buchi: il mittente
+  chiede sempre prima dove siamo arrivati;
+- la copia resta **byte-identica** al prefisso dell'originale, quindi un
+  `sha256sum` confronta i due file senza interpretarli;
+- un troncamento locale diventa **rumoroso**. Riscrivere anche lo stato del
+  mittente non aiuta: un offset minore della dimensione remota è rifiutato
+  allo stesso modo. L'unico modo di non far scattare il rifiuto è impedire
+  al mittente di girare, che è «la spedizione si è fermata» — e si vede.
+
+Il mittente verifica anche l'impronta degli ultimi 4096 byte già spediti: una
+riscrittura *a parità di lunghezza*, che il solo confronto delle dimensioni
+non vedrebbe, è una divergenza.
+
+---
+
+### 10.1 Il collector
+
+Su `192.168.205.50`. Non deve essere la macchina che genera il log.
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-collect
+sudo install -d -m 755 -o root -g root /var/log/hermes-remoto
+sudo install -d -m 700 -o hermes-collect -g hermes-collect \
+     /var/log/hermes-remoto/hermesmcp
+sudo install -m 755 -o root -g root \
+     bin/hermes-log-receive /usr/local/sbin/hermes-log-receive
+sudo install -d -m 755 -o root -g root /etc/ssh/authorized_keys.d
+sudo install -m 644 -o root -g root \
+     config/sshd/20-hermes-collect.conf /etc/ssh/sshd_config.d/
+```
+
+La directory per sorgente va creata a mano **di proposito**: il ricevente si
+rifiuta di crearla. Una directory che compare da sola è una sorgente che
+nessuno ha autorizzato.
+
+Il perimetro di rete, e un tetto sul disco:
+
+```sh
+sudo ufw allow from 192.168.205.10 to any port 22 proto tcp
+```
+
+Il rischio residuo della scelta di spingere è che un mittente compromesso
+riempia il disco del collector. Si confina con una partizione separata o una
+quota su `/var/log/hermes-remoto`, non con la configurazione di SSH.
+
+### 10.2 L'identità che spedisce
+
+Su `hermesmcp`. **Non** è l'utente di servizio: `hermes` compromesso non deve
+poter fermare la spedizione né prendersi la chiave che la autorizza.
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-ship
+sudo install -d -m 750 -o hermes-ship -g hermes-ship /var/lib/hermes-ship
+sudo install -d -m 755 -o hermes-ship -g hermes-ship /var/lib/hermes-ship/stato
+sudo -u hermes-ship ssh-keygen -t ed25519 -N "" \
+     -f /var/lib/hermes-ship/id_ed25519 -C hermes-ship@hermesmcp
+```
+
+Senza passphrase, per la stessa ragione documentata in 4.4: il timer gira
+senza nessuno davanti, e la protezione sta nel `ForceCommand`, non nella
+passphrase. La directory è `750` e appartiene a `hermes-ship`: l'utente di
+servizio non la attraversa.
+
+Lo **stato** è `755` con file `644` di proposito: dentro ci sono dimensioni e
+un istante, nessun segreto, e il preflight gira come `hermes` e deve poterlo
+leggere. Scriverci può solo `hermes-ship`.
+
+La chiave pubblica va sul collector:
+
+```sh
+sudo install -m 644 -o root -g root \
+     /var/lib/hermes-ship/id_ed25519.pub \
+     /etc/ssh/authorized_keys.d/hermes-collect
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+### 10.3 Conoscere il collector per chiave, non per fiducia
+
+Con la verifica dell'host disattivata, chi riesce a prendere il posto del
+collector riceve il log e lo fa sparire — e da `hermesmcp` ogni spedizione
+risulterebbe riuscita. Il mittente usa `StrictHostKeyChecking=yes` e un
+`known_hosts` che non può riscrivere.
+
+Si prende la chiave dalla rete e **si verifica l'impronta dalla console** del
+collector, che è il pezzo che rende l'operazione sicura:
+
+```sh
+# sul collector, dalla sua console:
+sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+
+# su hermesmcp:
+sudo sh -c 'ssh-keyscan -t ed25519 192.168.205.50 > /var/lib/hermes-ship/known_hosts'
+ssh-keygen -lf /var/lib/hermes-ship/known_hosts
+```
+
+Le due impronte devono coincidere. **Se non coincidono non si prosegue**: è
+esattamente il caso che questo controllo esiste per trovare. Il file resta di
+root — `hermes-ship` deve leggerlo, non riscriverlo.
+
+### 10.4 L'accesso ai canali
+
+`hermes-ship` deve leggere i due file da spedire, e un file append-only
+**rifiuta anche `setfacl`**, non solo la `chmod`: la concessione va data in
+una finestra con `-a` tolto.
+
+```sh
+sudo setfacl -m u:hermes-ship:--x /var/log/hermes
+sudo chattr -a /var/log/hermes/audit.jsonl
+sudo setfacl -m u:hermes-ship:r  /var/log/hermes/audit.jsonl
+sudo chattr +a /var/log/hermes/audit.jsonl
+
+sudo setfacl -m u:hermes-ship:--x /var/lib/hermes/state
+sudo chattr -a /var/lib/hermes/state/overrides.jsonl
+sudo setfacl -m u:hermes-ship:r  /var/lib/hermes/state/overrides.jsonl
+sudo chattr +a /var/lib/hermes/state/overrides.jsonl
+```
+
+Due cose, per non ripetere errori già fatti:
+
+- **sulle directory serve un'ACL, non un `chmod o+x`.** Gli scrittori
+  irrigidiscono anche la directory che li contiene, e un transito dato con
+  `chmod` verrebbe tolto al primo avvio. Un'ACL no: dal novembre 2026 una
+  concessione nominata non viene più annullata da chi scrive il file;
+- **transito mancante e lettura mancante danno lo stesso `EACCES`**, come in
+  6.4. Il rimedio qui sopra copre entrambi ed è idempotente.
+
+### 10.5 La configurazione, il mittente, il timer
+
+```sh
+sudo install -d -m 755 -o root -g root /etc/hermes
+sudo install -m 644 -o root -g root \
+     config/log-shipping.example.conf /etc/hermes/log-shipping.conf
+sudo editor /etc/hermes/log-shipping.conf
+```
+
+Il file è di root perché se `hermes-ship` potesse riscrivere la propria
+destinazione, un mittente compromesso spedirebbe le prove a sé stesso e da
+qui sembrerebbe tutto a posto. **Gli indirizzi nel modello sono quelli di
+questo laboratorio**: su un'altra installazione sono plausibili e sbagliati,
+e un valore plausibile passa i controlli dando una destinazione che non è la
+tua.
+
+```sh
+sudo install -m 755 -o root -g root \
+     bin/hermes-log-ship /usr/local/sbin/hermes-log-ship
+sudo install -m 644 -o root -g root \
+     config/systemd/hermes-log-ship.service \
+     config/systemd/hermes-log-ship.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-log-ship.timer
+```
+
+Il mittente vive **fuori dall'albero di git** per la stessa ragione del
+wrapper dei tool: un `git checkout` cambierebbe il codice che custodisce le
+prove. Dopo un aggiornamento che lo tocca va reinstallato, e il preflight fa
+il `diff` al posto tuo.
+
+Si abilita il **timer**, non il servizio. La cadenza — cinque minuti — è la
+finestra di perdita, ed è scritta nel `.timer` con il suo perché.
+
+Infine, nella configurazione del server:
+
+```toml
+log_shipping = "/etc/hermes/log-shipping.conf"
+```
+
+### 10.6 Verificare, dai due lati
+
+Un giro a mano, e cosa dice:
+
+```sh
+sudo systemctl start hermes-log-ship.service
+journalctl -u hermes-log-ship.service -n 20 --no-pager
+cat /var/lib/hermes-ship/stato/audit.stato
+```
+
+Dal preflight, che è il posto in cui questa verifica vive:
+
+```sh
+sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml
+```
+
+**Il preflight non può dire che la copia remota esista**, e lo dichiara. Può
+dire che il mittente è quello del repo, che punta al file su cui il server
+scrive davvero, che `hermes-ship` arriva ai canali, e com'è andato l'ultimo
+giro. Il resto si guarda **dal collector**, che è l'unica macchina la cui
+parola non sia riscrivibile da chi manomette questa:
+
+```sh
+# sul collector:
+ls -l /var/log/hermes-remoto/hermesmcp/
+sudo tail -n 3 /var/log/hermes-remoto/hermesmcp/audit.jsonl
+```
+
+E il confronto integrale, che è la verifica vera e si fa quando serve — non
+ogni cinque minuti:
+
+```sh
+# sul collector:
+wc -c < /var/log/hermes-remoto/hermesmcp/audit.jsonl
+sha256sum /var/log/hermes-remoto/hermesmcp/audit.jsonl
+
+# su hermesmcp: `read` chiede il numero letto sopra, e lo si incolla.
+read -r BYTE
+sudo head -c "$BYTE" /var/log/hermes/audit.jsonl | sha256sum
+```
+
+Il numero lo si digita invece di metterlo nel comando perché un segnaposto
+dentro un blocco da incollare è già costato due errori a questo progetto: qui
+`read` lo chiede, e un comando incompleto non parte invece di partire
+sbagliato.
+
+Le due impronte devono coincidere: la copia è un prefisso esatto
+dell'originale, quindi il confronto non richiede di interpretare niente.
+
+Quando la copia esiste ed è confermata, va resa non riscrivibile anche lì:
+
+```sh
+# sul collector, dopo il primo giro riuscito:
+sudo chattr +a /var/log/hermes-remoto/hermesmcp/audit.jsonl
+sudo chattr +a /var/log/hermes-remoto/hermesmcp/overrides.jsonl
+```
+
+### 10.7 Quando scatta una divergenza
+
+Il preflight dice `DIVERGENZA` e il servizio esce con 3. Significa che la
+copia remota non è più un prefisso del file locale: **il file locale è stato
+accorciato o riscritto dopo essere stato spedito.**
+
+Non si «ripara» riallineando. La copia sul collector è la versione da
+credere, e la domanda è *cosa manca*:
+
+```sh
+# sul collector: fin dove arriva la copia
+wc -c < /var/log/hermes-remoto/hermesmcp/audit.jsonl
+
+# su hermesmcp: quanto è lungo adesso l'originale
+sudo wc -c < /var/log/hermes/audit.jsonl
+```
+
+Se l'originale è più corto, le righe che mancano sono nella copia e solo lì.
+Il mittente **non spedisce più** finché la divergenza non è risolta, ed è
+voluto: scrivere sopra una divergenza costruirebbe una copia che non
+corrisponde a niente.
+
+Si riparte solo deliberatamente, da chi amministra: si mette da parte la
+copia remota come prova, e si lascia che il mittente ricominci. In
+laboratorio, dove una divergenza è quasi sempre un esperimento e non
+un'intrusione:
+
+```sh
+# sul collector:
+sudo chattr -a /var/log/hermes-remoto/hermesmcp/audit.jsonl
+sudo mv /var/log/hermes-remoto/hermesmcp/audit.jsonl \
+        /var/log/hermes-remoto/hermesmcp/audit.jsonl.divergente
+```
+
+Al giro successivo la copia riparte da zero e torna allineata. Fuori dal
+laboratorio, quel file messo da parte **è la prova**: va conservato prima di
+toccare qualunque altra cosa.
+
+### 10.8 La rotazione, che resta a mano
+
+Con la copia remota al sicuro, ruotare il log locale non è più una perdita di
+prove: è un'operazione ordinaria. Resta **manuale e deliberata**, e non c'è
+nessun rotatore automatico, per una ragione precisa: troncare un log d'audit
+in base a un offset sbagliato distrugge prove da solo, e un programma che lo
+facesse ogni notte sbaglierebbe senza che nessuno guardi.
+
+La regola, quando la si farà: **si tronca solo fino all'offset confermato dal
+collector**, mai oltre. La voce di debito corrispondente resta aperta.
+
+---
+
+## 11. Cosa resta per le milestone successive
 
 **Container runtime** (Docker o Podman) sulla VM, per l'agente di pentest: è
 la ragione per cui il disco è stato dimensionato con margine. Finché
@@ -1019,9 +1331,6 @@ di ricadere sull'host — comportamento voluto.
 
 **Backend reale del vault** (`pass`), al posto dello stub. Dentro ci andranno
 solo le credenziali delle VM di laboratorio.
-
-**Spedizione del log** a un collector esterno: è la difesa che conta davvero
-contro la manomissione, più dell'append-only locale.
 
 **Un secondo agente**, con la propria configurazione, il proprio utente di
 servizio e la propria chiave vincolata.

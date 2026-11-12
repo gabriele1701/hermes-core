@@ -37,6 +37,7 @@ _CHIAVI_SERVER = frozenset(
         "state_dir",
         "scope_file",
         "tool_runner",
+        "log_shipping",
         "tool_python",
         "tool_python_flags",
         "max_output_bytes",
@@ -121,6 +122,16 @@ class ServerConfig:
     #: utilizzabile → il gate rifiuta, perché sarebbe l'isolamento promesso e
     #: non applicato.
     tool_runner: Path | None = None
+    #: File di root che configura la spedizione del log a una seconda
+    #: macchina (`config/log-shipping.example.conf`). ``None`` significa
+    #: **non configurata**: il server funziona e il log vive solo qui, che è
+    #: una proprietà in meno e non un pezzo rotto — il preflight lo dichiara.
+    #: Il server non legge questo file: lo legge il mittente, che gira sotto
+    #: un'altra identità e con un altro timer. Qui serve perché il preflight
+    #: possa dire se la traccia esce davvero da questa macchina, e perché il
+    #: percorso del canale e ``log_path`` vengano confrontati invece di
+    #: essere due fonti che divergono in silenzio.
+    log_shipping: Path | None = None
     #: Interprete dei tool: percorso assoluto, verificato all'avvio.
     tool_python: Path = TOOL_PYTHON_DEFAULT
     tool_python_flags: tuple[str, ...] = TOOL_PYTHON_FLAGS_DEFAULT
@@ -183,6 +194,7 @@ def load_config(path: str | Path) -> ServerConfig:
         state_dir=_percorso(server.get("state_dir"), percorso),
         scope_file=_percorso(server.get("scope_file"), percorso),
         tool_runner=_percorso(server.get("tool_runner"), percorso),
+        log_shipping=_percorso(server.get("log_shipping"), percorso),
         tool_python=_interprete(server.get("tool_python")),
         tool_python_flags=_flag_interprete(server.get("tool_python_flags")),
         max_output_bytes=_intero_positivo(
