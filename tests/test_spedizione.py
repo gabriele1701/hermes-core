@@ -91,9 +91,13 @@ def banco(tmp_path: Path):
     ricevente.chmod(0o755)
 
     finto_ssh = tmp_path / "ssh"
+    argomenti = tmp_path / "argv-ssh"
     finto_ssh.write_text(
         "#!/bin/sh\n"
-        "# L'ultimo argomento è la richiesta, come con ssh vero.\n"
+        "# L'ultimo argomento è la richiesta, come con ssh vero. Gli altri si\n"
+        "# annotano: servono a verificare che il mittente passi davvero ciò\n"
+        "# che crede di passare, la porta compresa.\n"
+        f'printf "%s\\n" "$*" >> {argomenti}\n'
         'for ULTIMO in "$@"; do :; done\n'
         f'SSH_ORIGINAL_COMMAND="$ULTIMO" exec {ricevente} hermesmcp\n',
         encoding="utf-8",
@@ -124,6 +128,8 @@ def banco(tmp_path: Path):
 
     class Banco:
         def __init__(self) -> None:
+            self.argomenti = argomenti
+            self.config = config
             self.audit = audit
             self.copia = remoto / "hermesmcp" / "audit.jsonl"
             self.stato = stato / "audit.stato"
@@ -310,6 +316,45 @@ def test_un_canale_illeggibile_non_ferma_gli_altri(banco, tmp_path: Path):
     assert banco.copia.read_bytes() == banco.audit.read_bytes(), (
         "il canale sano non è stato spedito"
     )
+
+
+def test_la_porta_del_collector_arriva_a_ssh(banco):
+    """La 22 è la porta solita, non l'unica.
+
+    Trovato sul campo, al primo collaudo: il collector ascoltava sulla 2222 e
+    il mittente ci andava con la 22 implicita. Nessun errore di
+    configurazione — semplicemente non poteva funzionare, e il sintomo
+    (`Connection refused`) non puntava alla causa.
+    """
+    banco.config.write_text(
+        banco.config.read_text(encoding="utf-8").replace(
+            "COLLECTOR_HOST=", "COLLECTOR_PORTA=2222\nCOLLECTOR_HOST="
+        ),
+        encoding="utf-8",
+    )
+    banco.audit.write_text('{"n": 1}\n', encoding="utf-8")
+
+    banco.spedisci()
+
+    assert "-p 2222" in banco.argomenti.read_text(encoding="utf-8")
+
+
+def test_senza_porta_dichiarata_si_usa_la_22(banco):
+    banco.audit.write_text('{"n": 1}\n', encoding="utf-8")
+
+    banco.spedisci()
+
+    assert "-p 22 " in banco.argomenti.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("porta", ["0", "70000", "ventidue", "22a"])
+def test_una_porta_non_valida_non_passa(porta):
+    base = (
+        "COLLECTOR_HOST=h\nCOLLECTOR_UTENTE=u\nCHIAVE=/k\n"
+        "KNOWN_HOSTS=/kh\nSTATO_DIR=/s\nCANALE_audit=/a\n"
+    )
+    with pytest.raises(SpedizioneError):
+        leggi_spedizione(base + f"COLLECTOR_PORTA={porta}\n")
 
 
 def test_un_guasto_banale_non_maschera_una_divergenza(banco, tmp_path: Path):

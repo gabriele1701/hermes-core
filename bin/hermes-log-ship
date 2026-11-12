@@ -84,6 +84,10 @@ muori() {
 
 COLLECTOR_HOST=
 COLLECTOR_UTENTE=
+# Default esplicito: la 22 è la porta solita, non l'unica. Un collector su
+# una porta diversa è una scelta legittima di chi amministra, e una cassetta
+# degli attrezzi che desse per scontata la 22 non sarebbe portabile.
+COLLECTOR_PORTA=22
 CHIAVE=
 KNOWN_HOSTS=
 STATO_DIR=
@@ -100,6 +104,13 @@ while IFS= read -r RIGA; do
     case "$CHIAVE_RIGA" in
         COLLECTOR_HOST)   COLLECTOR_HOST="$VALORE" ;;
         COLLECTOR_UTENTE) COLLECTOR_UTENTE="$VALORE" ;;
+        COLLECTOR_PORTA)
+            printf '%s' "$VALORE" | grep -Eq '^[0-9]{1,5}$' \
+                || muori $ESITO_CONFIG "porta non numerica: $VALORE"
+            [ "$VALORE" -ge 1 ] && [ "$VALORE" -le 65535 ] \
+                || muori $ESITO_CONFIG "porta fuori intervallo: $VALORE"
+            COLLECTOR_PORTA="$VALORE"
+            ;;
         CHIAVE)           CHIAVE="$VALORE" ;;
         KNOWN_HOSTS)      KNOWN_HOSTS="$VALORE" ;;
         STATO_DIR)        STATO_DIR="$VALORE" ;;
@@ -122,6 +133,7 @@ done < "$CONFIG"
 # custodisce le prove.
 [ -n "$COLLECTOR_HOST" ]   || muori $ESITO_CONFIG "manca COLLECTOR_HOST in $CONFIG"
 [ -n "$COLLECTOR_UTENTE" ] || muori $ESITO_CONFIG "manca COLLECTOR_UTENTE in $CONFIG"
+[ -n "$COLLECTOR_PORTA" ]  || muori $ESITO_CONFIG "COLLECTOR_PORTA vuota in $CONFIG"
 [ -n "$CHIAVE" ]           || muori $ESITO_CONFIG "manca CHIAVE in $CONFIG"
 [ -n "$KNOWN_HOSTS" ]      || muori $ESITO_CONFIG "manca KNOWN_HOSTS in $CONFIG"
 [ -n "$STATO_DIR" ]        || muori $ESITO_CONFIG "manca STATO_DIR in $CONFIG"
@@ -137,6 +149,7 @@ richiedi() {
     # qui sembrerebbe tutto riuscito. La macchina si conosce per chiave,
     # da un `known_hosts` che il mittente non scrive.
     "$SSH" -i "$CHIAVE" \
+        -p "$COLLECTOR_PORTA" \
         -o BatchMode=yes \
         -o ConnectTimeout=10 \
         -o StrictHostKeyChecking=yes \

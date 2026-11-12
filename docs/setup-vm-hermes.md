@@ -1074,6 +1074,20 @@ dice dove si esegue.
 | **`hermesmcp`** · 192.168.205.10 | la macchina sorvegliata | il repo in `/opt/hermes-core`, il log, il mittente |
 | **collector** · 192.168.205.50 | la macchina che conserva | la copia. **Niente repo**, ed è voluto |
 
+**La porta SSH del collector non è per forza la 22.** Un'installazione può
+ascoltare altrove, e il mittente lo prevede (`COLLECTOR_PORTA`). Si guarda
+una volta, dalla console del collector, e si usa quel numero dappertutto —
+`scp`, `ufw`, `ssh-keyscan`, configurazione:
+
+```sh
+# sul collector
+sudo ss -tlnp | grep sshd
+```
+
+I comandi che seguono scrivono la 22, che è il caso solito. Se la tua è
+diversa, va cambiata in tutti e quattro i posti: una sola dimenticata dà un
+`Connection refused` che non punta alla causa.
+
 Il collector non ha il repo e non deve averlo: conserva prove, non esegue il
 progetto. I file che gli servono ci arrivano copiati.
 
@@ -1093,6 +1107,14 @@ subito invece di fare la cosa sbagliata.
 ```sh
 # su hermesmcp, dalla radice del repo
 scp bin/hermes-log-receive config/sshd/20-hermes-collect.conf "$COLLECTOR":~/
+```
+
+Su una porta diversa dalla 22, `scp` vuole `-P` **maiuscola** (`ssh` usa
+`-p` minuscola, e scambiarle è un classico):
+
+```sh
+# su hermesmcp, se il collector ascolta sulla 2222
+scp -P 2222 bin/hermes-log-receive config/sshd/20-hermes-collect.conf "$COLLECTOR":~/
 ```
 
 I comandi che seguono si eseguono **sul collector**, nella home in cui i due
@@ -1138,6 +1160,9 @@ sudo ufw allow from 192.168.205.10 to any port 22 proto tcp
 >
 > È lo stesso ragionamento di `hermesmcp`, dove la regola nomina un solo
 > indirizzo — ma lì quell'indirizzo è la postazione, e qui no.
+>
+> E se la porta non è la 22, le regole vanno scritte su quella: una regola
+> che apre una porta su cui non ascolta nessuno non protegge e non serve.
 
 Il rischio residuo della scelta di spingere è che un mittente compromesso
 riempia il disco del collector. Si confina con una partizione separata o una
@@ -1198,6 +1223,15 @@ sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 # su hermesmcp
 sudo sh -c 'ssh-keyscan -t ed25519 192.168.205.50 > /var/lib/hermes-ship/known_hosts'
 ssh-keygen -lf /var/lib/hermes-ship/known_hosts
+```
+
+Su una porta diversa dalla 22 serve `-p`, e la voce che ne esce ha una forma
+diversa — `[192.168.205.50]:2222` invece del solo indirizzo. È `ssh-keyscan`
+a scriverla giusta, purché gli si dica la porta:
+
+```sh
+# su hermesmcp, se il collector ascolta sulla 2222
+sudo sh -c 'ssh-keyscan -p 2222 -t ed25519 192.168.205.50 > /var/lib/hermes-ship/known_hosts'
 ```
 
 Le due impronte devono coincidere. **Se non coincidono non si prosegue**: è

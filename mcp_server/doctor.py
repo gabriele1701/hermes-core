@@ -2198,9 +2198,14 @@ UTENTE_SPEDIZIONE = "hermes-ship"
 MITTENTE_INSTALLATO = Path("/usr/local/sbin/hermes-log-ship")
 MITTENTE_NEL_REPO = Path("bin/hermes-log-ship")
 
+#: Chiavi che devono esserci. `COLLECTOR_PORTA` non e' fra queste: ha un
+#: default (la 22) e dichiararlo obbligatorio renderebbe invalide le
+#: configurazioni scritte prima che la porta fosse configurabile.
 _CHIAVI_SPEDIZIONE = frozenset(
     {"COLLECTOR_HOST", "COLLECTOR_UTENTE", "CHIAVE", "KNOWN_HOSTS", "STATO_DIR"}
 )
+_CHIAVI_SPEDIZIONE_FACOLTATIVE = frozenset({"COLLECTOR_PORTA"})
+PORTA_PREDEFINITA = 22
 _NOME_CANALE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 #: Oltre questa età l'ultima spedizione riuscita è un avviso. Non è la
@@ -2222,6 +2227,7 @@ class Spedizione:
     collector_host: str
     collector_utente: str
     chiave: Path
+    collector_porta: int
     known_hosts: Path
     stato_dir: Path
     canali: tuple[tuple[str, Path], ...]
@@ -2255,7 +2261,7 @@ def leggi_spedizione(testo: str) -> Spedizione:
                 )
             canali.append((nome, risolvi_percorso(Path(valore))))
             continue
-        if chiave not in _CHIAVI_SPEDIZIONE:
+        if chiave not in _CHIAVI_SPEDIZIONE | _CHIAVI_SPEDIZIONE_FACOLTATIVE:
             raise SpedizioneError(f"riga {numero}: chiave non riconosciuta: {chiave}")
         valori[chiave] = valore
 
@@ -2265,9 +2271,14 @@ def leggi_spedizione(testo: str) -> Spedizione:
     if not canali:
         raise SpedizioneError("nessun canale dichiarato")
 
+    porta_grezza = valori.get("COLLECTOR_PORTA", str(PORTA_PREDEFINITA))
+    if not porta_grezza.isdigit() or not 1 <= int(porta_grezza) <= 65535:
+        raise SpedizioneError(f"porta non valida: {porta_grezza}")
+
     return Spedizione(
         collector_host=valori["COLLECTOR_HOST"],
         collector_utente=valori["COLLECTOR_UTENTE"],
+        collector_porta=int(porta_grezza),
         chiave=Path(valori["CHIAVE"]),
         known_hosts=Path(valori["KNOWN_HOSTS"]),
         stato_dir=Path(valori["STATO_DIR"]),
@@ -2410,7 +2421,8 @@ def _spedizione(
     referto.aggiungi(
         "spedizione del log",
         Esito.OK,
-        f"{sped.collector_utente}@{sped.collector_host} · canali: {nomi} · "
+        f"{sped.collector_utente}@{sped.collector_host}:{sped.collector_porta} · "
+        f"canali: {nomi} · "
         f"la copia remota NON è verificabile da qui (va guardata dal collector)",
     )
 
