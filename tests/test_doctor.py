@@ -1695,7 +1695,7 @@ def test_lockfile_illeggibile_e_errore(tmp_path: Path, radice: Path):
     """Un lock senza pin non blocca niente, ma sembra che lo faccia."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "requirements.lock").write_text(
+    (repo / "requirements.txt").write_text(
         "# solo commenti\n#    --hash=sha256:abc\n", encoding="utf-8"
     )
     referto = esegui(scrivi_config(tmp_path, radice, senza_tool=True, repo_root=repo))
@@ -1714,7 +1714,7 @@ def test_deriva_dall_ambiente_reale_rilevata(tmp_path: Path, radice: Path):
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "requirements.lock").write_text(
+    (repo / "requirements.txt").write_text(
         "mcp==0.0.1-inesistente\n", encoding="utf-8"
     )
     referto = esegui(scrivi_config(tmp_path, radice, senza_tool=True, repo_root=repo))
@@ -1734,7 +1734,7 @@ def test_il_referto_dice_su_quale_ambiente_ha_risposto(tmp_path: Path, radice: P
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "requirements.lock").write_text("mcp==0.0.1\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text("mcp==0.0.1\n", encoding="utf-8")
     referto = esegui(scrivi_config(tmp_path, radice, senza_tool=True, repo_root=repo))
     controllo = _controllo(referto, "lockfile delle dipendenze")
     assert sys.executable in controllo.messaggio
@@ -1822,7 +1822,7 @@ def test_build_assente_e_avviso_separato_e_referto_pronto(
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "requirements-build.in").write_text(BUILD_IN_FINTO, encoding="utf-8")
-    (repo / "requirements.lock").write_text(
+    (repo / "requirements.txt").write_text(
         "mcp==2.3.0\nsetuptools==84.2.1\n", encoding="utf-8"
     )
     from mcp_server import doctor as mod
@@ -1860,7 +1860,7 @@ def test_il_lock_reale_del_repo_combacia_con_questo_ambiente(radice: Path):
         _installate,
     )
 
-    lock = radice / "requirements.lock"
+    lock = radice / "requirements.txt"
     if not lock.exists():  # pragma: no cover - il lock è versionato
         pytest.skip("lockfile assente")
 

@@ -87,7 +87,7 @@ cd /opt/hermes-core
     --generate-hashes \
     --strip-extras \
     --allow-unsafe \
-    --output-file=requirements.lock \
+    --output-file=requirements.txt \
     pyproject.toml requirements-build.in
 ```
 
@@ -120,8 +120,8 @@ viene eseguito. Vedere `requirements-build.in` per il perché per esteso.
 generato, verificare:
 
 ```sh
-grep -E '^setuptools==' requirements.lock || echo "ASSENTE: rigenerare con --allow-unsafe"
-grep -i 'not pinned' requirements.lock && echo "avvertenze rimaste: leggerle"
+grep -E '^setuptools==' requirements.txt || echo "ASSENTE: rigenerare con --allow-unsafe"
+grep -i 'not pinned' requirements.txt && echo "avvertenze rimaste: leggerle"
 ```
 
 ### Quando si rigenera
@@ -133,6 +133,35 @@ grep -i 'not pinned' requirements.lock && echo "avvertenze rimaste: leggerle"
 
 Non si rigenera «per igiene». Un lock rigenerato senza una ragione è un
 aggiornamento di massa che nessuno ha rivisto.
+
+### Perché si chiama `requirements.txt`
+
+Si chiamava `requirements.lock`, che è la convenzione di `pip-compile` e dice
+meglio cos'è. **Dependabot però non lo guardava.** Misurato invece che
+supposto: al primo giro ha esaminato quattro pacchetti — `mcp`, `pydantic`,
+`pytest`, `setuptools`, tutti dichiarati in `pyproject.toml` — e nessuno dei
+29 fissati nel lock. Un file che nessuno aggiorna in automatico è un file che
+invecchia in silenzio, cioè l'opposto di ciò per cui esiste.
+
+Due conseguenze da conoscere, perché rendono l'intestazione del file meno
+affidabile di quanto sembri.
+
+La prima: l'intestazione dice ancora `--output-file=requirements.lock`, perché
+il file **non** è stato rigenerato per il rinomina. Rigenerarlo a una
+settimana di distanza avrebbe trasformato un cambio di nome in un
+aggiornamento di massa non rivisto, e correggerlo a mano avrebbe reso falso
+proprio ciò che l'intestazione serve a garantire — che quel contenuto viene da
+quel comando. Si sistema alla prossima rigenerazione vera.
+
+La seconda, più duratura: **Dependabot modifica questo file in posizione**,
+aggiornando un pacchetto per volta con i suoi hash. Dopo la prima di quelle
+PR, l'intestazione descrive la generazione originale e non il contenuto
+corrente. Resta il comando di riferimento per un rinfresco completo, non un
+certificato di come il file è fatto adesso.
+
+Una PR di Dependabot su questo file va quindi guardata per quello che è: un
+cambiamento alle versioni che girano, verificato dalla CI — che installa
+proprio da qui, su 3.11 e 3.14 — e non un atto formale.
 
 ---
 
@@ -153,7 +182,7 @@ dipendenze non servono a un server che esegue: ogni pacchetto in più è
 superficie in più.
 
 ```sh
-.venv/bin/pip install --require-hashes --no-deps -r requirements.lock
+.venv/bin/pip install --require-hashes --no-deps -r requirements.txt
 ```
 
 > **Lo stesso comando riallinea un ambiente che ha derivato.** Un `.venv`
@@ -295,7 +324,7 @@ Quando sarà il momento, va compilato con il lock di runtime **come vincolo**:
 
 ```sh
 pip-compile --generate-hashes --allow-unsafe \
-    -c requirements.lock \
+    -c requirements.txt \
     -o requirements-dev.lock requirements-dev.in
 ```
 
@@ -327,7 +356,7 @@ updates:
 E in CI, su ogni pull request:
 
 ```sh
-pip-audit -r requirements.lock
+pip-audit -r requirements.txt
 ```
 
 ---

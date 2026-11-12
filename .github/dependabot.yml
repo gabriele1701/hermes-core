@@ -17,6 +17,18 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    # Alza il minimo di un intervallo SOLO quando serve davvero.
+    #
+    # Col default, Dependabot ha proposto di portare `pydantic` da
+    # `>=2.12,<3` a `>=2.14.3,<3`, `pytest` da `>=8.0` a `>=9.2.0` e
+    # `setuptools` da `>=68` a `>=84.2.1`: alzare il pavimento alla versione
+    # corrente restringe la compatibilità DICHIARATA senza che nessuno abbia
+    # verificato che le versioni escluse non vadano più bene.
+    #
+    # Gli intervalli dicono «da qui in poi siamo compatibili». Fissare le
+    # versioni è il mestiere del lockfile, non dell'intervallo: sono due
+    # affermazioni diverse e vanno tenute separate.
+    versioning-strategy: increase-if-necessary
     # Attesa prima di proporre una versione appena pubblicata.
     #
     # Le compromissioni di pacchetti vengono tipicamente scoperte e ritirate
