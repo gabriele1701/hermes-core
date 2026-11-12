@@ -1278,6 +1278,7 @@ sudo chattr -a /var/log/hermes/audit.jsonl
 sudo setfacl -m u:hermes-ship:r  /var/log/hermes/audit.jsonl
 sudo chattr +a /var/log/hermes/audit.jsonl
 
+sudo setfacl -m u:hermes-ship:--x /var/lib/hermes
 sudo setfacl -m u:hermes-ship:--x /var/lib/hermes/state
 sudo chattr -a /var/lib/hermes/state/overrides.jsonl
 sudo setfacl -m u:hermes-ship:r  /var/lib/hermes/state/overrides.jsonl
@@ -1290,8 +1291,15 @@ Due cose, per non ripetere errori già fatti:
   irrigidiscono anche la directory che li contiene, e un transito dato con
   `chmod` verrebbe tolto al primo avvio. Un'ACL no: dal novembre 2026 una
   concessione nominata non viene più annullata da chi scrive il file;
+- **il transito serve su TUTTA la catena**, non solo sull'ultima directory.
+  `/var/lib/hermes` è la home dell'utente di servizio e `useradd` la crea
+  `750`: senza una concessione anche lì, `hermes-ship` non arriva a `state/`.
+  Dove una directory è già attraversabile da tutti — `/var/log`, `/var/lib` —
+  la riga è superflua e innocua: meglio idempotente che da indovinare;
 - **transito mancante e lettura mancante danno lo stesso `EACCES`**, come in
-  6.4. Il rimedio qui sopra copre entrambi ed è idempotente.
+  6.4. Il rimedio qui sopra copre entrambi ed è idempotente. Se qualcosa
+  manca ancora, il preflight **nomina la directory esatta**: percorre la
+  catena e dice quale anello non passa.
 
 ### 10.5 La configurazione, il mittente, il timer
 
