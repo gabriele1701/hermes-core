@@ -1378,8 +1378,8 @@ ogni cinque minuti:
 
 ```sh
 # sul collector
-wc -c < /var/log/hermes-remoto/hermesmcp/audit.jsonl
-sha256sum /var/log/hermes-remoto/hermesmcp/audit.jsonl
+sudo stat -c %s /var/log/hermes-remoto/hermesmcp/audit.jsonl
+sudo sha256sum /var/log/hermes-remoto/hermesmcp/audit.jsonl
 
 # su hermesmcp `read` chiede il numero letto sopra, e lo si incolla.
 read -r BYTE
@@ -1390,6 +1390,11 @@ Il numero lo si digita invece di metterlo nel comando perché un segnaposto
 dentro un blocco da incollare è già costato due errori a questo progetto: qui
 `read` lo chiede, e un comando incompleto non parte invece di partire
 sbagliato.
+
+E la dimensione si legge con `stat`, non con `wc -c < file`: la redirezione
+la esegue la **shell di chi digita**, non `sudo`, quindi su una copia `0600`
+di `hermes-collect` quel comando fallisce con `Permission denied` mentre
+sembra un problema di `sudo`.
 
 Le due impronte devono coincidere: la copia è un prefisso esatto
 dell'originale, quindi il confronto non richiede di interpretare niente.
@@ -1413,10 +1418,10 @@ credere, e la domanda è *cosa manca*:
 
 ```sh
 # sul collector: fin dove arriva la copia
-wc -c < /var/log/hermes-remoto/hermesmcp/audit.jsonl
+sudo stat -c %s /var/log/hermes-remoto/hermesmcp/audit.jsonl
 
 # su hermesmcp quanto è lungo adesso l'originale
-sudo wc -c < /var/log/hermes/audit.jsonl
+sudo stat -c %s /var/log/hermes/audit.jsonl
 ```
 
 Se l'originale è più corto, le righe che mancano sono nella copia e solo lì.
