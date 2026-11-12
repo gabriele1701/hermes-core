@@ -1910,5 +1910,12 @@ def test_il_preflight_gira_anche_lanciato_come_programma(tmp_path: Path, radice:
     )
 
     assert "Traceback" not in esito.stderr, esito.stderr[-800:]
-    ultima = esito.stdout.strip().splitlines()[-1]
-    assert ultima.startswith(("PRONTO", "NON PRONTO")), esito.stdout[-500:]
+    # Si cerca la riga del verdetto FRA le righe, non in fondo: con un
+    # referto PRONTO il programma stampa una riga in più, quindi pretendere
+    # l'ultima significherebbe pretendere che la macchina non sia pronta —
+    # cioè sperare una proprietà dell'ambiente invece di imporla, che è
+    # esattamente come questo test è caduto in CI la prima volta.
+    righe = esito.stdout.strip().splitlines()
+    assert any(
+        r.startswith(("PRONTO", "NON PRONTO")) for r in righe
+    ), esito.stdout[-500:]
