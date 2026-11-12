@@ -1124,6 +1124,21 @@ Il perimetro di rete, e un tetto sul disco:
 sudo ufw allow from 192.168.205.10 to any port 22 proto tcp
 ```
 
+> **Attenzione prima di attivare `ufw` qui.** Questa regola apre la 22 al solo
+> mittente. Se `ufw` è inattivo la regola non fa niente; ma attivarlo con
+> questa sola regola **taglia fuori anche te**, e su una macchina a cui
+> arrivi solo via SSH significa restare chiusi fuori. Se amministri il
+> collector dalla rete e non dalla sua console, serve anche la regola per la
+> postazione da cui ti colleghi, **prima** di `ufw enable`:
+>
+> ```sh
+> # sul collector
+> sudo ufw allow from 192.168.205.1 to any port 22 proto tcp
+> ```
+>
+> È lo stesso ragionamento di `hermesmcp`, dove la regola nomina un solo
+> indirizzo — ma lì quell'indirizzo è la postazione, e qui no.
+
 Il rischio residuo della scelta di spingere è che un mittente compromesso
 riempia il disco del collector. Si confina con una partizione separata o una
 quota su `/var/log/hermes-remoto`, non con la configurazione di SSH.
