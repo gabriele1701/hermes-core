@@ -1202,6 +1202,21 @@ Lo **stato** è `755` con file `644` di proposito: dentro ci sono dimensioni e
 un istante, nessun segreto, e il preflight gira come `hermes` e deve poterlo
 leggere. Scriverci può solo `hermes-ship`.
 
+Ma i permessi di `stato/` non bastano: la directory che la contiene è `750`,
+quindi serve anche il **transito** per l'utente di servizio. Senza, il
+preflight non arriva al file — e un preflight che non arriva a un dato non
+può dire niente su quel presidio:
+
+```sh
+# su hermesmcp
+sudo setfacl -m u:hermes:--x /var/lib/hermes-ship
+```
+
+Solo transito: la chiave privata che sta in quella directory resta `600` e
+illeggibile. È la stessa forma della concessione data a `hermes-ship` sul
+log — minimo privilegio applicato a una directory, non un `chmod` che la
+apra a tutti.
+
 La chiave pubblica va portata sul collector. Sono due macchine, quindi due
 comandi: il file nasce di qua e si installa di là.
 

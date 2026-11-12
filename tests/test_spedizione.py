@@ -624,3 +624,83 @@ def test_il_preflight_dichiara_di_non_vedere_la_copia_remota(tmp_path: Path):
     )
 
     assert "NON è verificabile da qui" in controllo.messaggio
+
+
+# --------------------------------------------------------------------------- #
+# «Non lo so» non deve diventare «non è mai successo»
+# --------------------------------------------------------------------------- #
+
+
+def test_uno_stato_illeggibile_non_diventa_mai_girato(monkeypatch, tmp_path: Path):
+    """Trovato sulla VM: il referto diceva il falso su una spedizione viva.
+
+    `/var/lib/hermes-ship` è `750` e appartiene al mittente: il preflight,
+    che gira come utente di servizio, non la attraversa. Il codice trattava
+    «non riesco a leggere» e «non c'è» come la stessa cosa, e riportava «il
+    mittente non è mai girato» mentre il mittente aveva appena spedito.
+
+    È la forma censita nel metodo del progetto — un'interrogazione che non sa
+    rispondere ne fabbrica una plausibile — e qui era peggio del solito:
+    rassicurava su un presidio di cui non sapeva niente.
+    """
+    from mcp_server import doctor
+
+    def nega(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", nega)
+
+    valori, motivo = doctor._stato_di_un_canale(tmp_path, "audit")
+
+    assert valori is None
+    assert motivo, "il motivo dev'essere riportato, non ingoiato"
+
+
+def test_il_referto_dice_che_non_sa_invece_di_rassicurare(
+    monkeypatch, tmp_path: Path
+):
+    from mcp_server import doctor
+
+    def nega(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", nega)
+    sped = doctor.Spedizione(
+        collector_host="h",
+        collector_utente="u",
+        collector_porta=22,
+        chiave=Path("/k"),
+        known_hosts=Path("/kh"),
+        stato_dir=tmp_path / "hermes-ship" / "stato",
+        canali=(("audit", tmp_path / "audit.jsonl"),),
+    )
+    referto = doctor.Referto()
+
+    doctor._ultimo_giro(referto, sped, "hermes")
+
+    controllo = _controllo(referto, "spedizione di audit")
+    assert "mai girato" not in controllo.messaggio
+    assert "non si puo' dire niente" in controllo.messaggio
+    # Il rimedio deve nominare il transito, che è la causa vera.
+    assert "setfacl" in controllo.rimedio
+    assert str(sped.stato_dir.parent) in controllo.rimedio
+
+
+def test_uno_stato_assente_resta_mai_girato(tmp_path: Path):
+    """La distinzione non deve aver perso il caso normale."""
+    from mcp_server import doctor
+
+    sped = doctor.Spedizione(
+        collector_host="h",
+        collector_utente="u",
+        collector_porta=22,
+        chiave=Path("/k"),
+        known_hosts=Path("/kh"),
+        stato_dir=tmp_path,
+        canali=(("audit", tmp_path / "audit.jsonl"),),
+    )
+    referto = doctor.Referto()
+
+    doctor._ultimo_giro(referto, sped, "hermes")
+
+    assert "mai girato" in _controllo(referto, "spedizione di audit").messaggio

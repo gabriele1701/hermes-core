@@ -2322,17 +2322,31 @@ def _ostacoli_alla_lettura(percorso: Path, utente: str) -> list[str]:
     return problemi
 
 
-def _stato_di_un_canale(stato_dir: Path, canale: str) -> dict[str, str] | None:
+def _stato_di_un_canale(
+    stato_dir: Path, canale: str
+) -> tuple[dict[str, str] | None, str | None]:
+    """Lo stato dell'ultimo giro, e - se manca - **perche'** manca.
+
+    Restituisce ``(valori, motivo)``. Un file che non c'e' e un file che non
+    si riesce a leggere sono due cose diverse: il primo dice che il mittente
+    non e' mai girato, il secondo non dice niente sul mittente e tutto su di
+    noi. Confonderli significa riportare «non e' mai girato» di una
+    spedizione che funziona - un'interrogazione che non sa rispondere e ne
+    fabbrica una plausibile, che e' la forma di guasto che questo preflight
+    esiste per non avere.
+    """
     percorso = stato_dir / f"{canale}.stato"
     try:
         testo = percorso.read_text(encoding="utf-8")
-    except OSError:
-        return None
+    except FileNotFoundError:
+        return None, None
+    except OSError as err:
+        return None, err.strerror or "non leggibile"
     valori: dict[str, str] = {}
     for riga in testo.splitlines():
         chiave, _, valore = riga.partition("=")
         valori[chiave.strip()] = valore.strip()
-    return valori
+    return valori, None
 
 
 def _eta(ts: str) -> float | None:
@@ -2450,7 +2464,7 @@ def _spedizione(
 
     _mittente_installato(referto, cfg)
     _identita_che_spedisce(referto, sped)
-    _ultimo_giro(referto, sped)
+    _ultimo_giro(referto, sped, servizio)
 
 
 def _mittente_installato(referto: Referto, cfg: ServerConfig) -> None:
@@ -2561,7 +2575,9 @@ def _identita_che_spedisce(referto: Referto, sped: Spedizione) -> None:
     )
 
 
-def _ultimo_giro(referto: Referto, sped: Spedizione) -> None:
+def _ultimo_giro(
+    referto: Referto, sped: Spedizione, servizio: str | None
+) -> None:
     """Com'è andata l'ultima spedizione, e quanto è rimasto indietro.
 
     `divergenza` è un ERRORE e deve restare rumoroso: significa che la copia
@@ -2569,8 +2585,24 @@ def _ultimo_giro(referto: Referto, sped: Spedizione) -> None:
     stato accorciato o riscritto. È l'unico sintomo che una manomissione
     produce, e un sintomo che non si vede non è un sintomo.
     """
+    nome_servizio = servizio or "<utente-di-servizio>"
     for nome, percorso in sped.canali:
-        valori = _stato_di_un_canale(sped.stato_dir, nome)
+        valori, motivo = _stato_di_un_canale(sped.stato_dir, nome)
+        if valori is None and motivo is not None:
+            # Non sappiamo se il mittente sia girato, e non lo diciamo.
+            referto.aggiungi(
+                f"spedizione di {nome}",
+                Esito.AVVISO,
+                f"stato non leggibile da qui ({motivo}): di questa "
+                f"spedizione non si puo' dire niente",
+                f"Il preflight gira come {nome_servizio}, che deve poter "
+                f"attraversare la directory del mittente:\n"
+                f"             sudo setfacl -m u:{nome_servizio}:--x "
+                f"{sped.stato_dir.parent}\n"
+                f"             Solo transito: la chiave privata che sta li' "
+                f"dentro resta illeggibile.",
+            )
+            continue
         if valori is None:
             referto.aggiungi(
                 f"spedizione di {nome}",
