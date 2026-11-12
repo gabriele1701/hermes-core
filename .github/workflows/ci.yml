@@ -145,17 +145,23 @@ jobs:
           Un verde qui dice che IL CODICE È COERENTE.
           Non dice che il dispiegamento è sicuro.
 
-          Nella suite due soli test eseguono un'operazione privilegiata
-          (chattr +a), e sui runner saltano. Tutto ciò che riguarda sudo,
-          systemd-run e le ACL verifica STRINGHE: l'argv che costruiremmo,
-          o il testo del rimedio. Nessuno di quei comandi viene eseguito.
+          Nella suite tre test hanno bisogno di privilegi (due per
+          chattr +a, uno per leggere sotto un'altra identità) e sui runner
+          saltano. Tutto ciò che riguarda sudo e systemd-run verifica
+          STRINGHE: l'argv che costruiremmo, o il testo del rimedio.
+          Nessuno di quei comandi viene eseguito.
+
+          Eccezione: la SEMANTICA delle ACL POSIX è verificata davvero
+          (test_permessi.py scrive e rilegge system.posix_acl_access su
+          questo filesystem). È verificata la regola, non la sua
+          applicazione sulla macchina di dispiegamento.
 
           Quindi questa CI non dice niente su:
 
             - isolamento dei tool: sudo autorizzato, wrapper di root,
               MemoryMax e TasksMax applicati davvero, utente senza shell
-            - ACL: che hermes-tool apra gli script e NON legga config/,
-              docs/, mcp_server/
+            - le ACL DELLA MACCHINA: che hermes-tool apra gli script e NON
+              legga config/, docs/, mcp_server/
             - append-only del log d'audit (chattr +a)
             - canale SSH: drop-in, ForceCommand, chiavi fuori dalla home
             - perimetro come fatto di rete
