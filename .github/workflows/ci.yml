@@ -50,15 +50,23 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Virtualenv del progetto
+        # Nel virtualenv del repo, non nell'interprete di setup-python: è
+        # quello che docs/dipendenze.md prescrive, e il senso di questo job
+        # è riprodurre il dispiegamento, non qualcosa che gli somiglia. La
+        # prima esecuzione ha mostrato che la differenza si sente: il
+        # lanciatore `bin/hermes-core-server` cerca proprio `.venv`.
+        run: python3 -m venv .venv
+
       - name: Dipendenze dal lockfile, con hash obbligatori
-        run: pip install --require-hashes --no-deps -r requirements.lock
+        run: .venv/bin/pip install --require-hashes --no-deps -r requirements.lock
 
       - name: Il progetto, senza isolamento di build
         # Senza --no-build-isolation pip scaricherebbe il backend di build al
         # momento, senza hash e senza pin, e poi lo eseguirebbe: sarebbe
         # l'ultimo passo di un'installazione «con hash obbligatori» a
         # eseguire codice non verificato. setuptools è nel lock apposta.
-        run: pip install --no-deps --no-build-isolation -e .
+        run: .venv/bin/pip install --no-deps --no-build-isolation -e .
 
       - name: pytest
         # pytest non è nel lockfile: il dispiegamento non lo installa. Finché
@@ -66,9 +74,9 @@ jobs:
         # dipendenze non compaiono nel lock, quindi non possono spostare una
         # versione fissata. Che non lo abbiano fatto lo verifica la suite
         # stessa, che confronta il lock con l'ambiente installato.
-        run: pip install "pytest==9.2.0"
+        run: .venv/bin/pip install "pytest==9.2.0"
 
-      - run: python -m pytest tests/ -q
+      - run: .venv/bin/python -m pytest tests/ -q
 
   # ------------------------------------------------------------------ #
   # Dagli intervalli: allarme precoce sulle rotture a monte. Settimanale.
@@ -91,13 +99,15 @@ jobs:
         # Esattamente ciò che il lockfile nasconde di proposito: serve a
         # sapere che una release nuova rompe il progetto PRIMA di rigenerare
         # il lock.
-        run: pip install -e ".[dev]"
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -e ".[dev]"
 
       - name: pytest, senza i test che confrontano lock e ambiente
         # Qui l'ambiente DEVE divergere dal lock: è il punto del job. I test
         # marcati `dipendenze_reali` misurano quella coerenza e fallirebbero
         # per costruzione, dicendo una cosa che sappiamo già.
-        run: python -m pytest tests/ -q -m "not dipendenze_reali"
+        run: .venv/bin/python -m pytest tests/ -q -m "not dipendenze_reali"
 
   # ------------------------------------------------------------------ #
   # Vulnerabilità note nelle dipendenze fissate.
