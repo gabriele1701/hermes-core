@@ -20,7 +20,7 @@ authors = [{ name = "gabriele1701" }]
 # accogliere una major nuova senza averla provata.
 dependencies = [
     "mcp>=2.3,<3",
-    "pydantic>=2.12,<3",
+    "pydantic>=2.14.3,<3",
 ]
 
 [project.optional-dependencies]
