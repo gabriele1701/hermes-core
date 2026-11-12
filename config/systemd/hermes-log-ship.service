@@ -43,7 +43,14 @@ TasksMax=32
 
 # Più del doppio della cadenza: se un giro resta appeso, il timer non deve
 # accumulare esecuzioni sovrapposte.
-RuntimeMaxSec=120
+#
+# `TimeoutStartSec` e NON `RuntimeMaxSec`: su un `Type=oneshot` systemd
+# ignora il secondo e lo dice a ogni avvio («has no effect in combination
+# with Type=oneshot»). Non era un avviso cosmetico — per un oneshot
+# `TimeoutStartSec` vale **infinito** di default, quindi il tetto che
+# credevamo di avere messo non c'era, e un giro appeso sarebbe rimasto
+# appeso. Trovato al primo avvio su macchina vera.
+TimeoutStartSec=120
 
 # Il mittente legge due file e ne scrive uno. Tutto il resto del filesystem
 # gli è di sola lettura, e la sua unica area scrivibile è lo stato.

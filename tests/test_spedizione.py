@@ -414,6 +414,22 @@ def test_l_utente_dell_unita_e_quello_del_preflight():
     assert f"Group={UTENTE_SPEDIZIONE}\n" in unita
 
 
+def test_l_unita_usa_il_tetto_di_tempo_che_un_oneshot_rispetta():
+    """`RuntimeMaxSec` su un `Type=oneshot` viene ignorato da systemd.
+
+    Trovato al primo avvio su macchina vera, dall'avviso nel journal. Non
+    era cosmetico: per un oneshot `TimeoutStartSec` vale **infinito** di
+    default, quindi il tetto che credevamo di aver messo non c'era e un giro
+    appeso sarebbe rimasto appeso, con il timer a guardare.
+    """
+    unita = (RADICE / "config" / "systemd" / "hermes-log-ship.service").read_text(
+        encoding="utf-8"
+    )
+    assert "Type=oneshot" in unita
+    assert not re.search(r"^RuntimeMaxSec=", unita, flags=re.MULTILINE)
+    assert re.search(r"^TimeoutStartSec=\d+$", unita, flags=re.MULTILINE)
+
+
 def test_l_unita_lancia_il_mittente_dove_viene_installato():
     from mcp_server.doctor import MITTENTE_INSTALLATO
 
