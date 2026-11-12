@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Esegue `pip-audit` sul lockfile, onorando le sospensioni scritte.
 
-Perché non basta `pip-audit -r requirements.lock`
+Perché non basta `pip-audit -r requirements.txt`
 -------------------------------------------------
 
 Un controllo bloccante su cui non si può fare nulla viene disattivato. Una
@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 RADICE = Path(__file__).resolve().parents[2]
-LOCKFILE = RADICE / "requirements.lock"
+LOCKFILE = RADICE / "requirements.txt"
 SOSPESE = RADICE / ".github" / "pip-audit-sospese.txt"
 
 #: Identificativi riconosciuti. Un nome inventato non deve passare per una

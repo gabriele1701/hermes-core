@@ -7,7 +7,7 @@ conta di più — **cosa la CI non verifica**.
 
 | Job | Quando | Come installa | Cosa trova |
 |---|---|---|---|
-| `dal-lock` | ogni push e PR | `--require-hashes` da `requirements.lock` | regressioni del nostro codice |
+| `dal-lock` | ogni push e PR | `--require-hashes` da `requirements.txt` | regressioni del nostro codice |
 | `dagli-intervalli` | lunedì mattina | risolve dagli intervalli di `pyproject.toml` | rotture a monte |
 
 Sono due domande diverse e confonderle produce una CI che non risponde a

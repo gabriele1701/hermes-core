@@ -807,7 +807,7 @@ def _scrivibilita(referto: Referto, cfg: ServerConfig) -> None:
 
 
 #: Nome del file di blocco, relativo alla radice del repo.
-NOME_LOCKFILE = "requirements.lock"
+NOME_LOCKFILE = "requirements.txt"
 
 #: Dichiarazione delle dipendenze di INSTALLAZIONE, relativa alla radice.
 #: Sono nel lock per essere verificate quando `pip install -e .` le esegue,

@@ -59,7 +59,7 @@ jobs:
         run: python3 -m venv .venv
 
       - name: Dipendenze dal lockfile, con hash obbligatori
-        run: .venv/bin/pip install --require-hashes --no-deps -r requirements.lock
+        run: .venv/bin/pip install --require-hashes --no-deps -r requirements.txt
 
       - name: Il progetto, senza isolamento di build
         # Senza --no-build-isolation pip scaricherebbe il backend di build al
