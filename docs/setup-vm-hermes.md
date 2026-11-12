@@ -1063,24 +1063,45 @@ non vedrebbe, è una divergenza.
 
 ---
 
-### 10.1 Il collector
+### 10.0 Due macchine: quale comando va dove
 
-Su `192.168.205.50`. Non deve essere la macchina che genera il log.
+Questa sezione è l'unica del documento che attraversa **due macchine**, e
+confonderle fa perdere tempo. Ogni blocco qui sotto comincia con la riga che
+dice dove si esegue.
 
-Il collector **non ha il repo**, e non deve averlo: è una macchina che
-conserva prove, non una che esegue il progetto. I due file che le servono si
-portano lì a mano, da una macchina che il repo ce l'ha:
+| | Chi è | Cosa ci sta |
+|---|---|---|
+| **`hermesmcp`** · 192.168.205.10 | la macchina sorvegliata | il repo in `/opt/hermes-core`, il log, il mittente |
+| **collector** · 192.168.205.50 | la macchina che conserva | la copia. **Niente repo**, ed è voluto |
+
+Il collector non ha il repo e non deve averlo: conserva prove, non esegue il
+progetto. I file che gli servono ci arrivano copiati.
+
+Serve il tuo account sul collector — **non è detto che si chiami come
+quello qui**. Si imposta una volta per sessione di shell:
 
 ```sh
-scp bin/hermes-log-receive config/sshd/20-hermes-collect.conf \
-    monika@192.168.205.50:~/
+# su hermesmcp
+COLLECTOR=iltuoutente@192.168.205.50
 ```
 
-I comandi qui sotto si eseguono **sul collector**, nella directory in cui i
-due file sono arrivati. Non da `/tmp`: installare un file di root da una
-directory scrivibile da chiunque è una finestra che non serve aprire.
+Se apri una shell nuova va reimpostato: senza, gli `scp` qui sotto falliscono
+subito invece di fare la cosa sbagliata.
+
+### 10.1 Il collector
 
 ```sh
+# su hermesmcp, dalla radice del repo
+scp bin/hermes-log-receive config/sshd/20-hermes-collect.conf "$COLLECTOR":~/
+```
+
+I comandi che seguono si eseguono **sul collector**, nella home in cui i due
+file sono arrivati — `ls` deve mostrarli. Non da `/tmp`: installare un file
+di root da una directory scrivibile da chiunque è una finestra che non serve
+aprire.
+
+```sh
+# sul collector
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-collect
 sudo install -d -m 755 -o root -g root /var/log/hermes-remoto
 sudo install -d -m 700 -o hermes-collect -g hermes-collect \
@@ -1099,6 +1120,7 @@ nessuno ha autorizzato.
 Il perimetro di rete, e un tetto sul disco:
 
 ```sh
+# sul collector
 sudo ufw allow from 192.168.205.10 to any port 22 proto tcp
 ```
 
@@ -1112,6 +1134,7 @@ Su `hermesmcp`. **Non** è l'utente di servizio: `hermes` compromesso non deve
 poter fermare la spedizione né prendersi la chiave che la autorizza.
 
 ```sh
+# su hermesmcp
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-ship
 sudo install -d -m 750 -o hermes-ship -g hermes-ship /var/lib/hermes-ship
 sudo install -d -m 755 -o hermes-ship -g hermes-ship /var/lib/hermes-ship/stato
@@ -1128,12 +1151,18 @@ Lo **stato** è `755` con file `644` di proposito: dentro ci sono dimensioni e
 un istante, nessun segreto, e il preflight gira come `hermes` e deve poterlo
 leggere. Scriverci può solo `hermes-ship`.
 
-La chiave pubblica va sul collector:
+La chiave pubblica va portata sul collector. Sono due macchine, quindi due
+comandi: il file nasce di qua e si installa di là.
 
 ```sh
+# su hermesmcp
+scp /var/lib/hermes-ship/id_ed25519.pub "$COLLECTOR":~/
+```
+
+```sh
+# sul collector
 sudo install -m 644 -o root -g root \
-     /var/lib/hermes-ship/id_ed25519.pub \
-     /etc/ssh/authorized_keys.d/hermes-collect
+     ~/id_ed25519.pub /etc/ssh/authorized_keys.d/hermes-collect
 sudo sshd -t && sudo systemctl reload ssh
 ```
 
@@ -1148,10 +1177,10 @@ Si prende la chiave dalla rete e **si verifica l'impronta dalla console** del
 collector, che è il pezzo che rende l'operazione sicura:
 
 ```sh
-# sul collector, dalla sua console:
+# sul collector, dalla sua console
 sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 
-# su hermesmcp:
+# su hermesmcp
 sudo sh -c 'ssh-keyscan -t ed25519 192.168.205.50 > /var/lib/hermes-ship/known_hosts'
 ssh-keygen -lf /var/lib/hermes-ship/known_hosts
 ```
@@ -1167,6 +1196,7 @@ root — `hermes-ship` deve leggerlo, non riscriverlo.
 una finestra con `-a` tolto.
 
 ```sh
+# su hermesmcp
 sudo setfacl -m u:hermes-ship:--x /var/log/hermes
 sudo chattr -a /var/log/hermes/audit.jsonl
 sudo setfacl -m u:hermes-ship:r  /var/log/hermes/audit.jsonl
@@ -1190,6 +1220,7 @@ Due cose, per non ripetere errori già fatti:
 ### 10.5 La configurazione, il mittente, il timer
 
 ```sh
+# su hermesmcp
 sudo install -d -m 755 -o root -g root /etc/hermes
 sudo install -m 644 -o root -g root \
      config/log-shipping.example.conf /etc/hermes/log-shipping.conf
@@ -1204,6 +1235,7 @@ e un valore plausibile passa i controlli dando una destinazione che non è la
 tua.
 
 ```sh
+# su hermesmcp
 sudo install -m 755 -o root -g root \
      bin/hermes-log-ship /usr/local/sbin/hermes-log-ship
 sudo install -m 644 -o root -g root \
@@ -1232,6 +1264,7 @@ log_shipping = "/etc/hermes/log-shipping.conf"
 Un giro a mano, e cosa dice:
 
 ```sh
+# su hermesmcp
 sudo systemctl start hermes-log-ship.service
 journalctl -u hermes-log-ship.service -n 20 --no-pager
 cat /var/lib/hermes-ship/stato/audit.stato
@@ -1240,6 +1273,7 @@ cat /var/lib/hermes-ship/stato/audit.stato
 Dal preflight, che è il posto in cui questa verifica vive:
 
 ```sh
+# su hermesmcp
 sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml
 ```
 
@@ -1250,7 +1284,7 @@ giro. Il resto si guarda **dal collector**, che è l'unica macchina la cui
 parola non sia riscrivibile da chi manomette questa:
 
 ```sh
-# sul collector:
+# sul collector
 ls -l /var/log/hermes-remoto/hermesmcp/
 sudo tail -n 3 /var/log/hermes-remoto/hermesmcp/audit.jsonl
 ```
@@ -1259,11 +1293,11 @@ E il confronto integrale, che è la verifica vera e si fa quando serve — non
 ogni cinque minuti:
 
 ```sh
-# sul collector:
+# sul collector
 wc -c < /var/log/hermes-remoto/hermesmcp/audit.jsonl
 sha256sum /var/log/hermes-remoto/hermesmcp/audit.jsonl
 
-# su hermesmcp: `read` chiede il numero letto sopra, e lo si incolla.
+# su hermesmcp `read` chiede il numero letto sopra, e lo si incolla.
 read -r BYTE
 sudo head -c "$BYTE" /var/log/hermes/audit.jsonl | sha256sum
 ```
@@ -1279,7 +1313,7 @@ dell'originale, quindi il confronto non richiede di interpretare niente.
 Quando la copia esiste ed è confermata, va resa non riscrivibile anche lì:
 
 ```sh
-# sul collector, dopo il primo giro riuscito:
+# sul collector, dopo il primo giro riuscito
 sudo chattr +a /var/log/hermes-remoto/hermesmcp/audit.jsonl
 sudo chattr +a /var/log/hermes-remoto/hermesmcp/overrides.jsonl
 ```
@@ -1297,7 +1331,7 @@ credere, e la domanda è *cosa manca*:
 # sul collector: fin dove arriva la copia
 wc -c < /var/log/hermes-remoto/hermesmcp/audit.jsonl
 
-# su hermesmcp: quanto è lungo adesso l'originale
+# su hermesmcp quanto è lungo adesso l'originale
 sudo wc -c < /var/log/hermes/audit.jsonl
 ```
 
@@ -1312,7 +1346,7 @@ laboratorio, dove una divergenza è quasi sempre un esperimento e non
 un'intrusione:
 
 ```sh
-# sul collector:
+# sul collector
 sudo chattr -a /var/log/hermes-remoto/hermesmcp/audit.jsonl
 sudo mv /var/log/hermes-remoto/hermesmcp/audit.jsonl \
         /var/log/hermes-remoto/hermesmcp/audit.jsonl.divergente
