@@ -1194,17 +1194,30 @@ leggere. Scriverci può solo `hermes-ship`.
 La chiave pubblica va portata sul collector. Sono due macchine, quindi due
 comandi: il file nasce di qua e si installa di là.
 
+`/var/lib/hermes-ship` è `750` e appartiene a `hermes-ship`: il tuo utente
+non ci entra, quindi lo `scp` diretto fallisce. La chiave **pubblica** si
+appoggia un momento in chiaro — è pubblica, non è un segreto:
+
 ```sh
 # su hermesmcp
-scp /var/lib/hermes-ship/id_ed25519.pub "$COLLECTOR":~/
+sudo install -m 644 -o root -g root \
+     /var/lib/hermes-ship/id_ed25519.pub /tmp/hermes-ship.pub
+scp /tmp/hermes-ship.pub "$COLLECTOR":~/
+rm /tmp/hermes-ship.pub
 ```
 
 ```sh
 # sul collector
 sudo install -m 644 -o root -g root \
-     ~/id_ed25519.pub /etc/ssh/authorized_keys.d/hermes-collect
+     ~/hermes-ship.pub /etc/ssh/authorized_keys.d/hermes-collect
 sudo sshd -t && sudo systemctl reload ssh
 ```
+
+**Il ricarico va fatto qui e non prima**: `20-hermes-collect.conf` attiva un
+`ForceCommand` per `hermes-collect`, e ricaricare `sshd` quando la chiave non
+c'è ancora lascerebbe un canale che nessuno può usare, con un sintomo che non
+punta alla causa. È la stessa ragione per cui il bootstrap di `hermesmcp` non
+ricarica `sshd` da solo.
 
 ### 10.3 Conoscere il collector per chiave, non per fiducia
 
