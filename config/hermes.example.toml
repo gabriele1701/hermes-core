@@ -101,6 +101,24 @@ log_path = "../logs/hermes-audit.jsonl"
 #
 # tool_runner = "/usr/local/sbin/hermes-tool-run"
 
+# Spedizione del log d'audit a una seconda macchina (A5).
+#
+# Il server NON legge questo file e non spedisce niente: lo fa un mittente a
+# parte, sotto un'altra identità e con il proprio timer. Il percorso sta qui
+# perché il preflight possa dire se la traccia esce davvero da questa
+# macchina, e perché il canale `audit` dichiarato là dentro e `log_path`
+# qui sopra vengano CONFRONTATI: due fonti per lo stesso file sono due fonti
+# che prima o poi divergono, e spedire diligentemente il file sbagliato è il
+# modo peggiore di avere una copia.
+#
+# Assente → il log vive solo su questa macchina. Il server funziona, e il
+# preflight lo dichiara: è una proprietà in meno, non un pezzo rotto.
+# Configurato e incoerente → il preflight lo tratta come un errore.
+#
+# Modello e procedura: config/log-shipping.example.conf, docs §10.
+#
+# log_shipping = "/etc/hermes/log-shipping.conf"
+
 # Disponibilità del runtime isolato. A false, i tool che dichiarano
 # requires_container vengono NEGATI, non eseguiti sull'host.
 container_available = false

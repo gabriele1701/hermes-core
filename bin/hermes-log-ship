@@ -1,0 +1,323 @@
+#!/bin/sh
+# Spedisce le righe nuove del log d'audit alla copia su un'altra macchina.
+#
+# Si installa FUORI dall'albero di git, come il wrapper dei tool:
+#
+#     sudo install -m 755 -o root -g root \
+#          bin/hermes-log-ship /usr/local/sbin/hermes-log-ship
+#
+# e lo lancia un timer di systemd come `hermes-ship`. La ragione è la stessa
+# del wrapper: un `git checkout` di un altro branch cambierebbe il codice che
+# custodisce le prove, e `git` riscrivendolo lo intesterebbe a chi fa il
+# pull. Dopo un aggiornamento che lo tocca va reinstallato, e `diff` fra i
+# due percorsi risponde alla domanda. Il preflight lo verifica.
+#
+# Perché un utente a parte, e non il servizio
+# -------------------------------------------
+#
+# `hermes-ship` non è `hermes`. Il servizio compromesso non deve poter né
+# fermare la spedizione né prendersi la chiave che la autorizza: la traccia
+# serve soprattutto contro chi è già dentro. Resta scoperto solo root, che è
+# il livello che questo presidio dichiara di non coprire — e contro cui vale
+# la copia già uscita.
+#
+# Cosa fa, e cosa si rifiuta di fare
+# ----------------------------------
+#
+# Per ogni canale, in tre tempi:
+#
+#   1. chiede al collector dov'è arrivato (`stato`): dimensione della copia e
+#      impronta della sua coda;
+#   2. CONTROLLA CHE LA COPIA SIA ANCORA UN PREFISSO DELL'ORIGINALE. Se la
+#      copia è più lunga del file locale, o se la coda non combacia, il file
+#      locale è stato accorciato o riscritto: si ferma con esito 3 e NON
+#      spedisce. Spedire sopra una divergenza significherebbe costruire una
+#      copia che non corrisponde a niente, cioè distruggere l'unica prova
+#      mentre si crede di salvarla;
+#   3. manda i byte mancanti dichiarando da dove partono. È il ricevente a
+#      rifiutare un offset che non sia la sua dimensione: vedere
+#      `hermes-log-receive` per perché quel rifiuto è il cuore del presidio.
+#
+# Si spediscono BYTE, non righe: un blocco può finire a metà riga, e la riga
+# si completa al giro dopo. È ciò che tiene la copia identica all'originale
+# byte per byte, e quindi confrontabile con un `sha256sum` invece che
+# «interpretabile».
+#
+# Lo stato locale non è la fonte della verità — lo è il collector, che è
+# l'unica macchina la cui parola non può essere riscritta da chi manomette
+# questa. Lo stato serve a dire al preflight com'è andata l'ultima volta.
+
+set -eu
+
+CONFIG=/etc/hermes/log-shipping.conf
+
+# Percorsi assoluti, non nomi da risolvere nel PATH: quale programma apre il
+# canale verso il collector è una decisione, non una proprietà dell'ambiente
+# in cui il timer è partito. Nessuna variabile d'ambiente li sostituisce —
+# i test lavorano su una copia con questa riga cambiata, così lo script
+# installato non ha superficie che esista solo per loro.
+SSH=/usr/bin/ssh
+
+# Deve restare uguale a quella del ricevente: è la finestra su cui si
+# verifica che copia e originale siano ancora lo stesso file.
+FINESTRA=4096
+
+ESITO_CONFIG=1
+ESITO_IRRAGGIUNGIBILE=2
+ESITO_DIVERGENZA=3
+ESITO_RICEVENTE=4
+
+muori() {
+    printf 'hermes-log-ship: %s\n' "$2" >&2
+    exit "$1"
+}
+
+# --- Configurazione: si legge, non si esegue ------------------------------- #
+#
+# Il file è di root e questo processo non può riscriverlo, ma `.` lo
+# eseguirebbe comunque come codice. Si parsa, e una chiave non riconosciuta
+# è un ERRORE e non un campo da ignorare: di solito è un refuso, e un refuso
+# silenzioso in una configurazione di sicurezza è un'impostazione che credi
+# di aver messo.
+
+[ -f "$CONFIG" ] || muori $ESITO_CONFIG "configurazione assente: $CONFIG"
+
+COLLECTOR_HOST=
+COLLECTOR_UTENTE=
+# Default esplicito: la 22 è la porta solita, non l'unica. Un collector su
+# una porta diversa è una scelta legittima di chi amministra, e una cassetta
+# degli attrezzi che desse per scontata la 22 non sarebbe portabile.
+COLLECTOR_PORTA=22
+CHIAVE=
+KNOWN_HOSTS=
+STATO_DIR=
+CANALI=
+
+while IFS= read -r RIGA; do
+    case "$RIGA" in
+        ''|'#'*) continue ;;
+    esac
+    CHIAVE_RIGA=${RIGA%%=*}
+    VALORE=${RIGA#*=}
+    [ "$CHIAVE_RIGA" != "$RIGA" ] \
+        || muori $ESITO_CONFIG "riga senza '=' in $CONFIG: $RIGA"
+    case "$CHIAVE_RIGA" in
+        COLLECTOR_HOST)   COLLECTOR_HOST="$VALORE" ;;
+        COLLECTOR_UTENTE) COLLECTOR_UTENTE="$VALORE" ;;
+        COLLECTOR_PORTA)
+            printf '%s' "$VALORE" | grep -Eq '^[0-9]{1,5}$' \
+                || muori $ESITO_CONFIG "porta non numerica: $VALORE"
+            [ "$VALORE" -ge 1 ] && [ "$VALORE" -le 65535 ] \
+                || muori $ESITO_CONFIG "porta fuori intervallo: $VALORE"
+            COLLECTOR_PORTA="$VALORE"
+            ;;
+        CHIAVE)           CHIAVE="$VALORE" ;;
+        KNOWN_HOSTS)      KNOWN_HOSTS="$VALORE" ;;
+        STATO_DIR)        STATO_DIR="$VALORE" ;;
+        CANALE_*)
+            NOME=${CHIAVE_RIGA#CANALE_}
+            printf '%s' "$NOME" | grep -Eq '^[a-z][a-z0-9-]{0,31}$' \
+                || muori $ESITO_CONFIG "nome di canale non valido: $NOME"
+            case "$VALORE" in
+                /*) ;;
+                *) muori $ESITO_CONFIG "il canale $NOME non ha un percorso assoluto" ;;
+            esac
+            CANALI="$CANALI $NOME:$VALORE"
+            ;;
+        *) muori $ESITO_CONFIG "chiave non riconosciuta in $CONFIG: $CHIAVE_RIGA" ;;
+    esac
+done < "$CONFIG"
+
+# Elencate una per una invece che in un ciclo con `eval`: cinque righe in
+# più, e nessuna espansione costruita a runtime dentro lo script che
+# custodisce le prove.
+[ -n "$COLLECTOR_HOST" ]   || muori $ESITO_CONFIG "manca COLLECTOR_HOST in $CONFIG"
+[ -n "$COLLECTOR_UTENTE" ] || muori $ESITO_CONFIG "manca COLLECTOR_UTENTE in $CONFIG"
+[ -n "$COLLECTOR_PORTA" ]  || muori $ESITO_CONFIG "COLLECTOR_PORTA vuota in $CONFIG"
+[ -n "$CHIAVE" ]           || muori $ESITO_CONFIG "manca CHIAVE in $CONFIG"
+[ -n "$KNOWN_HOSTS" ]      || muori $ESITO_CONFIG "manca KNOWN_HOSTS in $CONFIG"
+[ -n "$STATO_DIR" ]        || muori $ESITO_CONFIG "manca STATO_DIR in $CONFIG"
+[ -n "$CANALI" ] || muori $ESITO_CONFIG "nessun canale dichiarato in $CONFIG"
+[ -r "$CHIAVE" ] || muori $ESITO_CONFIG "chiave non leggibile: $CHIAVE"
+[ -d "$STATO_DIR" ] || muori $ESITO_CONFIG "directory di stato assente: $STATO_DIR"
+
+# --- Il canale verso il collector ------------------------------------------ #
+
+richiedi() {
+    # `StrictHostKeyChecking=yes` non è pignoleria: senza, chi riesce a
+    # prendere il posto del collector riceve il log e lo fa sparire, e da
+    # qui sembrerebbe tutto riuscito. La macchina si conosce per chiave,
+    # da un `known_hosts` che il mittente non scrive.
+    "$SSH" -i "$CHIAVE" \
+        -p "$COLLECTOR_PORTA" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        -o StrictHostKeyChecking=yes \
+        -o UserKnownHostsFile="$KNOWN_HOSTS" \
+        -o IdentitiesOnly=yes \
+        "$COLLECTOR_UTENTE@$COLLECTOR_HOST" "$1"
+}
+
+coda_locale() {
+    # Impronta degli stessi byte su cui il collector ha calcolato la sua:
+    # gli ultimi $FINESTRA prima di $2, non gli ultimi del file.
+    FILE="$1"
+    FINE="$2"
+    DA=$((FINE - FINESTRA))
+    if [ "$DA" -lt 0 ]; then
+        DA=0
+    fi
+    tail -c +$((DA + 1)) "$FILE" | head -c $((FINE - DA)) | sha256sum | cut -d' ' -f1
+}
+
+scrivi_stato() {
+    # Nessun segreto qui dentro: dimensioni, un esito e un istante. Serve al
+    # preflight, che gira come `hermes` e non come noi, quindi è leggibile.
+    UMASK_PRIMA=$(umask)
+    umask 022
+    {
+        printf 'ts=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'esito=%s\n' "$2"
+        printf 'locale=%s\n' "$3"
+        printf 'remoto=%s\n' "$4"
+    } > "$STATO_DIR/$1.stato"
+    umask "$UMASK_PRIMA"
+}
+
+# --- Un canale alla volta --------------------------------------------------- #
+#
+# Un canale che fallisce non ferma gli altri: sono prove distinte, e perdere
+# la spedizione degli override perché il log d'audit ha un problema
+# significherebbe perdere due tracce invece di una. L'esito peggiore
+# incontrato è quello con cui si esce.
+
+PEGGIORE=0
+
+# Gli esiti NON sono ordinati per gravità, e prendere il massimo numerico
+# sarebbe un difetto serio: un canale illeggibile (1) dopo uno divergente (3)
+# abbasserebbe il codice d'uscita e spegnerebbe proprio il segnale per cui
+# tutto questo esiste. La precedenza è esplicita, e la divergenza vince su
+# tutto.
+rango() {
+    case "$1" in
+        3) printf '40' ;;   # divergenza: l'allarme
+        4) printf '30' ;;   # il ricevente ha risposto male
+        1) printf '20' ;;   # configurazione o canale illeggibile
+        2) printf '10' ;;   # collector irraggiungibile: spesso transitorio
+        *) printf '0'  ;;
+    esac
+}
+
+peggiora() {
+    if [ "$(rango "$1")" -gt "$(rango "$PEGGIORE")" ]; then
+        PEGGIORE="$1"
+    fi
+}
+
+for VOCE in $CANALI; do
+    CANALE=${VOCE%%:*}
+    FILE=${VOCE#*:}
+
+    if [ ! -r "$FILE" ]; then
+        printf 'hermes-log-ship: %s non leggibile: %s\n' "$CANALE" "$FILE" >&2
+        scrivi_stato "$CANALE" illeggibile 0 0
+        peggiora $ESITO_CONFIG
+        continue
+    fi
+
+    LOCALE=$(wc -c < "$FILE" | tr -d ' ')
+
+    set +e
+    RISPOSTA=$(richiedi "$CANALE stato")
+    ESITO_SSH=$?
+    set -e
+    if [ "$ESITO_SSH" -eq 255 ]; then
+        printf 'hermes-log-ship: %s: collector irraggiungibile\n' "$CANALE" >&2
+        scrivi_stato "$CANALE" irraggiungibile "$LOCALE" 0
+        peggiora $ESITO_IRRAGGIUNGIBILE
+        continue
+    fi
+    if [ "$ESITO_SSH" -ne 0 ]; then
+        printf 'hermes-log-ship: %s: il ricevente ha rifiutato lo stato (%s)\n' \
+            "$CANALE" "$ESITO_SSH" >&2
+        scrivi_stato "$CANALE" errore-ricevente "$LOCALE" 0
+        peggiora $ESITO_RICEVENTE
+        continue
+    fi
+
+    REMOTO=$(printf '%s' "$RISPOSTA" | cut -d' ' -f1)
+    CODA_REMOTA=$(printf '%s' "$RISPOSTA" | cut -d' ' -f2)
+    printf '%s' "$REMOTO" | grep -Eq '^[0-9]+$' \
+        || muori $ESITO_RICEVENTE "risposta non interpretabile: $RISPOSTA"
+
+    # --- Il controllo che rende la copia una prova ------------------------- #
+
+    if [ "$REMOTO" -gt "$LOCALE" ]; then
+        printf "hermes-log-ship: %s: DIVERGENZA - la copia remota e' %s byte, il file locale %s: il locale e' stato accorciato\n" \
+            "$CANALE" "$REMOTO" "$LOCALE" >&2
+        scrivi_stato "$CANALE" divergenza "$LOCALE" "$REMOTO"
+        peggiora $ESITO_DIVERGENZA
+        continue
+    fi
+
+    if [ "$REMOTO" -gt 0 ]; then
+        NOSTRA=$(coda_locale "$FILE" "$REMOTO")
+        if [ "$NOSTRA" != "$CODA_REMOTA" ]; then
+            printf "hermes-log-ship: %s: DIVERGENZA - i primi %s byte non combaciano piu' con la copia remota\n" \
+                "$CANALE" "$REMOTO" >&2
+            scrivi_stato "$CANALE" divergenza "$LOCALE" "$REMOTO"
+            peggiora $ESITO_DIVERGENZA
+            continue
+        fi
+    fi
+
+    if [ "$REMOTO" -eq "$LOCALE" ]; then
+        scrivi_stato "$CANALE" ok "$LOCALE" "$REMOTO"
+        continue
+    fi
+
+    # --- La spedizione ------------------------------------------------------ #
+    #
+    # `head -c` limita il blocco a ciò che avevamo misurato: il file cresce
+    # mentre lo leggiamo, e un blocco più lungo dell'atteso renderebbe la
+    # verifica finale una domanda senza risposta.
+
+    set +e
+    NUOVA=$(tail -c +$((REMOTO + 1)) "$FILE" \
+        | head -c $((LOCALE - REMOTO)) \
+        | richiedi "$CANALE appendi $REMOTO")
+    ESITO_INVIO=$?
+    set -e
+
+    if [ "$ESITO_INVIO" -eq 255 ]; then
+        scrivi_stato "$CANALE" irraggiungibile "$LOCALE" "$REMOTO"
+        peggiora $ESITO_IRRAGGIUNGIBILE
+        continue
+    fi
+    if [ "$ESITO_INVIO" -eq 3 ]; then
+        printf "hermes-log-ship: %s: il ricevente ha rifiutato l'offset %s\n" \
+            "$CANALE" "$REMOTO" >&2
+        scrivi_stato "$CANALE" divergenza "$LOCALE" "$REMOTO"
+        peggiora $ESITO_DIVERGENZA
+        continue
+    fi
+    if [ "$ESITO_INVIO" -ne 0 ]; then
+        scrivi_stato "$CANALE" errore-ricevente "$LOCALE" "$REMOTO"
+        peggiora $ESITO_RICEVENTE
+        continue
+    fi
+
+    if [ "$NUOVA" != "$LOCALE" ]; then
+        # Non è un fallimento della spedizione: è che il conto non torna, e
+        # un conto che non torna su una prova va detto.
+        printf 'hermes-log-ship: %s: spediti fino a %s, la copia dice %s\n' \
+            "$CANALE" "$LOCALE" "$NUOVA" >&2
+        scrivi_stato "$CANALE" disallineato "$LOCALE" "$NUOVA"
+        peggiora $ESITO_RICEVENTE
+        continue
+    fi
+
+    scrivi_stato "$CANALE" ok "$LOCALE" "$NUOVA"
+done
+
+exit "$PEGGIORE"

@@ -75,7 +75,12 @@ Quindi la CI non dice niente su:
 - **l'append-only** del log d'audit (`chattr +a`): il test salta sui runner;
 - **il canale SSH**: drop-in, `ForceCommand`, chiavi fuori dalla home;
 - **il perimetro** come fatto di rete: `scope.toml` è validato come dato, non
-  come confine effettivo.
+  come confine effettivo;
+- **la spedizione del log verso una macchina vera.** Il protocollo sì: il
+  mittente e il ricevente girano davvero nella suite, con un `ssh` finto che
+  li mette in comunicazione, e la divergenza viene esercitata. Restano fuori
+  il canale SSH, il `ForceCommand` sul collector, il timer, e l'unica cosa
+  che conta davvero — che la copia remota esista.
 
 Tutto questo è verificato **solo dal preflight su una macchina vera**, ed è
 il motivo per cui il preflight esiste come programma e non come documento. Le

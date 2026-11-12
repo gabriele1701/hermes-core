@@ -1,0 +1,171 @@
+#!/bin/sh
+# Riceve righe di log da una macchina sorvegliata e le appende alla copia.
+#
+# Si installa SUL COLLECTOR, non sulla macchina che spedisce. Il collector
+# non ha il repo e non deve averlo — conserva prove, non esegue il progetto —
+# quindi questo file ci arriva copiato, e si installa da dove è arrivato:
+#
+#     sudo install -m 755 -o root -g root \
+#          ./hermes-log-receive /usr/local/sbin/hermes-log-receive
+#
+# ed è il `ForceCommand` di un drop-in di sshd. Chi si collega non sceglie
+# cosa eseguire: sceglie solo fra i verbi qui sotto, e il nome della
+# sorgente glielo dà il drop-in, non lui.
+#
+# Perché esiste questo file
+# -------------------------
+#
+# Una copia del log fuori dall'host è l'unica cosa che renda una
+# manomissione locale rilevabile invece che solo scomoda: chi prende root su
+# `hermesmcp` può togliere `chattr +a` e riscrivere il log, ma non può
+# raggiungere ciò che è già uscito.
+#
+# «Già uscito» è il punto, ed è la ragione per cui si spinge invece di
+# tirare. Tirando ogni cinque minuti, chi entra e ripulisce entro la
+# finestra non lascia traccia; spingendo, le righe sono al sicuro dal
+# momento in cui partono. Il costo è una credenziale sulla macchina
+# esposta — ed è accettabile proprio per come è fatto questo script: tutto
+# ciò che quella credenziale permette è appendere byte a un file.
+#
+# La regola che rende la copia una PROVA e non un backup
+# ------------------------------------------------------
+#
+# `appendi` **rifiuta qualunque offset che non sia la dimensione attuale
+# della copia**. Da lì seguono tre proprietà che non si pagano altrimenti:
+#
+#   * una connessione caduta a metà non duplica né lascia buchi: il
+#     mittente richiede `stato`, riparte da dove siamo davvero;
+#   * la copia resta BYTE-IDENTICA al prefisso dell'originale, quindi un
+#     `sha256sum` confronta i due file senza interpretare niente;
+#   * un troncamento locale diventa **rumoroso**. Se l'originale viene
+#     accorciato, l'offset che arriva non combacia più e la richiesta viene
+#     rifiutata. Non c'è modo di far tornare i conti riscrivendo lo stato
+#     del mittente: un offset minore della nostra dimensione è rifiutato
+#     allo stesso modo. L'unico modo di non far scattare il rifiuto è
+#     impedire al mittente di girare — che è «la spedizione si è fermata»,
+#     e si vede da qui.
+#
+# Perché il ricevente non guarda dentro le righe
+# ----------------------------------------------
+#
+# Non valida che ciò che arriva sia JSON, e non deve. Il mittente spedisce
+# BYTE, e un blocco può finire a metà riga: la riga si completa al giro
+# dopo. Validare significherebbe rifiutare un troncone legittimo, e
+# soprattutto perdere l'identità byte a byte fra copia e originale, che è
+# ciò su cui si regge il confronto. Chi legge il log validi al momento di
+# leggerlo: è un problema del lettore, non del trasporto.
+
+set -eu
+
+# Directory delle copie. Una sottodirectory per macchina sorvegliata.
+#
+# Scritta qui e non sostituibile dall'ambiente: chi si collega non deve
+# poter scegliere dove si scrive, nemmeno per sbaglio. I test lavorano su
+# una copia con questa riga cambiata.
+BASE=/var/log/hermes-remoto
+
+# Canali ammessi. Elenco CHIUSO e scritto qui, in un file di root: il nome
+# del canale arriva da chi si collega, e un nome che diventasse un pezzo di
+# percorso darebbe al mittente la scelta di dove scrivere. Il percorso lo
+# decidiamo noi, e il canale è solo una chiave.
+CANALI_AMMESSI="audit overrides"
+
+# Ampiezza della finestra di coda su cui il mittente verifica che la nostra
+# copia e il suo originale siano ancora lo stesso file. Costa questi byte a
+# ogni giro; un confronto integrale è un'operazione a parte, da fare a mano.
+FINESTRA=4096
+
+muori() {
+    # Esito 64: uso sbagliato. Lo distinguiamo dal rifiuto, che è 3.
+    printf 'hermes-log-receive: %s\n' "$1" >&2
+    exit 64
+}
+
+nome_valido() {
+    printf '%s' "$1" | grep -Eq '^[a-z][a-z0-9-]{0,31}$'
+}
+
+[ $# -eq 1 ] || muori "uso: hermes-log-receive <sorgente> (lo passa il ForceCommand)"
+SORGENTE="$1"
+nome_valido "$SORGENTE" || muori "nome di sorgente non valido"
+
+# Ciò che dice l'altra parte sta in una variabile sua, e non diventa un
+# comando: `ForceCommand` ha già sostituito la richiesta del client con
+# questo script, e la richiesta originale resta qui dentro come DATO.
+RICHIESTA="${SSH_ORIGINAL_COMMAND:-}"
+[ -n "$RICHIESTA" ] || muori "nessuna richiesta"
+
+# Si legge per posizione, senza eval e senza espansioni: una richiesta è al
+# massimo tre parole.
+CANALE=$(printf '%s' "$RICHIESTA" | cut -d' ' -f1)
+VERBO=$(printf '%s' "$RICHIESTA" | cut -d' ' -f2)
+ARGOMENTO=$(printf '%s' "$RICHIESTA" | cut -d' ' -f3)
+RESTO=$(printf '%s' "$RICHIESTA" | cut -d' ' -f4-)
+[ -z "$RESTO" ] || muori "richiesta con argomenti di troppo"
+
+nome_valido "$CANALE" || muori "nome di canale non valido"
+# `[ test ] && assegna` sarebbe un guasto: sotto `set -e` una AND-list il cui
+# test è falso vale 1, e lo script muore sul caso NORMALE. È la stessa
+# famiglia di `VAR=$(comando-fallito)` che riesce con la variabile vuota.
+AMMESSO=no
+for c in $CANALI_AMMESSI; do
+    if [ "$c" = "$CANALE" ]; then
+        AMMESSO=si
+    fi
+done
+[ "$AMMESSO" = si ] || muori "canale non ammesso: $CANALE"
+
+DIRECTORY="$BASE/$SORGENTE"
+COPIA="$DIRECTORY/$CANALE.jsonl"
+
+[ -d "$DIRECTORY" ] || muori "la directory delle copie non esiste: $DIRECTORY"
+
+# `umask` prima di creare: la copia contiene gli stessi hostname e bersagli
+# dell'originale, e non deve essere più leggibile di quello.
+umask 077
+[ -e "$COPIA" ] || : > "$COPIA"
+
+dimensione() {
+    wc -c < "$COPIA" | tr -d ' '
+}
+
+coda() {
+    # sha256 degli ultimi $FINESTRA byte, o di tutto se è più corto. Serve
+    # al mittente per accorgersi che la copia e l'originale hanno smesso di
+    # essere lo stesso file anche quando le lunghezze tornano.
+    DIM=$(dimensione)
+    if [ "$DIM" -eq 0 ]; then
+        printf 'vuoto'
+        return
+    fi
+    DA=$((DIM - FINESTRA))
+    if [ "$DA" -lt 0 ]; then
+        DA=0
+    fi
+    tail -c +$((DA + 1)) "$COPIA" | sha256sum | cut -d' ' -f1
+}
+
+case "$VERBO" in
+    stato)
+        [ -z "$ARGOMENTO" ] || muori "stato non prende argomenti"
+        printf '%s %s\n' "$(dimensione)" "$(coda)"
+        ;;
+    appendi)
+        printf '%s' "$ARGOMENTO" | grep -Eq '^[0-9]+$' \
+            || muori "appendi richiede un offset numerico"
+        DIM=$(dimensione)
+        if [ "$ARGOMENTO" -ne "$DIM" ]; then
+            # NON è un errore d'uso: è il rifiuto che rende la copia una
+            # prova. Si nomina quello che sappiamo, perché chi lo legge sta
+            # guardando o un troncamento o un mittente disallineato.
+            printf 'hermes-log-receive: offset %s, la copia è a %s: rifiutato\n' \
+                "$ARGOMENTO" "$DIM" >&2
+            exit 3
+        fi
+        cat >> "$COPIA"
+        printf '%s\n' "$(dimensione)"
+        ;;
+    *)
+        muori "verbo non riconosciuto: ${VERBO:-<vuoto>}"
+        ;;
+esac
