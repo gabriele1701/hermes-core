@@ -1124,7 +1124,18 @@ aprire.
 
 ```sh
 # sul collector
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-collect
+# La shell SERVE, ed e' la stessa lezione di 2: sshd esegue il ForceCommand
+# ATTRAVERSO la shell di login dell'utente, quindi con 'nologin' non parte
+# il ricevente — parte nologin, che stampa «This account is currently not
+# available» e chiude. La protezione sta nel vincolo, non nell'assenza di
+# shell: qualunque cosa chieda il client, parte solo hermes-log-receive.
+#
+# La home serve a non lasciare un avviso a ogni connessione: senza, sshd
+# scrive «Could not chdir to home directory» prima di ogni giro, e un rumore
+# ricorrente su un presidio e' un ottimo modo per smettere di leggerlo.
+sudo useradd --system --create-home --home-dir /var/lib/hermes-collect \
+             --shell /bin/sh hermes-collect
+sudo passwd -l hermes-collect      # nessun accesso con password
 sudo install -d -m 755 -o root -g root /var/log/hermes-remoto
 sudo install -d -m 700 -o hermes-collect -g hermes-collect \
      /var/log/hermes-remoto/hermesmcp
