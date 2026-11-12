@@ -1067,16 +1067,29 @@ non vedrebbe, è una divergenza.
 
 Su `192.168.205.50`. Non deve essere la macchina che genera il log.
 
+Il collector **non ha il repo**, e non deve averlo: è una macchina che
+conserva prove, non una che esegue il progetto. I due file che le servono si
+portano lì a mano, da una macchina che il repo ce l'ha:
+
+```sh
+scp bin/hermes-log-receive config/sshd/20-hermes-collect.conf \
+    monika@192.168.205.50:~/
+```
+
+I comandi qui sotto si eseguono **sul collector**, nella directory in cui i
+due file sono arrivati. Non da `/tmp`: installare un file di root da una
+directory scrivibile da chiunque è una finestra che non serve aprire.
+
 ```sh
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-collect
 sudo install -d -m 755 -o root -g root /var/log/hermes-remoto
 sudo install -d -m 700 -o hermes-collect -g hermes-collect \
      /var/log/hermes-remoto/hermesmcp
 sudo install -m 755 -o root -g root \
-     bin/hermes-log-receive /usr/local/sbin/hermes-log-receive
+     ~/hermes-log-receive /usr/local/sbin/hermes-log-receive
 sudo install -d -m 755 -o root -g root /etc/ssh/authorized_keys.d
 sudo install -m 644 -o root -g root \
-     config/sshd/20-hermes-collect.conf /etc/ssh/sshd_config.d/
+     ~/20-hermes-collect.conf /etc/ssh/sshd_config.d/
 ```
 
 La directory per sorgente va creata a mano **di proposito**: il ricevente si

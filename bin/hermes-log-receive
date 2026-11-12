@@ -1,10 +1,12 @@
 #!/bin/sh
 # Riceve righe di log da una macchina sorvegliata e le appende alla copia.
 #
-# Si installa SUL COLLECTOR, non sulla macchina che spedisce:
+# Si installa SUL COLLECTOR, non sulla macchina che spedisce. Il collector
+# non ha il repo e non deve averlo — conserva prove, non esegue il progetto —
+# quindi questo file ci arriva copiato, e si installa da dove è arrivato:
 #
 #     sudo install -m 755 -o root -g root \
-#          bin/hermes-log-receive /usr/local/sbin/hermes-log-receive
+#          ./hermes-log-receive /usr/local/sbin/hermes-log-receive
 #
 # ed è il `ForceCommand` di un drop-in di sshd. Chi si collega non sceglie
 # cosa eseguire: sceglie solo fra i verbi qui sotto, e il nome della
