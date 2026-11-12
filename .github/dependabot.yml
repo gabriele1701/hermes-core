@@ -1,0 +1,53 @@
+# Aggiornamenti automatici delle dipendenze.
+#
+# Il punto non è stare aggiornati: è accorgersi di un aggiornamento invece di
+# subirlo. Il lockfile fissa versioni e contenuti, quindi senza qualcosa che
+# proponga i cambiamenti il progetto resterebbe fermo sulle versioni del
+# giorno in cui il lock è stato generato — comprese quelle con CVE scoperte
+# dopo.
+version: 2
+
+updates:
+  # ------------------------------------------------------------------ #
+  # Dipendenze Python
+  # ------------------------------------------------------------------ #
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # Attesa prima di proporre una versione appena pubblicata.
+    #
+    # Le compromissioni di pacchetti vengono tipicamente scoperte e ritirate
+    # in poche ore: aspettare qualche giorno elimina gran parte della
+    # finestra senza costare nulla, perché nessuno qui ha bisogno di una
+    # patch il giorno stesso. È lo stesso ragionamento del lockfile — ciò
+    # che entra nel processo che custodisce log e vault deve essere stato
+    # guardato da qualcuno prima di noi.
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "deps"
+
+  # ------------------------------------------------------------------ #
+  # Le action del workflow
+  # ------------------------------------------------------------------ #
+  #
+  # Un'action è CODICE che gira con il token del repository. Nel workflow
+  # sono pinnate per SHA e non per tag, perché un tag si può spostare: `v5`
+  # oggi e `v5` domani possono essere due commit diversi, decisi da qualcun
+  # altro. È lo stesso motivo per cui `setuptools` sta nel lockfile.
+  #
+  # Dependabot aggiorna lo SHA mantenendo il commento con la versione, quindi
+  # il pinning non costa leggibilità: costa una PR da rivedere ogni tanto, ed
+  # è esattamente ciò che si vuole.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci"

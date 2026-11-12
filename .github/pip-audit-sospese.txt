@@ -1,0 +1,22 @@
+# Vulnerabilità sospese: pip-audit non fallisce su queste, e solo su queste.
+#
+# Una riga per sospensione, tre campi separati da '|':
+#
+#     IDENTIFICATIVO | perché non ci riguarda o non è correggibile | AAAA-MM-GG
+#
+# La data è QUANDO VA RIESAMINATA, non quando scade la CVE. Passata quella
+# data la CI fallisce finché qualcuno non guarda di nuovo e la sposta — o
+# toglie la riga perché la correzione è arrivata.
+#
+# Le tre cose sono tutte obbligatorie e lo script le verifica:
+# l'identificativo dev'essere GHSA-…, PYSEC-… o CVE-…, la motivazione una
+# frase vera, la data leggibile e non passata.
+#
+# Non spostare una data senza averla guardata. Il senso di questo file è che
+# sospendere costi quanto basta a non diventare un'abitudine: una riga qui è
+# una decisione, e una decisione ha un nome e una scadenza.
+#
+# Esempio della forma attesa (commentato: non è una sospensione attiva):
+# PYSEC-2026-1234 | transitiva di mcp, raggiungibile solo dal trasporto HTTP che questo server non usa | 2026-12-31
+#
+# --- sospensioni attive: nessuna ---
