@@ -105,6 +105,34 @@ def test_config_assente(tmp_path: Path):
         load_config(tmp_path / "mai-esistita.toml")
 
 
+def test_percorso_irrisolvibile_non_uccide_il_caricamento(repo: Path, tmp_path: Path):
+    """Un percorso che non si risolve non deve diventare un traceback.
+
+    `Path.resolve()` cambia comportamento con l'interprete: fino a 3.12 un
+    anello di symlink solleva `RuntimeError`, da 3.13 restituisce il percorso
+    invariato. Senza rete, su 3.11 e 3.12 — due delle quattro versioni che
+    `requires-python` dichiara — quell'eccezione esce da `load_config` e
+    uccide il SERVER all'avvio, non solo il preflight.
+
+    Il test gira su ogni versione e misura la stessa cosa ovunque: il
+    caricamento riesce, il percorso torna assoluto, e il guasto resta da
+    diagnosticare a chi sa descriverlo. Su 3.13 passa perché l'interprete non
+    solleva; su 3.11 passa grazie alla rete. È il punto: la risposta non deve
+    dipendere dall'interprete.
+    """
+    anello = tmp_path / "a"
+    anello.symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(anello)
+
+    cfg = load_config(
+        scrivi_config(repo, righe_server=f'state_dir = "{anello}"\n')
+    )
+
+    assert cfg.state_dir is not None
+    assert cfg.state_dir.is_absolute()
+    assert cfg.state_dir == anello.absolute()
+
+
 def test_config_malformata(repo: Path):
     percorso = repo / "config" / "rotta.toml"
     percorso.write_text("[server\nagent =", encoding="utf-8")

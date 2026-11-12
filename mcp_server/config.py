@@ -307,7 +307,36 @@ def _percorso(valore: Any, rispetto_a: Path) -> Path | None:
     candidato = Path(valore).expanduser()
     if not candidato.is_absolute():
         candidato = rispetto_a.parent / candidato
-    return candidato.resolve()
+    return risolvi_percorso(candidato)
+
+
+def risolvi_percorso(candidato: Path) -> Path:
+    """`resolve()` che non muore su un percorso irrisolvibile.
+
+    Il comportamento di `Path.resolve()` cambia con l'interprete: fino a
+    Python 3.12 un anello di symlink solleva `RuntimeError`, da 3.13 non
+    solleva nulla e restituisce il percorso invariato. Misurato, non dedotto:
+    3.11 e 3.12 sollevano, 3.13 e 3.14 no.
+
+    Senza questa rete, su 3.11 e 3.12 quel `RuntimeError` esce da
+    `load_config` e **non uccide solo il preflight: uccide il server
+    all'avvio**, con un traceback al posto di un errore diagnosticabile. Il
+    progetto dichiara `requires-python = ">=3.11"`, quindi erano due delle
+    quattro versioni supportate; non se ne era accorto nessuno perché i test
+    girano su 3.13 e la VM su 3.14.
+
+    La rete riproduce il comportamento di 3.13 invece di aggiungerne un
+    terzo: un percorso irrisolvibile torna assoluto ma non normalizzato, e il
+    guasto emerge dove deve, nel controllo che sa descriverlo. Un preflight
+    che risponde cose diverse a seconda dell'interprete non è un preflight
+    di cui ci si può fidare.
+    """
+    try:
+        return candidato.resolve()
+    except (OSError, RuntimeError, ValueError):
+        # `absolute()` non segue i symlink e quindi non può fallire: è ciò
+        # che 3.13 restituisce in questo caso.
+        return candidato.absolute()
 
 
 def _percorso_obbligatorio(

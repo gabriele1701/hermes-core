@@ -29,7 +29,12 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from mcp_server.config import ConfigError, ServerConfig, load_config
+from mcp_server.config import (
+    ConfigError,
+    ServerConfig,
+    load_config,
+    risolvi_percorso,
+)
 from mcp_server.contracts import RiskTier, ToolSpec
 from mcp_server.executor import (
     PREFISSO_UNITA,
@@ -251,7 +256,9 @@ def _stato(
         return
 
     try:
-        dentro = cfg.state_dir.resolve().is_relative_to(cfg.repo_root.resolve())
+        dentro = risolvi_percorso(cfg.state_dir).is_relative_to(
+            risolvi_percorso(cfg.repo_root)
+        )
     except (OSError, ValueError):  # pragma: no cover
         dentro = False
     if dentro:
@@ -488,7 +495,9 @@ def _perche_non_scrivibile(
         )
 
     try:
-        if percorso.resolve().is_relative_to(cfg.repo_root.resolve()):
+        if risolvi_percorso(percorso).is_relative_to(
+            risolvi_percorso(cfg.repo_root)
+        ):
             righe.append(
                 "Attenzione: il percorso risolto sta DENTRO repo_root. Un "
                 "valore relativo in server.log_path viene risolto rispetto "
@@ -560,7 +569,9 @@ def _interprete(referto: Referto, cfg: ServerConfig) -> None:
 
     # L'interprete non deve stare dentro il repo, né essere scrivibile da altri.
     try:
-        dentro = percorso.resolve().is_relative_to(cfg.repo_root.resolve())
+        dentro = risolvi_percorso(percorso).is_relative_to(
+            risolvi_percorso(cfg.repo_root)
+        )
     except (OSError, ValueError):  # pragma: no cover
         dentro = False
     if dentro:
