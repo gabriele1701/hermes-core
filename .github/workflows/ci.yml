@@ -1,0 +1,170 @@
+# Integrazione continua.
+#
+# Le ragioni delle scelte stanno in docs/ci.md; qui restano i commenti che
+# servono a chi legge il file per modificarlo.
+#
+# Le action sono pinnate per SHA e non per tag: un'action è codice che gira
+# con il token del repository, e un tag si può spostare. Il commento accanto
+# dice quale versione è quello SHA, e Dependabot aggiorna entrambi.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Lunedì alle 06:17 UTC. Non all'ora tonda: gli scheduler di GitHub
+    # accodano milioni di job a :00 e i ritardi sono di ore.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+# I job leggono il codice e non scrivono niente. Nessun segreto è usato né
+# necessario: un workflow senza segreti è un workflow che non può perderne.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ------------------------------------------------------------------ #
+  # Dal lock: il dispiegamento esatto. Gira su ogni push e ogni PR.
+  # ------------------------------------------------------------------ #
+  dal-lock:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Solo gli estremi dell'intervallo dichiarato in pyproject.toml.
+        # 3.11 è il minimo supportato, 3.14 è ciò che gira sulla VM.
+        # Entrambi qui e non solo nel job settimanale: se 3.11 fosse coperto
+        # solo di lunedì, una PR potrebbe romperlo e si scoprirebbe sei
+        # giorni dopo. È già successo — vedere docs/ci.md.
+        python: ["3.11", "3.14"]
+    name: dal lock · Python ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Virtualenv del progetto
+        # Nel virtualenv del repo, non nell'interprete di setup-python: è
+        # quello che docs/dipendenze.md prescrive, e il senso di questo job
+        # è riprodurre il dispiegamento, non qualcosa che gli somiglia. La
+        # prima esecuzione ha mostrato che la differenza si sente: il
+        # lanciatore `bin/hermes-core-server` cerca proprio `.venv`.
+        run: python3 -m venv .venv
+
+      - name: Dipendenze dal lockfile, con hash obbligatori
+        run: .venv/bin/pip install --require-hashes --no-deps -r requirements.lock
+
+      - name: Il progetto, senza isolamento di build
+        # Senza --no-build-isolation pip scaricherebbe il backend di build al
+        # momento, senza hash e senza pin, e poi lo eseguirebbe: sarebbe
+        # l'ultimo passo di un'installazione «con hash obbligatori» a
+        # eseguire codice non verificato. setuptools è nel lock apposta.
+        run: .venv/bin/pip install --no-deps --no-build-isolation -e .
+
+      - name: pytest
+        # pytest non è nel lockfile: il dispiegamento non lo installa. Finché
+        # non esiste requirements-dev.lock la versione è fissata qui — le sue
+        # dipendenze non compaiono nel lock, quindi non possono spostare una
+        # versione fissata. Che non lo abbiano fatto lo verifica la suite
+        # stessa, che confronta il lock con l'ambiente installato.
+        run: .venv/bin/pip install "pytest==9.2.0"
+
+      - run: .venv/bin/python -m pytest tests/ -q
+
+  # ------------------------------------------------------------------ #
+  # Dagli intervalli: allarme precoce sulle rotture a monte. Settimanale.
+  # ------------------------------------------------------------------ #
+  dagli-intervalli:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    name: dagli intervalli · Python ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Ultime versioni compatibili con pyproject.toml
+        # Esattamente ciò che il lockfile nasconde di proposito: serve a
+        # sapere che una release nuova rompe il progetto PRIMA di rigenerare
+        # il lock.
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: pytest, senza i test che confrontano lock e ambiente
+        # Qui l'ambiente DEVE divergere dal lock: è il punto del job. I test
+        # marcati `dipendenze_reali` misurano quella coerenza e fallirebbero
+        # per costruzione, dicendo una cosa che sappiamo già.
+        run: .venv/bin/python -m pytest tests/ -q -m "not dipendenze_reali"
+
+  # ------------------------------------------------------------------ #
+  # Vulnerabilità note nelle dipendenze fissate.
+  # ------------------------------------------------------------------ #
+  audit:
+    runs-on: ubuntu-latest
+    name: pip-audit sul lockfile
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - run: pip install "pip-audit==2.10.1"
+
+      - name: Audit, con le sole sospensioni scritte e motivate
+        # Blocca. La via d'uscita non è `|| true` — che spegnerebbe il
+        # controllo per sempre e in silenzio — ma una riga in
+        # .github/pip-audit-sospese.txt con un perché e una data di riesame.
+        run: python .github/scripts/audit_con_sospensioni.py
+
+  # ------------------------------------------------------------------ #
+  # Cosa un verde NON significa.
+  # ------------------------------------------------------------------ #
+  cosa-non-e-verificato:
+    runs-on: ubuntu-latest
+    name: cosa questa CI non verifica
+    steps:
+      # Scriverlo solo nella documentazione non basterebbe: chi guarda un
+      # verde guarda il log, non i file. Questo passo esiste perché il limite
+      # del controllo arrivi dove arriva il controllo.
+      - name: Leggere prima di fidarsi del verde
+        run: |
+          cat <<'FINE'
+          Un verde qui dice che IL CODICE È COERENTE.
+          Non dice che il dispiegamento è sicuro.
+
+          Nella suite due soli test eseguono un'operazione privilegiata
+          (chattr +a), e sui runner saltano. Tutto ciò che riguarda sudo,
+          systemd-run e le ACL verifica STRINGHE: l'argv che costruiremmo,
+          o il testo del rimedio. Nessuno di quei comandi viene eseguito.
+
+          Quindi questa CI non dice niente su:
+
+            - isolamento dei tool: sudo autorizzato, wrapper di root,
+              MemoryMax e TasksMax applicati davvero, utente senza shell
+            - ACL: che hermes-tool apra gli script e NON legga config/,
+              docs/, mcp_server/
+            - append-only del log d'audit (chattr +a)
+            - canale SSH: drop-in, ForceCommand, chiavi fuori dalla home
+            - perimetro come fatto di rete
+
+          Tutto questo è verificato SOLO dal preflight su una macchina vera:
+
+            sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml
+
+          Le due metà non si sostituiscono. La CI dice che il codice fa
+          quello che crediamo; il preflight dice che la macchina è come
+          crediamo. Un verde solo non autorizza a dire «funziona».
+          FINE

@@ -33,6 +33,34 @@ def radice() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+@pytest.fixture(scope="session")
+def venv_pulito(tmp_path_factory) -> Path:
+    """Un interprete vero che **non** può importare `mcp_server`.
+
+    I test del wrapper hanno bisogno di due interpreti distinti: uno che
+    importa il package e uno che no. Prenderli dall'ambiente è ciò che li ha
+    fatti cadere alla prima esecuzione in CI: puntavano a
+    `Path(sys.executable).resolve()`, che in sviluppo scende dal virtualenv
+    all'interprete di sistema — privo del package, come serviva — e su un
+    runner, dove virtualenv non ce n'è, resta l'interprete che il package ce
+    l'ha. Stessa riga, due significati opposti, a seconda di dove gira.
+
+    Costruirlo qui costa un paio di decimi di secondo (`--without-pip`) e
+    toglie di mezzo la domanda: questo interprete non ha `mcp_server` perché
+    non ha niente.
+    """
+    import subprocess
+
+    venv = tmp_path_factory.mktemp("venv-pulito") / "venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(venv)],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    return venv
+
+
 @pytest.fixture(autouse=True)
 def dipendenze_conformi(request, monkeypatch):
     """Isola i test dallo stato delle dipendenze installate.
@@ -583,10 +611,15 @@ def test_wrapper_segnala_venv_assente(radice: Path, tmp_path: Path):
     assert "HERMES_VENV" in esito.stderr
 
 
-def test_wrapper_segnala_package_non_importabile(radice: Path, tmp_path: Path):
+def test_wrapper_segnala_package_non_importabile(
+    radice: Path, tmp_path: Path, venv_pulito: Path
+):
     """Il caso reale: un PermissionError dentro importlib non dice cosa fare.
 
     Si riproduce con un progetto finto che ha il venv ma non il package.
+    L'interprete arriva da `venv_pulito` e non da `sys.executable`: quale
+    dei due importi `mcp_server` dipende da come è stato installato
+    l'ambiente, e un test non può dipendere da quello.
     """
     import os
     import shutil
@@ -597,9 +630,7 @@ def test_wrapper_segnala_package_non_importabile(radice: Path, tmp_path: Path):
     (finto / "config").mkdir()
     (finto / ".venv" / "bin").mkdir(parents=True)
     shutil.copy(radice / "bin" / "hermes-core-server", finto / "bin")
-    (finto / ".venv" / "bin" / "python").symlink_to(
-        Path(sys.executable).resolve()
-    )
+    (finto / ".venv" / "bin" / "python").symlink_to(venv_pulito / "bin" / "python")
     (finto / "config" / "hermes.toml").write_text(
         '[server]\nagent = "echo_dummy"\nrepo_root = "."\n', encoding="utf-8"
     )
@@ -617,14 +648,27 @@ def test_wrapper_segnala_package_non_importabile(radice: Path, tmp_path: Path):
     assert "setfacl" in esito.stderr, "il rimedio deve indicare le ACL"
 
 
-def test_wrapper_segnala_config_assente(radice: Path, tmp_path: Path):
+def test_wrapper_segnala_config_assente(
+    radice: Path, tmp_path: Path, venv_pulito: Path
+):
+    """L'interprete arriva da HERMES_VENV, non dal `.venv` del repo.
+
+    Il wrapper controlla prima l'interprete e poi la configurazione: senza
+    un interprete non arriva mai al messaggio che questo test misura. Nel
+    repo di sviluppo `.venv` c'è, su un runner no — e il test cadeva là
+    dicendo una cosa vera ma non sua. HERMES_VENV è l'aggancio che il
+    wrapper offre apposta.
+    """
+    import os
     import subprocess
 
+    ambiente = dict(os.environ, HERMES_VENV=str(venv_pulito))
     esito = subprocess.run(
         [str(radice / "bin" / "hermes-core-server"), str(tmp_path / "assente.toml")],
         capture_output=True,
         text=True,
         timeout=30,
+        env=ambiente,
     )
     assert esito.returncode == 1
     assert esito.stdout == ""
