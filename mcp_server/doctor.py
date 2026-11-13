@@ -2366,6 +2366,28 @@ def _stato_di_un_canale(
     return valori, None
 
 
+def _da_quanto(secondi: float) -> str:
+    """I secondi in una frase leggibile, con la grana giusta.
+
+    «0 minuti fa» non informa e «4321 minuti fa» nemmeno: sotto l'ora si
+    contano i minuti, sopra le ore, e oltre il giorno i giorni.
+    """
+    minuti = int(secondi // 60)
+    if minuti < 1:
+        return "meno di un minuto fa"
+    if minuti == 1:
+        return "un minuto fa"
+    if minuti < 60:
+        return f"{minuti} minuti fa"
+    ore = minuti // 60
+    if ore == 1:
+        return "un'ora fa"
+    if ore < 24:
+        return f"{ore} ore fa"
+    giorni = ore // 24
+    return "un giorno fa" if giorni == 1 else f"{giorni} giorni fa"
+
+
 def _eta(ts: str) -> float | None:
     try:
         istante = _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
@@ -2650,10 +2672,15 @@ def _ultimo_giro(
             continue
 
         if esito != "ok":
+            # L'età va detta anche qui. «irraggiungibile» di due minuti fa e
+            # «irraggiungibile» di tre giorni fa sono due situazioni diverse
+            # — un collector spento adesso, e una spedizione ferma da
+            # quando nessuno guarda — e senza la data si leggono uguali.
+            quando = "" if eta is None else f", {_da_quanto(eta)}"
             referto.aggiungi(
                 f"spedizione di {nome}",
                 Esito.AVVISO,
-                f"ultimo giro: {esito}",
+                f"ultimo giro: {esito}{quando}",
                 "journalctl -u hermes-log-ship.service -n 50",
             )
             continue
@@ -2668,12 +2695,12 @@ def _ultimo_giro(
             referto.aggiungi(
                 f"spedizione di {nome}",
                 Esito.AVVISO,
-                f"l'ultimo giro riuscito è di {int(eta // 60)} minuti fa{coda}",
+                f"l'ultimo giro riuscito è di {_da_quanto(eta)}{coda}",
                 "systemctl status hermes-log-ship.timer",
             )
             continue
 
-        quando = "" if eta is None else f" ({int(eta // 60)} minuti fa)"
+        quando = "" if eta is None else f" ({_da_quanto(eta)})"
         referto.aggiungi(
             f"spedizione di {nome}",
             Esito.OK,

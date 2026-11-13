@@ -704,3 +704,22 @@ def test_uno_stato_assente_resta_mai_girato(tmp_path: Path):
     doctor._ultimo_giro(referto, sped, "hermes")
 
     assert "mai girato" in _controllo(referto, "spedizione di audit").messaggio
+
+
+@pytest.mark.parametrize(
+    "secondi, atteso",
+    [
+        (10, "meno di un minuto fa"),
+        (60, "un minuto fa"),
+        (600, "10 minuti fa"),
+        (3600, "un'ora fa"),
+        (7200, "2 ore fa"),
+        (86400, "un giorno fa"),
+        (200000, "2 giorni fa"),
+    ],
+)
+def test_l_eta_si_legge_come_una_frase(secondi, atteso):
+    """Il referto lo legge una persona, e «4321 minuti fa» non informa."""
+    from mcp_server.doctor import _da_quanto
+
+    assert _da_quanto(secondi) == atteso
