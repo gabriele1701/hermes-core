@@ -210,7 +210,7 @@ default_tier = "verde"
 personal_data = false
 requires_container = false
 exec_path = "agents/echo_agent/run.py"
-exec_sha256 = "34b7aa6afc7f96e5c88ecfd8f4305a0739743bc5a1f7aa27ee2b63546518d3a8"
+exec_sha256 = "9e61e731b28554f85421822d7f2f60a9d8a6a40d5b56e387ec47ca5ad7d520ca"
 description = "Agente dummy: restituisce un risultato conforme al contratto."
 
 # target_kind: che bersaglio accetta il tool, e quindi come viene validato.

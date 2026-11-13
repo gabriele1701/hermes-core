@@ -1,0 +1,507 @@
+#!/bin/sh
+# Prepara questa macchina a eseguire hermes-core, e poi chiama il preflight.
+#
+#     sudo bin/hermes-bootstrap            # senza gli extra di sviluppo
+#     sudo bin/hermes-bootstrap --dev      # con pytest
+#
+# Shell e non Python perché deve girare PRIMA che il virtualenv esista.
+#
+# Cosa fa e cosa non fa
+# ---------------------
+#
+# Fa il deterministico: utenti, directory, permessi, ACL, gli artefatti che
+# si installano fuori dall'albero di git, e i file di configurazione quando
+# non ci sono ancora.
+#
+# Si ferma ELENCANDO tutto ciò che richiede una decisione umana. Vale la
+# regola del gate: meglio rifiutare che indovinare. Un bootstrap che inventa
+# un indirizzo, una porta o un'impronta non fa risparmiare tempo: fa un
+# danno che si scopre dopo, con un sintomo che non punta alla causa.
+#
+# In particolare non genera chiavi, non ricarica sshd, non attiva ufw, non
+# abilita il timer, e NON SOVRASCRIVE MAI un file di configurazione che
+# esiste già.
+#
+# Idempotenza, in due regole distinte
+# -----------------------------------
+#
+#   * gli artefatti la cui fonte è il REPO - wrapper, mittente, sudoers,
+#     drop-in, unità - vengono reinstallati quando differiscono, e lo
+#     dichiarano;
+#   * i file che contengono DECISIONI DELL'OPERATORE non vengono toccati se
+#     esistono, qualunque cosa contengano. Che siano anche giusti lo dice il
+#     preflight, non questo script.
+#
+# Su una macchina già a posto deve finire senza cambiare niente. È il modo
+# più economico di collaudarlo, ed è lo stato in cui passerà quasi tutta
+# la sua vita.
+#
+# Cosa resta fuori, di proposito
+# ------------------------------
+#
+# Il COLLECTOR di A5 (docs/setup-vm-hermes.md §10) è un'altra macchina, e
+# tre dei suoi passi richiedono una decisione umana: quale account, quale
+# porta, quale impronta è quella giusta. La verifica dell'impronta in
+# particolare DEVE restare fuori banda, perché automatizzarla
+# significherebbe fidarsi della rete, che è ciò da cui protegge.
+
+set -eu
+
+# --- Costanti ------------------------------------------------------------- #
+#
+# I nomi utente vivono anche nei moduli Python e nelle unità di systemd. Un
+# test della suite legge gli uni e gli altri e li confronta: dove la copia è
+# inevitabile, la coincidenza va verificata, non sperata.
+
+UTENTE_SERVIZIO=hermes
+UTENTE_TOOL=hermes-tool
+UTENTE_SPEDIZIONE=hermes-ship
+
+HOME_SERVIZIO=/var/lib/hermes
+DIR_LOG=/var/log/hermes
+FILE_LOG=$DIR_LOG/audit.jsonl
+DIR_STATO=$HOME_SERVIZIO/state
+FILE_OVERRIDES=$DIR_STATO/overrides.jsonl
+DIR_SPEDIZIONE=/var/lib/hermes-ship
+DIR_STATO_SPEDIZIONE=$DIR_SPEDIZIONE/stato
+DIR_CONFIG=/etc/hermes
+SCOPE=$DIR_CONFIG/scope.toml
+SPEDIZIONE_CONF=$DIR_CONFIG/log-shipping.conf
+
+WRAPPER=/usr/local/sbin/hermes-tool-run
+MITTENTE=/usr/local/sbin/hermes-log-ship
+SUDOERS=/etc/sudoers.d/hermes-core
+DROPIN=/etc/ssh/sshd_config.d/10-hermes.conf
+UNITA=/etc/systemd/system
+
+# Il valore che si mette dove serve una decisione dell'operatore. Non è un
+# segnaposto qualunque: ogni validatore del progetto lo RIFIUTA PER CERTO -
+# non è una rete, non è uno SHA, non è un host. Un segnaposto plausibile
+# passerebbe i controlli dando una configurazione sbagliata, che è il
+# guasto peggiore dei due. Il 4 novembre un segnaposto rifiutato ci ha
+# salvati: un exec_sha256 rimasto tale ha impedito al server di partire.
+NON_COMPILATO=DA_COMPILARE
+
+CON_DEV=no
+RESTA=""
+CAMBIATO=no
+UNITA_CAMBIATE=no
+
+# --- Uscita --------------------------------------------------------------- #
+
+fatto()       { CAMBIATO=si; printf '[  fatto  ] %s\n' "$1"; }
+invariato()   { printf '[invariato] %s\n' "$1"; }
+riapplicato() { printf '[ riappl. ] %s\n' "$1"; }
+avviso()      { printf '[ avviso  ] %s\n' "$1"; }
+
+fermati() {
+    printf '\n[ FERMO ] %s\n' "$1" >&2
+    if [ $# -gt 1 ]; then
+        printf '          %s\n' "$2" >&2
+    fi
+    exit 1
+}
+
+resta() {
+    RESTA="$RESTA  · $1
+"
+}
+
+# --- Argomenti ------------------------------------------------------------ #
+
+for ARGOMENTO in "$@"; do
+    case "$ARGOMENTO" in
+        --dev) CON_DEV=si ;;
+        --aiuto|-h|--help)
+            printf 'uso: sudo bin/hermes-bootstrap [--dev]\n\n'
+            printf '  --dev   installa anche pytest nel virtualenv\n\n'
+            printf 'Prepara la macchina e chiama il preflight. Non genera chiavi,\n'
+            printf 'non ricarica sshd, non attiva ufw, non abilita il timer, e non\n'
+            printf 'sovrascrive mai un file di configurazione esistente.\n'
+            exit 0
+            ;;
+        *) fermati "argomento non riconosciuto: $ARGOMENTO" "usa --dev o --aiuto" ;;
+    esac
+done
+
+# --- Dove siamo, e con quale identità ------------------------------------ #
+
+if [ "$(id -u)" -ne 0 ]; then
+    fermati "serve root" "sudo bin/hermes-bootstrap"
+fi
+
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+for ATTESO in pyproject.toml requirements.txt mcp_server/doctor.py \
+              bin/hermes-tool-run bin/hermes-log-ship \
+              config/hermes.example.toml config/sudoers.example; do
+    if [ ! -e "$REPO/$ATTESO" ]; then
+        fermati "$REPO non sembra il repo: manca $ATTESO"
+    fi
+done
+
+for COMANDO in useradd setfacl getfacl install sha256sum python3 systemctl visudo; do
+    if ! command -v "$COMANDO" >/dev/null 2>&1; then
+        fermati "comando assente: $COMANDO" \
+                "su Debian/Ubuntu: apt install acl passwd sudo systemd python3-venv"
+    fi
+done
+
+# Il proprietario del repo non si chiede: si guarda. È l'utente che
+# aggiorna il codice, e deve restare diverso da chi lo esegue - è
+# l'invariante di §2, «chi esegue il server non può modificare ciò che
+# esegue».
+PROPRIETARIO=$(stat -c %U "$REPO")
+if [ "$PROPRIETARIO" = "$UTENTE_SERVIZIO" ]; then
+    fermati "il repo è di $UTENTE_SERVIZIO, che è l'utente di servizio" \
+            "Chi esegue il server non deve poter riscrivere ciò che esegue."
+fi
+printf 'hermes-core · bootstrap\n'
+printf 'repo: %s (di %s)\n' "$REPO" "$PROPRIETARIO"
+printf 'extra di sviluppo: %s\n\n' "$CON_DEV"
+
+if [ "$PROPRIETARIO" = root ]; then
+    avviso "il repo è di root: funziona, ma gli aggiornamenti li farà root"
+fi
+
+# --- 1. Utenti ------------------------------------------------------------ #
+#
+# `hermes` ha una shell VERA, e non è una svista: sshd esegue il
+# ForceCommand attraverso la shell di login, quindi con `nologin` il comando
+# vincolato della chiave non partirebbe. La protezione sta nel vincolo, non
+# nell'assenza di shell.
+#
+# `hermes-tool` e `hermes-ship` non entrano mai da SSH - il primo lo lancia
+# il wrapper, il secondo un timer - quindi li' `nologin` è giusto.
+
+crea_utente() {
+    NOME=$1
+    shift
+    if id "$NOME" >/dev/null 2>&1; then
+        invariato "utente $NOME"
+        return
+    fi
+    useradd "$@" "$NOME"
+    passwd -l "$NOME" >/dev/null
+    fatto "utente $NOME"
+}
+
+crea_utente "$UTENTE_SERVIZIO" --system --create-home \
+            --home-dir "$HOME_SERVIZIO" --shell /bin/sh
+crea_utente "$UTENTE_TOOL" --system --no-create-home --shell /usr/sbin/nologin
+crea_utente "$UTENTE_SPEDIZIONE" --system --no-create-home --shell /usr/sbin/nologin
+
+# --- 2. Directory --------------------------------------------------------- #
+
+crea_dir() { # percorso modo proprietario
+    if [ -d "$1" ]; then
+        invariato "directory $1"
+    else
+        install -d -m "$2" -o "$3" -g "$3" "$1"
+        fatto "directory $1 ($2, di $3)"
+    fi
+}
+
+crea_dir "$DIR_LOG" 700 "$UTENTE_SERVIZIO"
+crea_dir "$DIR_STATO" 700 "$UTENTE_SERVIZIO"
+crea_dir "$DIR_SPEDIZIONE" 750 "$UTENTE_SPEDIZIONE"
+crea_dir "$DIR_STATO_SPEDIZIONE" 755 "$UTENTE_SPEDIZIONE"
+crea_dir "$DIR_CONFIG" 755 root
+
+# --- 3. Permessi del repo ------------------------------------------------- #
+#
+# Sola lettura per il servizio. Si riapplica sempre: distinguere «era già
+# così» da «l'ho appena fatto» su migliaia di file costerebbe più di
+# quanto valga, e l'operazione è idempotente. Si dichiara per quello che è.
+
+chown -R "$PROPRIETARIO":"$UTENTE_SERVIZIO" "$REPO"
+chmod -R o-rwx,g-w,g+rX "$REPO"
+riapplicato "permessi del repo (sola lettura per $UTENTE_SERVIZIO)"
+
+# --- 4. ACL --------------------------------------------------------------- #
+#
+# Minimo privilegio applicato al codice: transito sulla radice, lettura
+# ricorsiva su agents/, e un default: perché i tool futuri la eredìtino.
+# config/, docs/ e mcp_server/ restano fuori portata dei tool.
+#
+# La voce si cerca ancorata a fine riga: quando la maschera la riduce,
+# getfacl aggiunge «#effective:...» e il confronto non torna - il che è
+# giusto, perché una voce ridotta non concede niente e va riapplicata.
+
+acl_presente() { # percorso utente permessi
+    getfacl -p "$1" 2>/dev/null | grep -q "^user:$2:$3\$"
+}
+
+acl_default_presente() { # percorso utente permessi
+    getfacl -p "$1" 2>/dev/null | grep -q "^default:user:$2:$3\$"
+}
+
+concedi_transito() { # directory utente
+    if acl_presente "$1" "$2" "--x"; then
+        invariato "transito su $1 per $2"
+        return
+    fi
+    if ! setfacl -m u:"$2":--x "$1" 2>/dev/null; then
+        # Senza ACL questo disegno non sta in piedi: il minimo privilegio sul
+        # codice e sui canali è fatto di voci nominate, non di `chmod`. Meglio
+        # fermarsi dicendolo che preparare metà macchina.
+        fermati "setfacl rifiutato su $1" \
+                "Il filesystem monta le ACL POSIX? mount | grep \" $(df --output=target \"$1\" | tail -1) \""
+    fi
+    fatto "transito su $1 per $2"
+}
+
+concedi_transito "$REPO" "$UTENTE_TOOL"
+
+if acl_presente "$REPO/agents" "$UTENTE_TOOL" "r-x" \
+   && acl_default_presente "$REPO/agents" "$UTENTE_TOOL" "r-x"; then
+    invariato "lettura di agents/ per $UTENTE_TOOL (con default)"
+else
+    setfacl -R -m u:"$UTENTE_TOOL":rX "$REPO/agents"
+    setfacl -R -d -m u:"$UTENTE_TOOL":rX "$REPO/agents"
+    fatto "lettura di agents/ per $UTENTE_TOOL (con default)"
+fi
+
+# Il preflight gira come utente di servizio e legge lo stato del mittente:
+# senza transito non ci arriva, e un controllo che non arriva a un dato non
+# può dire niente su quel presidio.
+concedi_transito "$DIR_SPEDIZIONE" "$UTENTE_SERVIZIO"
+
+# I canali della spedizione. `/var/lib/hermes` è la home del servizio e
+# useradd la crea 750: senza transito anche li', non si arriva a state/.
+concedi_transito "$DIR_LOG" "$UTENTE_SPEDIZIONE"
+concedi_transito "$HOME_SERVIZIO" "$UTENTE_SPEDIZIONE"
+concedi_transito "$DIR_STATO" "$UTENTE_SPEDIZIONE"
+
+# Un file append-only rifiuta anche setfacl, non solo chmod. Togliere
+# l'append-only a un log d'audit è una decisione dell'operatore, non di uno
+# script che gira senza nessuno davanti: si elenca la finestra e si prosegue.
+concedi_lettura() { # file
+    if [ ! -e "$1" ]; then
+        resta "la lettura di $1 per $UTENTE_SPEDIZIONE: il file non esiste ancora"
+        return
+    fi
+    if acl_presente "$1" "$UTENTE_SPEDIZIONE" "r--"; then
+        invariato "lettura di $1 per $UTENTE_SPEDIZIONE"
+        return
+    fi
+    # Si prova, invece di chiedere a `lsattr` se si potrebbe: un controllo
+    # deve riprodurre l'operazione che diagnostica, e così non si dipende da
+    # un binario in più.
+    if setfacl -m u:"$UTENTE_SPEDIZIONE":r "$1" 2>/dev/null; then
+        fatto "lettura di $1 per $UTENTE_SPEDIZIONE"
+        return
+    fi
+    resta "la lettura di $1: setfacl è stato rifiutato, quasi certamente
+      perché il file è append-only. Togliere l'attributo è una decisione
+      di chi amministra, non di uno script che gira senza nessuno davanti:
+      sudo chattr -a $1
+      sudo setfacl -m u:$UTENTE_SPEDIZIONE:r $1
+      sudo chattr +a $1"
+}
+
+concedi_lettura "$FILE_LOG"
+concedi_lettura "$FILE_OVERRIDES"
+
+# --- 5. Artefatti la cui fonte è il repo --------------------------------- #
+#
+# Vivono fuori dall'albero di git perché un `git checkout` non debba poter
+# cambiare il codice che una riga di sudoers autorizza, o che custodisce le
+# prove. Il prezzo è questo passo, e il preflight lo verifica con un diff.
+
+installa_dal_repo() { # sorgente destinazione modo descrizione
+    if [ -f "$2" ] && cmp -s "$REPO/$1" "$2"; then
+        invariato "$4"
+        return 1
+    fi
+    install -m "$3" -o root -g root "$REPO/$1" "$2"
+    fatto "$4"
+    return 0
+}
+
+installa_dal_repo bin/hermes-tool-run "$WRAPPER" 755 \
+                  "wrapper dei tool: $WRAPPER" || true
+installa_dal_repo bin/hermes-log-ship "$MITTENTE" 755 \
+                  "mittente del log: $MITTENTE" || true
+
+# Il drop-in di sshd si copia ma NON si ricarica: ricaricare dove la chiave
+# non è ancora in /etc/ssh/authorized_keys.d/ lascia un server
+# irraggiungibile dal servizio, con un sintomo che non punta alla causa.
+if installa_dal_repo config/sshd/10-hermes.conf "$DROPIN" 644 \
+                     "drop-in di sshd: $DROPIN"; then
+    resta "il ricarico di sshd, DOPO aver messo la chiave del servizio:
+      sudo sshd -t && sudo systemctl reload ssh"
+fi
+
+# Il sudoers si valida PRIMA di metterlo al suo posto: un file rotto li'
+# dentro può rendere sudo inutilizzabile su tutta la macchina.
+TEMPORANEO=$(mktemp)
+cp "$REPO/config/sudoers.example" "$TEMPORANEO"
+chmod 440 "$TEMPORANEO"
+if ! visudo -c -f "$TEMPORANEO" >/dev/null; then
+    rm -f "$TEMPORANEO"
+    fermati "config/sudoers.example non supera visudo -c" "nessuna modifica a $SUDOERS"
+fi
+if [ -f "$SUDOERS" ] && cmp -s "$TEMPORANEO" "$SUDOERS"; then
+    invariato "riga di sudoers: $SUDOERS"
+    rm -f "$TEMPORANEO"
+else
+    install -m 440 -o root -g root "$TEMPORANEO" "$SUDOERS"
+    rm -f "$TEMPORANEO"
+    fatto "riga di sudoers: $SUDOERS"
+fi
+
+for NOME in hermes-log-ship.service hermes-log-ship.timer; do
+    if installa_dal_repo "config/systemd/$NOME" "$UNITA/$NOME" 644 \
+                         "unità systemd: $NOME"; then
+        UNITA_CAMBIATE=si
+    fi
+done
+if [ "$UNITA_CAMBIATE" = si ]; then
+    systemctl daemon-reload
+    fatto "systemctl daemon-reload"
+fi
+
+# --- 6. File di configurazione -------------------------------------------- #
+#
+# Si generano SOLO se non esistono. Un file che c'è non viene toccato,
+# qualunque cosa contenga: contiene decisioni di chi amministra, e questo
+# script non ne sa abbastanza per correggerle. Che sia anche giusto lo dice
+# il preflight.
+
+DESTINAZIONE="$REPO/config/hermes.toml"
+if [ -f "$DESTINAZIONE" ]; then
+    invariato "configurazione del server: $DESTINAZIONE (non toccata)"
+else
+    # Gli SHA dei tool si ricalcolano dai file che arrivano col repo. Per un
+    # tool aggiunto dopo lo SHA resta una DICHIARAZIONE dell'integratore e si
+    # scrive a mano: calcolarlo da ciò che è su disco lo degraderebbe a
+    # «pinna quello che c'è adesso», che non è una verifica di integrità.
+    awk -v repo="$REPO" -v percorso_log="$FILE_LOG" -v stato="$DIR_STATO" \
+        -v scope="$SCOPE" -v wrapper="$WRAPPER" -v spedizione="$SPEDIZIONE_CONF" '
+        /^repo_root = /      { print "repo_root = \"" repo "\"";          next }
+        /^log_path = /       { print "log_path = \"" percorso_log "\"";            next }
+        /^# state_dir = /    { print "state_dir = \"" stato "\"";         next }
+        /^# scope_file = /   { print "scope_file = \"" scope "\"";        next }
+        /^# tool_runner = /  { print "tool_runner = \"" wrapper "\"";     next }
+        /^# log_shipping = / { print "log_shipping = \"" spedizione "\""; next }
+        /^exec_path = / {
+            print
+            percorso = $0
+            sub(/^exec_path = "/, "", percorso)
+            sub(/"$/, "", percorso)
+            comando = "sha256sum " repo "/" percorso " 2>/dev/null | cut -d\" \" -f1"
+            comando | getline atteso
+            close(comando)
+            next
+        }
+        /^exec_sha256 = / {
+            if (atteso != "") {
+                print "# Calcolato dal bootstrap in fase di installazione, dal file"
+                print "# su disco. Per un tool aggiunto dopo, questo valore si scrive"
+                print "# a mano: e una dichiarazione di chi integra, non una"
+                print "# fotografia di cio che il disco contiene adesso."
+                print "exec_sha256 = \"" atteso "\""
+                atteso = ""
+                next
+            }
+            print
+            next
+        }
+        { print }
+    ' "$REPO/config/hermes.example.toml" > "$DESTINAZIONE"
+    chown "$PROPRIETARIO":"$UTENTE_SERVIZIO" "$DESTINAZIONE"
+    chmod 640 "$DESTINAZIONE"
+    fatto "configurazione del server: $DESTINAZIONE (SHA dei tool calcolati)"
+fi
+
+if [ -f "$SCOPE" ]; then
+    invariato "perimetro dei bersagli: $SCOPE (non toccato)"
+else
+    sed -E "s#^([[:space:]]*)\"[0-9][^\"]*\",#\\1\"$NON_COMPILATO\",#" \
+        "$REPO/config/scope.example.toml" > "$SCOPE"
+    chown root:root "$SCOPE"
+    chmod 644 "$SCOPE"
+    fatto "perimetro dei bersagli: $SCOPE"
+    resta "le reti e gli alias in $SCOPE: dicono $NON_COMPILATO, e il server
+      non parte finché restano così."
+fi
+
+if [ -f "$SPEDIZIONE_CONF" ]; then
+    invariato "spedizione del log: $SPEDIZIONE_CONF (non toccata)"
+else
+    sed -E "s#^(COLLECTOR_HOST|COLLECTOR_UTENTE)=.*#\\1=$NON_COMPILATO#" \
+        "$REPO/config/log-shipping.example.conf" > "$SPEDIZIONE_CONF"
+    chown root:root "$SPEDIZIONE_CONF"
+    chmod 644 "$SPEDIZIONE_CONF"
+    fatto "spedizione del log: $SPEDIZIONE_CONF"
+    resta "il collector in $SPEDIZIONE_CONF: indirizzo e account dicono
+      $NON_COMPILATO. L'altra macchina è docs/setup-vm-hermes.md §10."
+fi
+
+# --- 7. Virtualenv -------------------------------------------------------- #
+#
+# Dal lockfile con gli hash obbligatori, non dagli intervalli: è l'unico
+# modo in cui «ha funzionato in CI» dica qualcosa su questa macchina.
+
+if [ -x "$REPO/.venv/bin/python" ]; then
+    invariato "virtualenv: $REPO/.venv"
+else
+    su "$PROPRIETARIO" -s /bin/sh -c "cd '$REPO' && python3 -m venv .venv"
+    fatto "virtualenv: $REPO/.venv"
+fi
+
+su "$PROPRIETARIO" -s /bin/sh -c "cd '$REPO' && \
+    .venv/bin/pip install --quiet --require-hashes --no-deps -r requirements.txt && \
+    .venv/bin/pip install --quiet --no-deps --no-build-isolation -e ."
+riapplicato "dipendenze dal lockfile, con hash obbligatori"
+
+if [ "$CON_DEV" = si ]; then
+    su "$PROPRIETARIO" -s /bin/sh -c "cd '$REPO' && .venv/bin/pip install --quiet pytest"
+    avviso "extra di sviluppo installati: il preflight segnalerà pacchetti fuori dal lock"
+fi
+
+# --- 8. Cio' che resta ---------------------------------------------------- #
+
+resta "le chiavi SSH: questo script non ne genera e non tocca ~/.ssh
+      (docs §4.1 per il servizio, §10.2 per la spedizione)."
+resta "ufw: nessuna regola applicata (docs §4.3). Aprire la porta alla
+      postazione PRIMA di abilitarlo, o ci si chiude fuori."
+resta "il timer della spedizione, dopo un giro a mano riuscito:
+      sudo systemctl start hermes-log-ship.service
+      sudo systemctl enable --now hermes-log-ship.timer"
+resta "l'append-only su log e store, quando il server avrà scritto (docs §7)."
+resta "il collector di A5: è un'altra macchina (docs §10), e la verifica
+      dell'impronta va fatta fuori banda."
+
+printf '\n========================================================================\n'
+if [ "$CAMBIATO" = no ]; then
+    printf 'Niente da cambiare: la macchina era gia preparata.\n'
+else
+    printf 'Preparazione completata.\n'
+fi
+printf '\nQUESTO SCRIPT NON LO FA — verificare che sia stato fatto:\n%s' "$RESTA"
+printf '========================================================================\n\n'
+
+# --- 9. Il preflight come test di accettazione ---------------------------- #
+#
+# Il criterio non è «ho eseguito i passi» ma «i controlli passano». Gira
+# come l'utente di servizio, sempre: da root creerebbe la directory dei
+# posti intestata a root, bloccando il gate.
+
+if [ -f "$REPO/config/hermes.toml" ]; then
+    printf 'Preflight (come %s):\n\n' "$UTENTE_SERVIZIO"
+    ESITO_PREFLIGHT=0
+    su "$UTENTE_SERVIZIO" -s /bin/sh -c \
+        "cd '$REPO' && .venv/bin/python -m mcp_server.doctor config/hermes.toml" \
+        || ESITO_PREFLIGHT=$?
+    if [ "$ESITO_PREFLIGHT" -ne 0 ]; then
+        printf '\n[ avviso  ] il preflight dice NON PRONTO (esito %s).\n' "$ESITO_PREFLIGHT"
+        printf '            Su un'"'"'installazione nuova è l'"'"'esito atteso: i valori\n'
+        printf '            %s vanno compilati prima che lo diventi.\n' "$NON_COMPILATO"
+        printf '            Questo script non trasforma quel verdetto nel proprio\n'
+        printf '            esito, ma non lo nasconde: il criterio di accettazione\n'
+        printf '            è il referto qui sopra, non il fatto che io sia finito.\n'
+    fi
+else
+    avviso "preflight non eseguito: manca $REPO/config/hermes.toml"
+fi

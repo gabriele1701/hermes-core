@@ -33,7 +33,7 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | A1 — i tool giravano con l'identità del servizio | passo 9 | Uid dedicato `hermes-tool` senza shell, via un wrapper di root (`bin/hermes-tool-run`) autorizzato da una sola riga di sudoers. Unità transiente di tipo servizio e non scope, perché con `--scope` il processo lo lancia il chiamante e il cambio di uid fallisce. Il tool non può più aprire il log d'audit, cioè la traccia che dovrebbe registrarlo. Wrapper configurato e non utilizzabile → il gate rifiuta, non ricade sull'identità del servizio. |
 | Il tetto di concorrenza era per agente, non per macchina | passo 9 | `MemoryMax` + `MemorySwapMax=0` + `TasksMax` nel cgroup dell'unità: il tetto ora misura risorse reali e non esecuzioni, che era la condizione di chiusura registrata. Valori provvisori, vedere la voce aperta qui sotto. |
 | I figli di un'uscita pulita non venivano ripuliti | passo 9 | Il cgroup dell'unità muore con l'unità qualunque cosa contenga, quindi non serve che il gate distingua un figlio legittimo da un residuo — che era il motivo per cui non si poteva chiudere con un `killpg`. |
-| HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che e' la protezione vera, e' documentato in `docs/dipendenze.md` e resta da generare. |
+| HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che è la protezione vera, è documentato in `docs/dipendenze.md` e resta da generare. |
 
 ---
 
@@ -210,6 +210,50 @@ che nessuno confronta sarebbe un backup, non una prova.
 **Da rivalutare se:** il log dovrà reggere da solo come prova davanti a
 terzi. In quel caso la strada è un digest periodico firmato con chiave
 esterna, che non tocca il percorso di scrittura.
+
+---
+
+## MEDIA — il bootstrap non è verificato da nessun test, e copre una macchina sola
+
+**Dove:** `bin/hermes-bootstrap`.
+
+Tutto il debito creato scrivendo il bootstrap sta qui, in una voce sola.
+
+**1. La suite non lo esercita.** Lo script crea utenti, applica ACL, scrive
+una riga di sudoers e installa unità di systemd: niente di tutto ciò è
+eseguibile da una suite, che gira senza privilegi e dentro un contenitore.
+`tests/test_bootstrap.py` verifica la sintassi, che si fermi senza
+privilegi, e che le costanti duplicate fra shell, Python e unità
+coincidano — non che faccia la cosa giusta.
+
+Nessun test del modulo esegue il bootstrap per davvero, ed è una regola, non
+un caso: da root lo farebbe sulla macchina di chi lancia la suite. È
+successo una volta mentre lo scrivevo.
+
+**2. Il collaudo è un'esecuzione, non un test.** Il criterio è: lanciarlo su
+una macchina **già preparata** e pretendere che finisca senza cambiare
+niente. Esercita ogni ramo «c'è ed è già giusto», che è lo stato in cui lo
+script passerà quasi tutta la sua vita, e costa cinque minuti.
+
+**3. Non c'è una modalità di prova.** Non si può chiedere allo script cosa
+*farebbe* senza fargli fare niente. La superficie distruttiva è pero'
+piccola per costruzione — non sovrascrive configurazioni, non ricarica
+`sshd`, non attiva `ufw` — e un `--prova` vero richiederebbe di passare ogni
+mutazione da un unico punto. Si aggiunge quando lo script crescerà.
+
+**4. Copre una macchina sola.** Il collector di A5 resta procedura manuale
+(`docs/setup-vm-hermes.md` §10). Non è pigrizia: tre dei suoi passi
+richiedono una decisione umana — quale account, quale porta, quale impronta
+è quella giusta — e la verifica dell'impronta **deve** restare fuori banda,
+perché automatizzarla significherebbe fidarsi della rete, che è ciò da cui
+protegge. Automatizzabile sarebbe solo il contorno, che è la parte che non
+sbaglia nessuno.
+
+**Condizione di chiusura:** il test di accettazione su una **VM pulita**,
+partendo dal solo repo. È l'unico modo di verificare il vincolo
+«repo-completo»: leggendo non si vede cosa manca. Su nove passi della patch,
+nove hanno prodotto un commit correttivo dopo la verifica; A5 ne ha prodotti
+sette in una sera. Quella sessione non è il collaudo, è la **scoperta**.
 
 ---
 

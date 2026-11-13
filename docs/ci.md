@@ -76,6 +76,11 @@ Quindi la CI non dice niente su:
 - **il canale SSH**: drop-in, `ForceCommand`, chiavi fuori dalla home;
 - **il perimetro** come fatto di rete: `scope.toml` è validato come dato, non
   come confine effettivo;
+- **il bootstrap**: `bin/hermes-bootstrap` crea utenti, applica ACL, scrive
+  una riga di sudoers e installa unità di systemd. Niente di tutto ciò è
+  eseguibile qui. La CI ne verifica la sintassi, che si fermi senza
+  privilegi, e che le costanti duplicate fra shell, Python e unità
+  coincidano — non che faccia la cosa giusta. Quello lo dice eseguirlo;
 - **la spedizione del log verso una macchina vera.** Il protocollo sì: il
   mittente e il ricevente girano davvero nella suite, con un `ssh` finto che
   li mette in comunicazione, e la divergenza viene esercitata. Restano fuori

@@ -47,7 +47,7 @@ hermes-core/
 ├── agents/
 │   ├── orchestrator/  # orchestratore minimo (invoca un agente, riceve risultato)
 │   └── echo_agent/    # agente dummy conforme al contratto (per i test e2e)
-├── bin/               # avvio del server, wrapper dei tool, spedizione del log
+├── bin/               # bootstrap, avvio del server, wrapper dei tool, spedizione
 ├── config/            # *.example.* versionati; copie reali ignorate
 ├── docs/              # setup della VM, debito di sicurezza, CI, dipendenze
 ├── logs/              # log d'audit JSONL a runtime (non versionati)
@@ -58,6 +58,22 @@ hermes-core/
 
 - Python >= 3.11
 - Dipendenze in `pyproject.toml` (`mcp`, `pydantic`)
+
+## Dispiegamento su una VM
+
+```sh
+sudo bin/hermes-bootstrap
+```
+
+Prepara la macchina — utenti, permessi, ACL, artefatti installati fuori
+dall'albero di git, configurazione dai modelli — e poi chiama il preflight,
+che è il criterio di accettazione: non «ho eseguito i passi», ma «i controlli
+passano».
+
+Non sovrascrive mai una configurazione esistente, non genera chiavi, non
+ricarica `sshd`, non attiva `ufw`. Quello che resta da fare **lo elenca alla
+fine**. Il resto, incluso il collector della spedizione del log, è in
+[docs/setup-vm-hermes.md](docs/setup-vm-hermes.md).
 
 ## Setup sviluppo
 
