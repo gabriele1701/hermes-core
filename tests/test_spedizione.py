@@ -680,7 +680,7 @@ def test_il_referto_dice_che_non_sa_invece_di_rassicurare(
 
     controllo = _controllo(referto, "spedizione di audit")
     assert "mai girato" not in controllo.messaggio
-    assert "non si puo' dire niente" in controllo.messaggio
+    assert "non si può dire niente" in controllo.messaggio
     # Il rimedio deve nominare il transito, che è la causa vera.
     assert "setfacl" in controllo.rimedio
     assert str(sped.stato_dir.parent) in controllo.rimedio

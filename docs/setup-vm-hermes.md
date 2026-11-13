@@ -24,7 +24,34 @@ Sostituisci lungo il testo: `<IP-VM>` con l'indirizzo della VM e
 
 ---
 
+## Come leggere questo documento
+
+Dal 13 novembre 2026 esiste **`bin/hermes-bootstrap`**, che prepara la
+macchina e poi chiama il preflight:
+
+```sh
+sudo bin/hermes-bootstrap
+```
+
+Ogni sezione dice in testa **chi fa cosa**: se la esegue lo script, se resta
+all'operatore, o se è divisa. Due procedure per la stessa macchina
+divergono, quindi il documento è uno solo e la divisione è marcata dentro.
+
+Lo script **non sovrascrive mai** un file di configurazione esistente, non
+genera chiavi, non ricarica `sshd`, non attiva `ufw` e non abilita il timer.
+Dove serve una decisione dell'operatore lascia `DA_COMPILARE`, che ogni
+validatore del progetto rifiuta: un segnaposto plausibile passerebbe i
+controlli dando una configurazione sbagliata, e quello è il guasto peggiore
+dei due.
+
+Quello che resta da fare, lo script **lo elenca alla fine**.
+
+---
+
 ## 1. La VM
+
+> **Resta all'operatore.** Pacchetti, indirizzo fisso, `ufw`: precedono il
+> repo, e nessuno script che viva dentro il repo può farli.
 
 **Distro:** Ubuntu Server LTS. Senza ambiente grafico: questa macchina non va
 usata interattivamente, e ogni pacchetto in meno è superficie in meno.
@@ -114,6 +141,9 @@ echo 'network: {config: disabled}' | \
 
 ## 2. Utenti e permessi
 
+> **Lo fa `bin/hermes-bootstrap`.** Qui resta il *perché*, che lo script
+> non può spiegare mentre lo esegue.
+
 Il disegno: **chi esegue il server non può modificare ciò che esegue.**
 
 | Chi | Cosa può fare |
@@ -137,6 +167,12 @@ sudo passwd -l hermes      # nessun accesso con password
 ---
 
 ## 3. Installazione
+
+> **Parte lo fa `bin/hermes-bootstrap`**: virtualenv, dipendenze dal lock,
+> permessi, e `config/hermes.toml` generato dal modello con gli SHA dei
+> tool ricalcolati. Restano all'operatore il `git clone` — il bootstrap
+> gira *dentro* il repo, quindi il repo deve già esserci — e i valori che
+> lo script lascia a `DA_COMPILARE`.
 
 ```sh
 sudo git clone https://github.com/gabriele1701/hermes-core.git /opt/hermes-core
@@ -227,6 +263,11 @@ alzare un tier, cioè chiedere più conferme.
 ---
 
 ## 4. Il canale SSH, vincolato e fuori dalla portata del servizio
+
+> **Misto.** Il bootstrap copia il drop-in e si ferma li'. **Restano
+> all'operatore** le chiavi, il ricarico di `sshd` e `ufw`: ricaricare dove
+> la chiave non c'è ancora lascia un server irraggiungibile, con un
+> sintomo che non punta alla causa.
 
 Qui sta la parte che vale la pena fare bene. La chiave che userà Hermes **non
 deve essere un accesso alla macchina**: deve essere il permesso di avviare
@@ -427,6 +468,10 @@ compare solo al riavvio successivo.
 
 ## 5. Il perimetro dei bersagli
 
+> **Misto.** Il bootstrap genera `/etc/hermes/scope.toml` dal modello con
+> le reti a `DA_COMPILARE`, che il caricatore **rifiuta**: finché restano
+> così il server non parte. Le reti vere le mette l'operatore.
+
 Serve solo se almeno un tool dichiara `target_kind` diverso da `"none"`. Finché
 nessuno lo fa — come in Milestone 0 con `echo.ping` — si può saltare, e il
 preflight lo dice con un avviso invece di un errore.
@@ -556,6 +601,9 @@ Quando arriva un tool con un bersaglio vero, va tolto.
 ---
 
 ## 6. L'identità separata dei tool
+
+> **Lo fa `bin/hermes-bootstrap`**: utente, wrapper, riga di sudoers
+> (validata con `visudo -c` prima di metterla al suo posto) e le ACL.
 
 Fino a qui i tool giravano con l'identità del **servizio**. Un tool compromesso
 — o semplicemente un tool che fa più del previsto — poteva quindi leggere e
@@ -863,6 +911,11 @@ sudo setfacl -m u:hermes-tool:--x /opt/hermes-core   # ripristino
 
 ## 7. Verificare dalla VM
 
+> **Il bootstrap chiama il preflight** come ultimo passo: il criterio di
+> accettazione non è «ho eseguito i passi» ma «i controlli passano».
+> **Resta all'operatore** l'append-only, che si mette quando il server ha
+> scritto.
+
 Il preflight va eseguito **come l'utente di servizio**, sempre:
 
 ```sh
@@ -965,6 +1018,8 @@ dalla configurazione versionata, che è il posto in cui è stato messo.
 
 ## 8. Verificare da Windows
 
+> **Resta all'operatore.**
+
 Prima di configurare Hermes, la prova che conta — da PowerShell:
 
 ```powershell
@@ -981,6 +1036,8 @@ stampa testo misto o righe spezzate, è il canale.
 ---
 
 ## 9. Registrare in Hermes
+
+> **Resta all'operatore.**
 
 Sull'Hermes di Windows:
 
@@ -1011,6 +1068,13 @@ devono comparire le righe della catena sotto un unico `correlation_id`.
 ---
 
 ## 10. Spedizione del log a una seconda macchina (A5)
+
+> **Misto, e qui la divisione conta.** Su `hermesmcp` il bootstrap installa
+> mittente e unità e genera la configurazione. **Tutto il collector resta
+> all'operatore**, insieme alle chiavi e al timer: tre passi richiedono una
+> decisione umana, e la verifica dell'impronta **deve** restare fuori
+> banda — automatizzarla significherebbe fidarsi della rete, che è ciò da
+> cui protegge.
 
 ### Cosa compra, e cosa no
 
@@ -1124,7 +1188,7 @@ aprire.
 
 ```sh
 # sul collector
-# La shell SERVE, ed e' la stessa lezione di 2: sshd esegue il ForceCommand
+# La shell SERVE, ed è la stessa lezione di 2: sshd esegue il ForceCommand
 # ATTRAVERSO la shell di login dell'utente, quindi con 'nologin' non parte
 # il ricevente — parte nologin, che stampa «This account is currently not
 # available» e chiude. La protezione sta nel vincolo, non nell'assenza di
@@ -1132,7 +1196,7 @@ aprire.
 #
 # La home serve a non lasciare un avviso a ogni connessione: senza, sshd
 # scrive «Could not chdir to home directory» prima di ogni giro, e un rumore
-# ricorrente su un presidio e' un ottimo modo per smettere di leggerlo.
+# ricorrente su un presidio è un ottimo modo per smettere di leggerlo.
 sudo useradd --system --create-home --home-dir /var/lib/hermes-collect \
              --shell /bin/sh hermes-collect
 sudo passwd -l hermes-collect      # nessun accesso con password

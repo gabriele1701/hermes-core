@@ -165,6 +165,10 @@ jobs:
             - append-only del log d'audit (chattr +a)
             - canale SSH: drop-in, ForceCommand, chiavi fuori dalla home
             - perimetro come fatto di rete
+            - il bootstrap: utenti, ACL, sudoers e unita' systemd non sono
+              eseguibili qui. Si verificano sintassi, il rifiuto senza
+              privilegi, e la coincidenza delle costanti duplicate fra
+              shell, Python e unita'. Non che faccia la cosa giusta
             - spedizione del log: il protocollo SI' (mittente e ricevente
               girano davvero, con un ssh finto, e la divergenza viene
               esercitata); il canale SSH verso il collector, il

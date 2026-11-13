@@ -2194,7 +2194,7 @@ UTENTE_SPEDIZIONE = "hermes-ship"
 MITTENTE_INSTALLATO = Path("/usr/local/sbin/hermes-log-ship")
 MITTENTE_NEL_REPO = Path("bin/hermes-log-ship")
 
-#: Chiavi che devono esserci. `COLLECTOR_PORTA` non e' fra queste: ha un
+#: Chiavi che devono esserci. `COLLECTOR_PORTA` non è fra queste: ha un
 #: default (la 22) e dichiararlo obbligatorio renderebbe invalide le
 #: configurazioni scritte prima che la porta fosse configurabile.
 _CHIAVI_SPEDIZIONE = frozenset(
@@ -2202,6 +2202,17 @@ _CHIAVI_SPEDIZIONE = frozenset(
 )
 _CHIAVI_SPEDIZIONE_FACOLTATIVE = frozenset({"COLLECTOR_PORTA"})
 PORTA_PREDEFINITA = 22
+
+#: Il valore che `bin/hermes-bootstrap` lascia dove serve una decisione
+#: dell'operatore. Vive anche nello script di shell e nel mittente: un test
+#: legge gli uni e l'altro e li confronta.
+#:
+#: Si rifiuta esplicitamente invece di lasciarlo passare: un segnaposto
+#: plausibile darebbe una destinazione sbagliata senza farsi notare, e uno
+#: implausibile fallirebbe comunque, ma con un sintomo - una risoluzione DNS
+#: che non riesce - che non dice a chi lo legge che il file non è mai stato
+#: compilato.
+NON_COMPILATO = "DA_COMPILARE"
 _NOME_CANALE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 #: Oltre questa età l'ultima spedizione riuscita è un avviso. Non è la
@@ -2267,6 +2278,12 @@ def leggi_spedizione(testo: str) -> Spedizione:
     if not canali:
         raise SpedizioneError("nessun canale dichiarato")
 
+    non_compilate = sorted(c for c, v in valori.items() if v == NON_COMPILATO)
+    if non_compilate:
+        raise SpedizioneError(
+            f"non compilata: {', '.join(non_compilate)} vale ancora {NON_COMPILATO}"
+        )
+
     porta_grezza = valori.get("COLLECTOR_PORTA", str(PORTA_PREDEFINITA))
     if not porta_grezza.isdigit() or not 1 <= int(porta_grezza) <= 65535:
         raise SpedizioneError(f"porta non valida: {porta_grezza}")
@@ -2325,14 +2342,14 @@ def _ostacoli_alla_lettura(percorso: Path, utente: str) -> list[str]:
 def _stato_di_un_canale(
     stato_dir: Path, canale: str
 ) -> tuple[dict[str, str] | None, str | None]:
-    """Lo stato dell'ultimo giro, e - se manca - **perche'** manca.
+    """Lo stato dell'ultimo giro, e - se manca - **perché** manca.
 
-    Restituisce ``(valori, motivo)``. Un file che non c'e' e un file che non
+    Restituisce ``(valori, motivo)``. Un file che non c'è e un file che non
     si riesce a leggere sono due cose diverse: il primo dice che il mittente
-    non e' mai girato, il secondo non dice niente sul mittente e tutto su di
-    noi. Confonderli significa riportare «non e' mai girato» di una
+    non è mai girato, il secondo non dice niente sul mittente e tutto su di
+    noi. Confonderli significa riportare «non è mai girato» di una
     spedizione che funziona - un'interrogazione che non sa rispondere e ne
-    fabbrica una plausibile, che e' la forma di guasto che questo preflight
+    fabbrica una plausibile, che è la forma di guasto che questo preflight
     esiste per non avere.
     """
     percorso = stato_dir / f"{canale}.stato"
@@ -2594,7 +2611,7 @@ def _ultimo_giro(
                 f"spedizione di {nome}",
                 Esito.AVVISO,
                 f"stato non leggibile da qui ({motivo}): di questa "
-                f"spedizione non si puo' dire niente",
+                f"spedizione non si può dire niente",
                 f"Il preflight gira come {nome_servizio}, che deve poter "
                 f"attraversare la directory del mittente:\n"
                 f"             sudo setfacl -m u:{nome_servizio}:--x "

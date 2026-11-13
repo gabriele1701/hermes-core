@@ -132,6 +132,16 @@ done < "$CONFIG"
 # più, e nessuna espansione costruita a runtime dentro lo script che
 # custodisce le prove.
 [ -n "$COLLECTOR_HOST" ]   || muori $ESITO_CONFIG "manca COLLECTOR_HOST in $CONFIG"
+
+# Il valore che il bootstrap lascia dove serve una decisione dell'operatore.
+# Si rifiuta QUI invece di lasciarlo fallire più tardi: senza, il primo
+# sintomo sarebbe un errore di risoluzione DNS, che non dice a chi lo legge
+# che il file non è mai stato compilato.
+for ANCORA_DA_COMPILARE in "$COLLECTOR_HOST" "$COLLECTOR_UTENTE"; do
+    if [ "$ANCORA_DA_COMPILARE" = DA_COMPILARE ]; then
+        muori $ESITO_CONFIG "$CONFIG non è stato compilato: contiene ancora DA_COMPILARE"
+    fi
+done
 [ -n "$COLLECTOR_UTENTE" ] || muori $ESITO_CONFIG "manca COLLECTOR_UTENTE in $CONFIG"
 [ -n "$COLLECTOR_PORTA" ]  || muori $ESITO_CONFIG "COLLECTOR_PORTA vuota in $CONFIG"
 [ -n "$CHIAVE" ]           || muori $ESITO_CONFIG "manca CHIAVE in $CONFIG"
@@ -253,7 +263,7 @@ for VOCE in $CANALI; do
     # --- Il controllo che rende la copia una prova ------------------------- #
 
     if [ "$REMOTO" -gt "$LOCALE" ]; then
-        printf "hermes-log-ship: %s: DIVERGENZA - la copia remota e' %s byte, il file locale %s: il locale e' stato accorciato\n" \
+        printf "hermes-log-ship: %s: DIVERGENZA - la copia remota è %s byte, il file locale %s: il locale è stato accorciato\n" \
             "$CANALE" "$REMOTO" "$LOCALE" >&2
         scrivi_stato "$CANALE" divergenza "$LOCALE" "$REMOTO"
         peggiora $ESITO_DIVERGENZA
@@ -263,7 +273,7 @@ for VOCE in $CANALI; do
     if [ "$REMOTO" -gt 0 ]; then
         NOSTRA=$(coda_locale "$FILE" "$REMOTO")
         if [ "$NOSTRA" != "$CODA_REMOTA" ]; then
-            printf "hermes-log-ship: %s: DIVERGENZA - i primi %s byte non combaciano piu' con la copia remota\n" \
+            printf "hermes-log-ship: %s: DIVERGENZA - i primi %s byte non combaciano più con la copia remota\n" \
                 "$CANALE" "$REMOTO" >&2
             scrivi_stato "$CANALE" divergenza "$LOCALE" "$REMOTO"
             peggiora $ESITO_DIVERGENZA
