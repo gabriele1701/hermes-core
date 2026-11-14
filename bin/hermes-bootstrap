@@ -72,6 +72,12 @@ WRAPPER=/usr/local/sbin/hermes-tool-run
 MITTENTE=/usr/local/sbin/hermes-log-ship
 SUDOERS=/etc/sudoers.d/hermes-core
 DROPIN=/etc/ssh/sshd_config.d/10-hermes.conf
+# Chi può entrare è una decisione dell'operatore, quindi vive in un file suo,
+# generato una volta sola e mai più toccato. Nel 10- stava nella classe
+# sbagliata: artefatto con fonte nel repo, reinstallato a ogni esecuzione, che
+# cancellava l'adattamento di chi amministra. Il prefisso 09 fa il resto: in
+# sshd vince il primo valore incontrato e i drop-in si leggono in ordine.
+DROPIN_UTENTI=/etc/ssh/sshd_config.d/09-hermes-allowusers.conf
 UNITA=/etc/systemd/system
 
 # Il valore che si mette dove serve una decisione dell'operatore. Non è un
@@ -84,8 +90,10 @@ NON_COMPILATO=DA_COMPILARE
 
 CON_DEV=no
 RESTA=""
+PROMEMORIA=""
 CAMBIATO=no
 UNITA_CAMBIATE=no
+DROPIN_CAMBIATO=no
 
 # --- Uscita --------------------------------------------------------------- #
 
@@ -102,8 +110,20 @@ fermati() {
     exit 1
 }
 
+# Due elenchi, e la distinzione è il punto: `resta` è ciò che questo script
+# ha GUARDATO e ha trovato mancante — sparisce quando il lavoro è fatto, e la
+# sua assenza è un'informazione. `promemoria` è ciò che non guarda affatto.
+#
+# Prima erano un elenco solo, e si leggeva «ufw: nessuna regola applicata»
+# anche a firewall già ristretto: chi legge non poteva distinguere una
+# verifica da un ritornello, e un ritornello insegna a non leggere l'elenco.
 resta() {
     RESTA="$RESTA  · $1
+"
+}
+
+promemoria() {
+    PROMEMORIA="$PROMEMORIA  · $1
 "
 }
 
@@ -157,7 +177,12 @@ if [ "$PROPRIETARIO" = "$UTENTE_SERVIZIO" ]; then
 fi
 printf 'hermes-core · bootstrap\n'
 printf 'repo: %s (di %s)\n' "$REPO" "$PROPRIETARIO"
-printf 'extra di sviluppo: %s\n\n' "$CON_DEV"
+printf 'extra di sviluppo: %s\n' "$CON_DEV"
+# «riapplicato» alla prima esecuzione sembra un errore di chi legge: non lo
+# è, ma la parola da sola non lo spiega. Costa una riga dirlo.
+printf '\n[  fatto  ] fatto adesso · [invariato] era già a posto'
+printf ' · [ riappl. ] rifatto comunque,\n'
+printf '            perché la fonte è il repo e distinguere non varrebbe il costo\n\n'
 
 if [ "$PROPRIETARIO" = root ]; then
     avviso "il repo è di root: funziona, ma gli aggiornamenti li farà root"
@@ -328,8 +353,7 @@ installa_dal_repo bin/hermes-log-ship "$MITTENTE" 755 \
 # irraggiungibile dal servizio, con un sintomo che non punta alla causa.
 if installa_dal_repo config/sshd/10-hermes.conf "$DROPIN" 644 \
                      "drop-in di sshd: $DROPIN"; then
-    resta "il ricarico di sshd, DOPO aver messo la chiave del servizio:
-      sudo sshd -t && sudo systemctl reload ssh"
+    DROPIN_CAMBIATO=si
 fi
 
 # Il sudoers si valida PRIMA di metterlo al suo posto: un file rotto li'
@@ -383,7 +407,13 @@ else
         /^# state_dir = /    { print "state_dir = \"" stato "\"";         next }
         /^# scope_file = /   { print "scope_file = \"" scope "\"";        next }
         /^# tool_runner = /  { print "tool_runner = \"" wrapper "\"";     next }
-        /^# log_shipping = / { print "log_shipping = \"" spedizione "\""; next }
+        # La spedizione resta COMMENTATA, come nel modello. Attivarla qui
+        # rendeva A5 obbligatoria: il file generato dice DA_COMPILARE, quindi
+        # «configurata e non utilizzabile», che è un errore — e su una
+        # macchina sola PRONTO diventava irraggiungibile, senza che nessun
+        # documento dicesse come uscirne. Assente è diverso da rotto, e
+        # questa è la differenza fra le due.
+        /^# log_shipping = / { print "# log_shipping = \"" spedizione "\""; next }
         /^exec_path = / {
             print
             percorso = $0
@@ -417,6 +447,13 @@ fi
 if [ -f "$SCOPE" ]; then
     invariato "perimetro dei bersagli: $SCOPE (non toccato)"
 else
+    # Il modello dice già DA_COMPILARE, quindi questa sed non trova niente:
+    # resta come guardia. Se un giorno una rete vera tornasse nel file
+    # versionato, non arriverebbe comunque su una macchina — che è il guasto
+    # osservato nel test di accettazione, dove il perimetro era verde su una
+    # rete inesistente. Due presidi perché uno solo non è un presidio: qui la
+    # sostituzione, nella suite un test che carica il modello e pretende che
+    # venga rifiutato.
     sed -E "s#^([[:space:]]*)\"[0-9][^\"]*\",#\\1\"$NON_COMPILATO\",#" \
         "$REPO/config/scope.example.toml" > "$SCOPE"
     chown root:root "$SCOPE"
@@ -433,9 +470,34 @@ else
         "$REPO/config/log-shipping.example.conf" > "$SPEDIZIONE_CONF"
     chown root:root "$SPEDIZIONE_CONF"
     chmod 644 "$SPEDIZIONE_CONF"
-    fatto "spedizione del log: $SPEDIZIONE_CONF"
-    resta "il collector in $SPEDIZIONE_CONF: indirizzo e account dicono
-      $NON_COMPILATO. L'altra macchina è docs/setup-vm-hermes.md §10."
+    fatto "spedizione del log: $SPEDIZIONE_CONF (modello, non attiva)"
+fi
+
+# --- 6b. Chi può entrare in SSH ------------------------------------------- #
+#
+# File dell'operatore, non del repo: generato se manca, mai toccato dopo.
+# Deve precedere il 10- in ordine lessicale, perché in sshd vince il primo
+# valore e i drop-in si leggono in ordine.
+
+if [ -f "$DROPIN_UTENTI" ]; then
+    invariato "accesso SSH: $DROPIN_UTENTI (non toccato)"
+else
+    cat > "$DROPIN_UTENTI" <<EOF
+# Chi può entrare da SSH su QUESTA macchina. Generato una volta sola da
+# bin/hermes-bootstrap e mai più toccato: è una decisione di chi amministra.
+#
+# $NON_COMPILATO va sostituito con il proprio utente amministrativo PRIMA di
+# ricaricare sshd. Il drop-in 10-hermes.conf disattiva le password, quindi
+# un nome sbagliato qui non si traduce in un errore: si traduce in una
+# macchina remota irraggiungibile.
+#
+# L'utente di servizio ($UTENTE_SERVIZIO) deve restare in elenco: è il
+# canale di Hermes, vincolato a un comando unico dal 10-.
+AllowUsers $NON_COMPILATO $UTENTE_SERVIZIO
+EOF
+    chown root:root "$DROPIN_UTENTI"
+    chmod 644 "$DROPIN_UTENTI"
+    fatto "accesso SSH: $DROPIN_UTENTI"
 fi
 
 # --- 7. Virtualenv -------------------------------------------------------- #
@@ -462,16 +524,39 @@ fi
 
 # --- 8. Cio' che resta ---------------------------------------------------- #
 
-resta "le chiavi SSH: questo script non ne genera e non tocca ~/.ssh
+# Prima ciò che è stato GUARDATO ora e trovato mancante, poi i promemoria.
+# L'ordine dentro il primo elenco conta: AllowUsers viene prima del ricarico
+# di sshd, perché chi legge dall'alto e ricarica senza aver messo il proprio
+# nome non ottiene un errore — ottiene una macchina irraggiungibile.
+
+if grep -q "^AllowUsers .*$NON_COMPILATO" "$DROPIN_UTENTI" 2>/dev/null; then
+    SUGGERIMENTO=""
+    if [ -n "${SUDO_USER:-}" ]; then
+        SUGGERIMENTO=" (sembra essere '$SUDO_USER')"
+    fi
+    resta "chi può entrare in SSH: $DROPIN_UTENTI dice ancora $NON_COMPILATO.
+      Sostituirlo con il proprio utente amministrativo$SUGGERIMENTO PRIMA di
+      ricaricare sshd: il 10- disattiva le password, quindi un nome mancante
+      non dà un errore ma una macchina remota irraggiungibile."
+fi
+
+if [ "$DROPIN_CAMBIATO" = si ]; then
+    resta "il ricarico di sshd, DOPO la chiave del servizio e DOPO aver
+      compilato $DROPIN_UTENTI:
+      sudo sshd -t && sudo systemctl reload ssh"
+fi
+
+promemoria "le chiavi SSH: questo script non ne genera e non tocca ~/.ssh
       (docs §4.1 per il servizio, §10.2 per la spedizione)."
-resta "ufw: nessuna regola applicata (docs §4.3). Aprire la porta alla
-      postazione PRIMA di abilitarlo, o ci si chiude fuori."
-resta "il timer della spedizione, dopo un giro a mano riuscito:
-      sudo systemctl start hermes-log-ship.service
-      sudo systemctl enable --now hermes-log-ship.timer"
-resta "l'append-only su log e store, quando il server avrà scritto (docs §7)."
-resta "il collector di A5: è un'altra macchina (docs §10), e la verifica
-      dell'impronta va fatta fuori banda."
+promemoria "ufw: questo script non tocca il firewall. La 22 va RISTRETTA alla
+      sola postazione (docs §4.3) — §1 l'ha aperta a chiunque."
+promemoria "l'append-only su log e store, quando il server avrà scritto
+      (docs §7)."
+promemoria "la spedizione del log (A5) è pronta ma NON attiva: il modello sta
+      in $SPEDIZIONE_CONF e log_shipping resta commentata in
+      config/hermes.toml. Serve una seconda macchina, e la verifica
+      dell'impronta va fatta fuori banda (docs §10). Finché è spenta il log
+      vive solo qui, e il preflight lo dichiara."
 
 printf '\n========================================================================\n'
 if [ "$CAMBIATO" = no ]; then
@@ -479,7 +564,10 @@ if [ "$CAMBIATO" = no ]; then
 else
     printf 'Preparazione completata.\n'
 fi
-printf '\nQUESTO SCRIPT NON LO FA — verificare che sia stato fatto:\n%s' "$RESTA"
+if [ -n "$RESTA" ]; then
+    printf '\nVERIFICATO ORA, E MANCA:\n%s' "$RESTA"
+fi
+printf '\nQUESTO SCRIPT NON LI GUARDA — da controllare comunque:\n%s' "$PROMEMORIA"
 printf '========================================================================\n\n'
 
 # --- 9. Il preflight come test di accettazione ---------------------------- #

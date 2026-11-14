@@ -1,11 +1,18 @@
 # Perimetro dei bersagli ammessi — hermes-core (A2)
 #
-# Copiare FUORI dal repo, in una posizione di root, e indicarlo in
-# hermes.toml come [server] scope_file:
+# QUESTO FILE NON È UN PERIMETRO UTILIZZABILE, ed è voluto: le reti dicono
+# DA_COMPILARE e il caricatore le rifiuta. Un test della suite lo pretende.
 #
-#     sudo install -d -m 755 -o root -g root /etc/hermes
-#     sudo install -m 644 -o root -g root config/scope.example.toml \
-#         /etc/hermes/scope.toml
+# Prima qui c'era una rete vera, quella del laboratorio di chi ha scritto il
+# progetto. Installata su un'altra macchina — come è successo durante il test
+# di accettazione — dava un perimetro verde su una rete che lì non esisteva:
+# negava ogni bersaglio reale e autorizzava un intervallo che su una rete
+# altrui può appartenere a chiunque. Ed è esattamente la patologia che questo
+# file esiste per impedire: un segnaposto plausibile passa ogni validatore.
+#
+# Non si installa a mano: lo genera `bin/hermes-bootstrap` in /etc/hermes/
+# e lo indica in hermes.toml come [server] scope_file. Qui restano il formato
+# e le ragioni.
 #
 # Deve essere di root e NON scrivibile dall'utente di servizio. Non va in
 # state_dir: quella è scrivibile dal servizio, e un tool compromesso che
@@ -22,7 +29,7 @@
 #
 # Tenerle strette. Una /16 di comodo è un perimetro che non limita niente.
 reti = [
-    "192.168.205.0/24",
+    "DA_COMPILARE",
 ]
 
 # Nomi, per non ricordare gli indirizzi a memoria.

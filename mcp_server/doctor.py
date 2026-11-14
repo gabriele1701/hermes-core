@@ -17,6 +17,7 @@ Esiti: ``OK`` tutto a posto · ``AVVISO`` funziona ma c'è qualcosa da sapere ·
 from __future__ import annotations
 
 import datetime as _dt
+import grp
 import importlib.metadata
 import json
 import os
@@ -104,7 +105,80 @@ class Referto:
 # --------------------------------------------------------------------------- #
 
 
+def _leggibilita_config(referto: Referto, percorso: Path) -> bool:
+    """Apre e legge davvero un byte della configurazione, prima di interpretarla.
+
+    ``load_config`` apre il file senza rete: se l'utente di servizio non può
+    leggerlo, il preflight moriva con un ``PermissionError`` e un traceback,
+    **prima** di produrre referto. È il primo guasto che incontra chi installa
+    ed era l'unico che questo strumento non traduceva in un rimedio.
+
+    Ed è facile da provocare, per come il repo è protetto: ``o-rwx`` e gruppo
+    dell'utente di servizio, quindi il servizio legge *solo* grazie al gruppo.
+    Ogni editor che scrive-e-rinomina — ``sed -i``, ``vim`` con la
+    configurazione predefinita — ricrea il file con il gruppo primario di chi
+    edita, l'unica via d'accesso sparisce, e il sintomo arriva al primo avvio
+    senza puntare alla causa.
+
+    Si apre e si legge un byte invece di chiedere a ``os.access``, che
+    risponde sui permessi nominali: con le ACL può negare una lettura che
+    funziona, e un controllo deve riprodurre l'operazione che diagnostica.
+    """
+    try:
+        with percorso.open("rb") as fh:
+            fh.read(1)
+    except FileNotFoundError:
+        referto.aggiungi(
+            "configurazione",
+            Esito.ERRORE,
+            f"non esiste: {percorso}",
+            "Generarla dal modello:\n"
+            "             cp config/hermes.example.toml config/hermes.toml\n"
+            "             Oppure lasciarla generare da bin/hermes-bootstrap.",
+        )
+        return False
+    except OSError as err:
+        try:
+            gruppi = ",".join(str(g) for g in os.getgroups()) or "nessuno"
+        except OSError:  # pragma: no cover
+            gruppi = "non leggibili"
+        righe = [
+            f"In esecuzione come {_utente(os.geteuid())} "
+            f"(uid {os.geteuid()}), gruppi {gruppi}.",
+            _descrivi(percorso),
+            _descrivi(percorso.parent),
+        ]
+        # La radice del repo porta il gruppo che il dispiegamento concede al
+        # servizio: si legge da lì invece di indovinarlo, così il rimedio
+        # nomina il gruppo di questa macchina e non quello di un esempio.
+        radice = percorso.parent.parent
+        proprietario = _proprietario(radice)
+        gruppo = _gruppo(radice)
+        if proprietario and gruppo and gruppo != _gruppo(percorso):
+            righe.append(
+                f"Causa probabile: il file ha perso il gruppo '{gruppo}', che "
+                f"è l'unico accesso del servizio (il repo è 'o-rwx'). Lo fa "
+                f"ogni editor che scrive-e-rinomina. Rimedio:"
+            )
+            righe.append(f"    sudo chown {proprietario}:{gruppo} {percorso}")
+        else:
+            righe.append(
+                "Causa probabile: proprietario o permessi del file. Il "
+                "preflight va eseguito come l'utente che eseguirà il server."
+            )
+        referto.aggiungi(
+            "configurazione",
+            Esito.ERRORE,
+            f"illeggibile: {type(err).__name__}: {percorso}",
+            "\n             ".join(righe),
+        )
+        return False
+    return True
+
+
 def _configurazione(referto: Referto, percorso: Path) -> ServerConfig | None:
+    if not _leggibilita_config(referto, percorso):
+        return None
     try:
         cfg = load_config(percorso)
     except ConfigError as err:
@@ -453,6 +527,22 @@ def _utente_di_servizio(cfg: ServerConfig) -> str | None:
         return None
     nome = _utente(st.st_uid)
     return nome if nome != str(st.st_uid) else None
+
+
+def _gruppo(percorso: Path) -> str | None:
+    """Nome del gruppo proprietario, o ``None`` se il percorso non si ispeziona.
+
+    Non solleva: serve alla diagnosi, e una diagnosi che muore trasforma un
+    errore riportato in un traceback — che è esattamente il guasto che il
+    controllo zero esiste per togliere.
+    """
+    st = _stat(percorso)
+    if st is None:
+        return None
+    try:
+        return grp.getgrgid(st.st_gid).gr_name
+    except (KeyError, OSError):  # pragma: no cover
+        return str(st.st_gid)
 
 
 def _proprietario(percorso: Path) -> str | None:
@@ -1086,16 +1176,63 @@ def _dipendenze(referto: Referto, cfg: ServerConfig) -> None:
         )
 
     if deriva.in_piu:
-        referto.aggiungi(
-            "pacchetti fuori dal lock",
-            Esito.AVVISO,
-            f"{len(deriva.in_piu)} installati e non fissati: "
-            + ", ".join(deriva.in_piu[:_MAX_SEGNALATI])
-            + (" …" if len(deriva.in_piu) > _MAX_SEGNALATI else ""),
-            "Non smentiscono il lock, ma qualcuno li ha messi lì a mano: "
-            "sono codice che gira nel processo che custodisce log e vault, e "
-            "che nessuna revisione ha visto.",
-        )
+        noti, ignoti = separa_extra_di_sviluppo(deriva.in_piu)
+
+        if ignoti:
+            referto.aggiungi(
+                "pacchetti fuori dal lock",
+                Esito.AVVISO,
+                f"{len(ignoti)} installati e non fissati: "
+                + ", ".join(ignoti[:_MAX_SEGNALATI])
+                + (" …" if len(ignoti) > _MAX_SEGNALATI else ""),
+                "Non smentiscono il lock, ma qualcuno li ha messi lì a mano: "
+                "sono codice che gira nel processo che custodisce log e "
+                "vault, e che nessuna revisione ha visto.",
+            )
+
+        if noti:
+            referto.aggiungi(
+                "extra di sviluppo",
+                Esito.AVVISO,
+                f"{len(noti)} installati fuori dal lock: "
+                + ", ".join(noti[:_MAX_SEGNALATI])
+                + (" …" if len(noti) > _MAX_SEGNALATI else ""),
+                "Sono il set di `bin/hermes-bootstrap --dev`, non un "
+                "intervento manuale.\n"
+                "             Restano però codice non fissato nel processo "
+                "che custodisce log e vault: su un dispiegamento di esercizio "
+                "si installa senza `--dev`.",
+            )
+
+
+#: Il set che ``bin/hermes-bootstrap --dev`` aggiunge al lock: ``pytest`` e ciò
+#: che si porta dietro.
+#:
+#: Serve solo a **nominare la causa giusta**. Prima questi pacchetti finivano
+#: nell'avviso «qualcuno li ha messi lì a mano», che accusava un intervento
+#: manuale mai avvenuto: li aveva installati un'opzione ufficiale dello script,
+#: e un diagnostico che indica una causa falsa è peggio di uno che tace, perché
+#: viene creduto.
+#:
+#: L'avviso non sparisce, perché la sostanza resta vera: è codice non fissato
+#: nel processo che custodisce log e vault. Cambia solo da cosa viene fatto
+#: risalire. Tutto ciò che non è qui dentro continua a essere trattato come
+#: un'aggiunta non spiegata — se le dipendenze di ``pytest`` cambiano, il
+#: preflight lo dice invece di tacere, ed è il verso giusto in cui sbagliare.
+EXTRA_DI_SVILUPPO = frozenset(
+    {"pytest", "iniconfig", "pluggy", "packaging", "pygments"}
+)
+
+
+def separa_extra_di_sviluppo(in_piu: list[str]) -> tuple[list[str], list[str]]:
+    """``(set di sviluppo, aggiunte non spiegate)``, nell'ordine ricevuto.
+
+    Separata dal controllo che la usa perché è l'unica parte con una regola:
+    il resto è formattazione di due avvisi.
+    """
+    noti = [n for n in in_piu if n.lower() in EXTRA_DI_SVILUPPO]
+    ignoti = [n for n in in_piu if n.lower() not in EXTRA_DI_SVILUPPO]
+    return noti, ignoti
 
 
 def _tool(referto: Referto, cfg: ServerConfig) -> None:
@@ -1370,6 +1507,7 @@ def esegui(percorso_config: str | Path) -> Referto:
     _container(referto, cfg)
     _tool(referto, cfg)
     _canale_ssh(referto, cfg)
+    _ordine_dei_dropin(referto)
     _spedizione(referto, cfg, percorso)
     _handshake(referto, percorso)
     return referto
@@ -1379,6 +1517,83 @@ def esegui(percorso_config: str | Path) -> Referto:
 #: non sono scelte del server ma del sistema su cui gira.
 PERCORSO_SSHD_CONFIG = Path("/etc/ssh/sshd_config")
 PERCORSO_DROPIN_SSH = Path("/etc/ssh/sshd_config.d/10-hermes.conf")
+#: Il file che decide chi può entrare. Generato una volta sola dal bootstrap,
+#: e numerato più basso del nostro perché la sua riga deve vincere.
+PERCORSO_DROPIN_UTENTI = Path(
+    "/etc/ssh/sshd_config.d/09-hermes-allowusers.conf"
+)
+
+
+def precedono(nomi: list[str], nostro: str, nostri: set[str]) -> list[str]:
+    """I drop-in che ``sshd`` legge prima del nostro, esclusi i nostri.
+
+    Separata perché è l'unica parte con una regola, e perché la regola è
+    l'ordine lessicale: dirla in un test è più onesto che fidarsi del fatto
+    che su questa macchina i numeri vengano comodi.
+    """
+    return sorted(n for n in nomi if n < nostro and n not in nostri)
+
+
+def _ordine_dei_dropin(referto: Referto) -> None:
+    """Un drop-in che precede il nostro può renderlo inerte.
+
+    Il controllo sull'``Include`` guarda ``sshd_config`` e si ferma lì:
+    verifica che le direttive della distribuzione non precedano l'inclusione.
+    Ma dentro ``sshd_config.d/`` i file si leggono in ordine lessicale, e in
+    ``sshd`` vince il **primo** valore incontrato — quindi un vicino numerato
+    più basso vince sul nostro esattamente come ci vincerebbe una riga in
+    cima a ``sshd_config``.
+
+    Visto sul campo durante il test di accettazione: su Ubuntu Server c'è un
+    ``50-cloud-init.conf`` con ``PasswordAuthentication yes``. Lì
+    l'irrigidimento regge, ma solo perché 10 viene prima di 50 — fortuna di
+    numerazione, non progetto. Con un ``05-`` qualunque, le direttive del
+    nostro drop-in sarebbero installate e senza effetto: il falso verde
+    peggiore, perché il file c'è e ``sshd -t`` passa.
+
+    Si leggono i **nomi**, non i contenuti: quei file sono spesso di root e
+    non ispezionabili dall'utente di servizio. Un elenco di nomi basta a dire
+    «qui qualcuno parla prima di noi», e la verifica autorevole resta
+    ``sudo sshd -T``, che richiede root e non è alla portata del preflight.
+    """
+    if _stat(PERCORSO_SSHD_CONFIG) is None:
+        return
+
+    directory = PERCORSO_DROPIN_SSH.parent
+    try:
+        nomi = sorted(p.name for p in directory.glob("*.conf"))
+    except OSError:
+        return
+    if not nomi:
+        return
+
+    nostri = {PERCORSO_DROPIN_SSH.name, PERCORSO_DROPIN_UTENTI.name}
+    prima = precedono(nomi, PERCORSO_DROPIN_SSH.name, nostri)
+
+    if not prima:
+        referto.aggiungi(
+            "ordine dei drop-in di sshd",
+            Esito.OK,
+            f"nessun drop-in estraneo precede {PERCORSO_DROPIN_SSH.name} "
+            f"({len(nomi)} drop-in in {directory})",
+        )
+        return
+
+    referto.aggiungi(
+        "ordine dei drop-in di sshd",
+        Esito.AVVISO,
+        f"{', '.join(prima)} viene letto prima di "
+        f"{PERCORSO_DROPIN_SSH.name}: ogni direttiva che dichiara vince "
+        f"sulla nostra",
+        "In sshd vince il PRIMO valore incontrato e i drop-in si leggono in "
+        "ordine lessicale: un file che precede il nostro può lasciare "
+        "l'irrigidimento installato e inerte.\n"
+        "             Verifica autorevole, che richiede root:\n"
+        "             sudo sshd -T | grep -iE "
+        "'passwordauth|permitroot|authenticationmethods'\n"
+        "             Se i valori non sono quelli attesi, il rimedio è "
+        "rinominare il nostro drop-in a un numero più basso di quello.",
+    )
 
 
 def _direttive_prima_dell_include(percorso: Path) -> tuple[bool, list[str]]:
@@ -1486,13 +1701,38 @@ def _perimetro(referto: Referto, cfg: ServerConfig, percorso_config: Path) -> No
     try:
         perimetro = ScopeAllowlist.carica(cfg.scope_file)
     except ScopeError as err:
+        # La diagnosi su proprietario e permessi si attacca SOLO quando il
+        # guasto è l'accesso al file.
+        #
+        # Prima si attaccava sempre. Su un errore di contenuto — una
+        # virgoletta mancante, vista durante il test di accettazione — il
+        # referto concludeva «appartiene a root, tu sei hermes: è il
+        # preflight a essere lanciato dall'utente sbagliato», detto a chi lo
+        # stava lanciando con l'utente giusto, mentre la causa vera era alla
+        # riga 31 del file. Una causa plausibile e falsa è peggio di nessuna
+        # causa, perché viene creduta e manda a cercare dalla parte sbagliata.
+        #
+        # Si distingue dall'eccezione incatenata e non dal testo del
+        # messaggio: un OSError dice che il file non si è lasciato leggere,
+        # qualunque parola ci sia intorno.
+        if isinstance(err.__cause__, OSError):
+            dettaglio = _perche_non_scrivibile(
+                cfg.scope_file, cfg, percorso_config
+            )
+        else:
+            dettaglio = (
+                f"Il file si legge: proprietario e permessi non c'entrano, "
+                f"il contenuto sì.\n"
+                f"             Correggere {cfg.scope_file} — il formato e le "
+                f"regole sono in config/scope.example.toml."
+            )
         referto.aggiungi(
             "perimetro dei bersagli",
             Esito.ERRORE,
             str(err),
             f"Il server non parte finché il perimetro è configurato e non "
             f"caricabile.\n"
-            f"             {_perche_non_scrivibile(cfg.scope_file, cfg, percorso_config)}",
+            f"             {dettaglio}",
         )
         return
 

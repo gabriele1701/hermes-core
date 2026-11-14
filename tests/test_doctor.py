@@ -372,6 +372,81 @@ def test_config_malformata(tmp_path: Path):
     assert esegui(percorso).pronto is False
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="da root i permessi non bloccano: il guasto non si riproduce",
+)
+def test_config_illeggibile_produce_referto_e_non_traceback(
+    tmp_path: Path, radice: Path
+):
+    """Il primo guasto che incontra chi installa era l'unico senza rimedio.
+
+    Prima il preflight moriva con un ``PermissionError`` dentro
+    ``load_config``, cioè senza referto: lo strumento che esiste per tradurre
+    ogni guasto in un rimedio falliva proprio sul guasto che incontra per
+    primo chi dispiega. Qui si pretende il contrario — un referto, un errore
+    nominato, e nessuna eccezione che esca.
+    """
+    percorso = scrivi_config(tmp_path, radice)
+    percorso.chmod(0o000)
+    try:
+        referto = esegui(percorso)
+    finally:
+        percorso.chmod(0o600)
+
+    assert referto.pronto is False
+    c = _controllo(referto, "configurazione")
+    assert c.esito is Esito.ERRORE
+    assert "illeggibile" in c.messaggio
+    # I fatti, non solo il verdetto: chi legge deve sapere con quale identità
+    # il controllo ha provato, perché la risposta cambia con l'utente.
+    assert "In esecuzione come" in c.rimedio
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="da root i permessi non bloccano: il guasto non si riproduce",
+)
+def test_config_illeggibile_nomina_il_gruppo_perduto(tmp_path: Path, radice: Path):
+    """Il rimedio deve nominare il gruppo *di questa macchina*.
+
+    Il modo reale di arrivarci: il repo è ``o-rwx`` con il gruppo del
+    servizio, e un editor che scrive-e-rinomina ricrea il file con il gruppo
+    primario di chi edita. Il gruppo giusto non si indovina — si legge dalla
+    radice del repo, che quel gruppo ce l'ha ancora.
+    """
+    import grp
+
+    alternativi = [g for g in os.getgroups() if g != os.getgid()]
+    if not alternativi:
+        pytest.skip("l'utente appartiene a un gruppo solo: il caso non si riproduce")
+    gruppo = alternativi[0]
+
+    repo = tmp_path / "repo"
+    cartella = repo / "config"
+    cartella.mkdir(parents=True)
+    os.chown(repo, -1, gruppo)
+
+    percorso = scrivi_config(cartella, radice, repo_root=repo)
+    percorso.chmod(0o000)
+    try:
+        referto = esegui(percorso)
+    finally:
+        percorso.chmod(0o600)
+
+    c = _controllo(referto, "configurazione")
+    assert c.esito is Esito.ERRORE
+    nome = grp.getgrgid(gruppo).gr_name
+    assert nome in c.rimedio
+    assert f"chown {_proprietario_corrente()}:{nome} {percorso}" in c.rimedio
+
+
+def _proprietario_corrente() -> str:
+    import pwd
+
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
 def test_sha_non_corrispondente_rilevato_col_rimedio(tmp_path: Path, radice: Path):
     """Il rimedio deve contenere l'hash corretto, pronto da incollare."""
     referto = esegui(scrivi_config(tmp_path, radice, sha="0" * 64))
@@ -1669,6 +1744,112 @@ def test_pacchetto_in_piu_non_e_grave_ma_si_dice():
     deriva = confronta_dipendenze({"mcp": "2.3.0"}, {"mcp": "2.3.0", "requests": "2.0"})
     assert deriva.in_piu == ["requests"]
     assert deriva.grave is False
+
+
+def test_un_perimetro_malformato_non_accusa_l_utente_di_essere_sbagliato(
+    tmp_path: Path, radice: Path
+):
+    """La causa dichiarata dev'essere quella vera, o è peggio di nessuna.
+
+    Visto durante il test di accettazione: una virgoletta mancante in
+    `scope.toml` produceva «appartiene a root, tu sei hermes: è il preflight
+    a essere lanciato dall'utente sbagliato» — detto a chi lo stava
+    lanciando con l'utente giusto. La diagnosi su proprietario e permessi
+    vale quando il file non si lascia leggere, non quando non si lascia
+    interpretare.
+    """
+    scope = tmp_path / "scope.toml"
+    scope.write_text('reti = ["192.168.56.0/24\n', encoding="utf-8")
+
+    referto = esegui(scrivi_config(tmp_path, radice, scope_file=scope))
+    c = _controllo(referto, "perimetro dei bersagli")
+
+    assert c.esito is Esito.ERRORE
+    assert "non parsabile" in c.messaggio
+    assert "utente sbagliato" not in c.rimedio
+    assert "proprietario e permessi non c'entrano" in c.rimedio
+
+
+def test_un_perimetro_illeggibile_accusa_invece_i_permessi(
+    tmp_path: Path, radice: Path
+):
+    """E il verso opposto, altrimenti il rimedio utile sparirebbe.
+
+    Quando il file davvero non si lascia leggere, proprietario e permessi
+    sono la risposta giusta e devono restare nel referto.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("da root i permessi non bloccano: il guasto non si riproduce")
+
+    scope = tmp_path / "scope.toml"
+    scope.write_text('reti = ["192.168.56.0/24"]\n', encoding="utf-8")
+    scope.chmod(0o000)
+    try:
+        referto = esegui(scrivi_config(tmp_path, radice, scope_file=scope))
+    finally:
+        scope.chmod(0o600)
+
+    c = _controllo(referto, "perimetro dei bersagli")
+    assert c.esito is Esito.ERRORE
+    assert "In esecuzione come" in c.rimedio
+
+
+def test_un_dropin_numerato_piu_basso_viene_segnalato():
+    """Il vicino che parla prima di noi rende inerte l'irrigidimento.
+
+    `sshd` legge i drop-in in ordine lessicale e tiene il **primo** valore:
+    un `05-` qualunque vincerebbe sul nostro `10-`, lasciandolo installato e
+    senza effetto. Il controllo sull'`Include` non lo vede, perché guarda
+    dentro `sshd_config` e non dentro la directory.
+    """
+    from mcp_server.doctor import precedono
+
+    nomi = ["05-azienda.conf", "09-hermes-allowusers.conf", "10-hermes.conf"]
+    nostri = {"10-hermes.conf", "09-hermes-allowusers.conf"}
+    assert precedono(nomi, "10-hermes.conf", nostri) == ["05-azienda.conf"]
+
+
+def test_i_nostri_drop_in_non_segnalano_se_stessi():
+    """`09-hermes-allowusers.conf` precede il `10-` per progetto.
+
+    Su Ubuntu Server il vicino reale è un `50-cloud-init.conf` con
+    `PasswordAuthentication yes`: viene dopo, quindi perde — ma è fortuna di
+    numerazione, ed è esattamente ciò che il controllo esiste per non dare
+    per scontato.
+    """
+    from mcp_server.doctor import precedono
+
+    nomi = ["09-hermes-allowusers.conf", "10-hermes.conf", "50-cloud-init.conf"]
+    nostri = {"10-hermes.conf", "09-hermes-allowusers.conf"}
+    assert precedono(nomi, "10-hermes.conf", nostri) == []
+
+
+def test_il_set_di_sviluppo_non_viene_accusato_di_essere_manuale():
+    """`--dev` è un'opzione ufficiale: l'avviso non deve dire «a mano».
+
+    La sostanza dell'avviso resta — codice non fissato nel processo che
+    custodisce log e vault — ma la causa dichiarata deve essere quella vera.
+    Un diagnostico che indica una causa falsa è peggio di uno che tace.
+    """
+    from mcp_server.doctor import separa_extra_di_sviluppo
+
+    noti, ignoti = separa_extra_di_sviluppo(["pytest", "pluggy", "iniconfig"])
+    assert ignoti == []
+    assert noti == ["pytest", "pluggy", "iniconfig"]
+
+
+def test_un_pacchetto_non_previsto_resta_un_intervento_non_spiegato():
+    """Il verso giusto in cui sbagliare: ciò che non si riconosce si dice.
+
+    Se le dipendenze di `pytest` cambiano, il nuovo arrivato finisce fra gli
+    ignoti e il preflight lo nomina, invece di tacere perché «sarà roba di
+    sviluppo».
+    """
+    from mcp_server.doctor import separa_extra_di_sviluppo
+
+    noti, ignoti = separa_extra_di_sviluppo(["pytest", "requests"])
+    assert noti == ["pytest"]
+    assert ignoti == ["requests"]
 
 
 def test_pip_e_il_progetto_non_sono_pacchetti_in_piu():
