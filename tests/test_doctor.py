@@ -1746,6 +1746,36 @@ def test_pacchetto_in_piu_non_e_grave_ma_si_dice():
     assert deriva.grave is False
 
 
+def test_un_dropin_numerato_piu_basso_viene_segnalato():
+    """Il vicino che parla prima di noi rende inerte l'irrigidimento.
+
+    `sshd` legge i drop-in in ordine lessicale e tiene il **primo** valore:
+    un `05-` qualunque vincerebbe sul nostro `10-`, lasciandolo installato e
+    senza effetto. Il controllo sull'`Include` non lo vede, perché guarda
+    dentro `sshd_config` e non dentro la directory.
+    """
+    from mcp_server.doctor import precedono
+
+    nomi = ["05-azienda.conf", "09-hermes-allowusers.conf", "10-hermes.conf"]
+    nostri = {"10-hermes.conf", "09-hermes-allowusers.conf"}
+    assert precedono(nomi, "10-hermes.conf", nostri) == ["05-azienda.conf"]
+
+
+def test_i_nostri_drop_in_non_segnalano_se_stessi():
+    """`09-hermes-allowusers.conf` precede il `10-` per progetto.
+
+    Su Ubuntu Server il vicino reale è un `50-cloud-init.conf` con
+    `PasswordAuthentication yes`: viene dopo, quindi perde — ma è fortuna di
+    numerazione, ed è esattamente ciò che il controllo esiste per non dare
+    per scontato.
+    """
+    from mcp_server.doctor import precedono
+
+    nomi = ["09-hermes-allowusers.conf", "10-hermes.conf", "50-cloud-init.conf"]
+    nostri = {"10-hermes.conf", "09-hermes-allowusers.conf"}
+    assert precedono(nomi, "10-hermes.conf", nostri) == []
+
+
 def test_il_set_di_sviluppo_non_viene_accusato_di_essere_manuale():
     """`--dev` è un'opzione ufficiale: l'avviso non deve dire «a mano».
 

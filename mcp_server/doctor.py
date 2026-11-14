@@ -1507,6 +1507,7 @@ def esegui(percorso_config: str | Path) -> Referto:
     _container(referto, cfg)
     _tool(referto, cfg)
     _canale_ssh(referto, cfg)
+    _ordine_dei_dropin(referto)
     _spedizione(referto, cfg, percorso)
     _handshake(referto, percorso)
     return referto
@@ -1516,6 +1517,83 @@ def esegui(percorso_config: str | Path) -> Referto:
 #: non sono scelte del server ma del sistema su cui gira.
 PERCORSO_SSHD_CONFIG = Path("/etc/ssh/sshd_config")
 PERCORSO_DROPIN_SSH = Path("/etc/ssh/sshd_config.d/10-hermes.conf")
+#: Il file che decide chi può entrare. Generato una volta sola dal bootstrap,
+#: e numerato più basso del nostro perché la sua riga deve vincere.
+PERCORSO_DROPIN_UTENTI = Path(
+    "/etc/ssh/sshd_config.d/09-hermes-allowusers.conf"
+)
+
+
+def precedono(nomi: list[str], nostro: str, nostri: set[str]) -> list[str]:
+    """I drop-in che ``sshd`` legge prima del nostro, esclusi i nostri.
+
+    Separata perché è l'unica parte con una regola, e perché la regola è
+    l'ordine lessicale: dirla in un test è più onesto che fidarsi del fatto
+    che su questa macchina i numeri vengano comodi.
+    """
+    return sorted(n for n in nomi if n < nostro and n not in nostri)
+
+
+def _ordine_dei_dropin(referto: Referto) -> None:
+    """Un drop-in che precede il nostro può renderlo inerte.
+
+    Il controllo sull'``Include`` guarda ``sshd_config`` e si ferma lì:
+    verifica che le direttive della distribuzione non precedano l'inclusione.
+    Ma dentro ``sshd_config.d/`` i file si leggono in ordine lessicale, e in
+    ``sshd`` vince il **primo** valore incontrato — quindi un vicino numerato
+    più basso vince sul nostro esattamente come ci vincerebbe una riga in
+    cima a ``sshd_config``.
+
+    Visto sul campo durante il test di accettazione: su Ubuntu Server c'è un
+    ``50-cloud-init.conf`` con ``PasswordAuthentication yes``. Lì
+    l'irrigidimento regge, ma solo perché 10 viene prima di 50 — fortuna di
+    numerazione, non progetto. Con un ``05-`` qualunque, le direttive del
+    nostro drop-in sarebbero installate e senza effetto: il falso verde
+    peggiore, perché il file c'è e ``sshd -t`` passa.
+
+    Si leggono i **nomi**, non i contenuti: quei file sono spesso di root e
+    non ispezionabili dall'utente di servizio. Un elenco di nomi basta a dire
+    «qui qualcuno parla prima di noi», e la verifica autorevole resta
+    ``sudo sshd -T``, che richiede root e non è alla portata del preflight.
+    """
+    if _stat(PERCORSO_SSHD_CONFIG) is None:
+        return
+
+    directory = PERCORSO_DROPIN_SSH.parent
+    try:
+        nomi = sorted(p.name for p in directory.glob("*.conf"))
+    except OSError:
+        return
+    if not nomi:
+        return
+
+    nostri = {PERCORSO_DROPIN_SSH.name, PERCORSO_DROPIN_UTENTI.name}
+    prima = precedono(nomi, PERCORSO_DROPIN_SSH.name, nostri)
+
+    if not prima:
+        referto.aggiungi(
+            "ordine dei drop-in di sshd",
+            Esito.OK,
+            f"{PERCORSO_DROPIN_SSH.name} è il primo a parlare "
+            f"({len(nomi)} drop-in in {directory})",
+        )
+        return
+
+    referto.aggiungi(
+        "ordine dei drop-in di sshd",
+        Esito.AVVISO,
+        f"{', '.join(prima)} viene letto prima di "
+        f"{PERCORSO_DROPIN_SSH.name}: ogni direttiva che dichiara vince "
+        f"sulla nostra",
+        "In sshd vince il PRIMO valore incontrato e i drop-in si leggono in "
+        "ordine lessicale: un file che precede il nostro può lasciare "
+        "l'irrigidimento installato e inerte.\n"
+        "             Verifica autorevole, che richiede root:\n"
+        "             sudo sshd -T | grep -iE "
+        "'passwordauth|permitroot|authenticationmethods'\n"
+        "             Se i valori non sono quelli attesi, il rimedio è "
+        "rinominare il nostro drop-in a un numero più basso di quello.",
+    )
 
 
 def _direttive_prima_dell_include(percorso: Path) -> tuple[bool, list[str]]:

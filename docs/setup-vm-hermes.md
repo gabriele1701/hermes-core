@@ -360,6 +360,20 @@ sed -n "1,$(grep -n '^Include' /etc/ssh/sshd_config | cut -d: -f1)p" \
     /etc/ssh/sshd_config | grep -vE '^\s*#|^\s*$|^Include'
 ```
 
+E **guarda chi altro abita quella directory**, perché l'`Include` non è
+l'unico modo di perdere la precedenza:
+
+```sh
+ls /etc/ssh/sshd_config.d/
+```
+
+I drop-in si leggono in ordine lessicale e vale sempre il primo valore, quindi
+un file numerato **sotto** il `10-` vince su di noi esattamente come
+vincerebbe una direttiva in cima a `sshd_config`. Su Ubuntu Server c'è un
+`50-cloud-init.conf` che dichiara `PasswordAuthentication yes`: viene dopo,
+quindi perde — ma è fortuna di numerazione, non progetto. Il preflight elenca
+i vicini che ci precedono; la risposta definitiva resta `sudo sshd -T`.
+
 Il primo comando deve trovare `Include /etc/ssh/sshd_config.d/*.conf`; il
 secondo deve stampare **niente**. In `sshd` vince il **primo** valore
 incontrato, quindi un `Include` in fondo al file, o preceduto da direttive
