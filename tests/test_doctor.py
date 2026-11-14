@@ -372,6 +372,81 @@ def test_config_malformata(tmp_path: Path):
     assert esegui(percorso).pronto is False
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="da root i permessi non bloccano: il guasto non si riproduce",
+)
+def test_config_illeggibile_produce_referto_e_non_traceback(
+    tmp_path: Path, radice: Path
+):
+    """Il primo guasto che incontra chi installa era l'unico senza rimedio.
+
+    Prima il preflight moriva con un ``PermissionError`` dentro
+    ``load_config``, cioè senza referto: lo strumento che esiste per tradurre
+    ogni guasto in un rimedio falliva proprio sul guasto che incontra per
+    primo chi dispiega. Qui si pretende il contrario — un referto, un errore
+    nominato, e nessuna eccezione che esca.
+    """
+    percorso = scrivi_config(tmp_path, radice)
+    percorso.chmod(0o000)
+    try:
+        referto = esegui(percorso)
+    finally:
+        percorso.chmod(0o600)
+
+    assert referto.pronto is False
+    c = _controllo(referto, "configurazione")
+    assert c.esito is Esito.ERRORE
+    assert "illeggibile" in c.messaggio
+    # I fatti, non solo il verdetto: chi legge deve sapere con quale identità
+    # il controllo ha provato, perché la risposta cambia con l'utente.
+    assert "In esecuzione come" in c.rimedio
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="da root i permessi non bloccano: il guasto non si riproduce",
+)
+def test_config_illeggibile_nomina_il_gruppo_perduto(tmp_path: Path, radice: Path):
+    """Il rimedio deve nominare il gruppo *di questa macchina*.
+
+    Il modo reale di arrivarci: il repo è ``o-rwx`` con il gruppo del
+    servizio, e un editor che scrive-e-rinomina ricrea il file con il gruppo
+    primario di chi edita. Il gruppo giusto non si indovina — si legge dalla
+    radice del repo, che quel gruppo ce l'ha ancora.
+    """
+    import grp
+
+    alternativi = [g for g in os.getgroups() if g != os.getgid()]
+    if not alternativi:
+        pytest.skip("l'utente appartiene a un gruppo solo: il caso non si riproduce")
+    gruppo = alternativi[0]
+
+    repo = tmp_path / "repo"
+    cartella = repo / "config"
+    cartella.mkdir(parents=True)
+    os.chown(repo, -1, gruppo)
+
+    percorso = scrivi_config(cartella, radice, repo_root=repo)
+    percorso.chmod(0o000)
+    try:
+        referto = esegui(percorso)
+    finally:
+        percorso.chmod(0o600)
+
+    c = _controllo(referto, "configurazione")
+    assert c.esito is Esito.ERRORE
+    nome = grp.getgrgid(gruppo).gr_name
+    assert nome in c.rimedio
+    assert f"chown {_proprietario_corrente()}:{nome} {percorso}" in c.rimedio
+
+
+def _proprietario_corrente() -> str:
+    import pwd
+
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
 def test_sha_non_corrispondente_rilevato_col_rimedio(tmp_path: Path, radice: Path):
     """Il rimedio deve contenere l'hash corretto, pronto da incollare."""
     referto = esegui(scrivi_config(tmp_path, radice, sha="0" * 64))

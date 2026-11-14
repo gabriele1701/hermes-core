@@ -17,6 +17,7 @@ Esiti: ``OK`` tutto a posto · ``AVVISO`` funziona ma c'è qualcosa da sapere ·
 from __future__ import annotations
 
 import datetime as _dt
+import grp
 import importlib.metadata
 import json
 import os
@@ -104,7 +105,80 @@ class Referto:
 # --------------------------------------------------------------------------- #
 
 
+def _leggibilita_config(referto: Referto, percorso: Path) -> bool:
+    """Apre e legge davvero un byte della configurazione, prima di interpretarla.
+
+    ``load_config`` apre il file senza rete: se l'utente di servizio non può
+    leggerlo, il preflight moriva con un ``PermissionError`` e un traceback,
+    **prima** di produrre referto. È il primo guasto che incontra chi installa
+    ed era l'unico che questo strumento non traduceva in un rimedio.
+
+    Ed è facile da provocare, per come il repo è protetto: ``o-rwx`` e gruppo
+    dell'utente di servizio, quindi il servizio legge *solo* grazie al gruppo.
+    Ogni editor che scrive-e-rinomina — ``sed -i``, ``vim`` con la
+    configurazione predefinita — ricrea il file con il gruppo primario di chi
+    edita, l'unica via d'accesso sparisce, e il sintomo arriva al primo avvio
+    senza puntare alla causa.
+
+    Si apre e si legge un byte invece di chiedere a ``os.access``, che
+    risponde sui permessi nominali: con le ACL può negare una lettura che
+    funziona, e un controllo deve riprodurre l'operazione che diagnostica.
+    """
+    try:
+        with percorso.open("rb") as fh:
+            fh.read(1)
+    except FileNotFoundError:
+        referto.aggiungi(
+            "configurazione",
+            Esito.ERRORE,
+            f"non esiste: {percorso}",
+            "Generarla dal modello:\n"
+            "             cp config/hermes.example.toml config/hermes.toml\n"
+            "             Oppure lasciarla generare da bin/hermes-bootstrap.",
+        )
+        return False
+    except OSError as err:
+        try:
+            gruppi = ",".join(str(g) for g in os.getgroups()) or "nessuno"
+        except OSError:  # pragma: no cover
+            gruppi = "non leggibili"
+        righe = [
+            f"In esecuzione come {_utente(os.geteuid())} "
+            f"(uid {os.geteuid()}), gruppi {gruppi}.",
+            _descrivi(percorso),
+            _descrivi(percorso.parent),
+        ]
+        # La radice del repo porta il gruppo che il dispiegamento concede al
+        # servizio: si legge da lì invece di indovinarlo, così il rimedio
+        # nomina il gruppo di questa macchina e non quello di un esempio.
+        radice = percorso.parent.parent
+        proprietario = _proprietario(radice)
+        gruppo = _gruppo(radice)
+        if proprietario and gruppo and gruppo != _gruppo(percorso):
+            righe.append(
+                f"Causa probabile: il file ha perso il gruppo '{gruppo}', che "
+                f"è l'unico accesso del servizio (il repo è 'o-rwx'). Lo fa "
+                f"ogni editor che scrive-e-rinomina. Rimedio:"
+            )
+            righe.append(f"    sudo chown {proprietario}:{gruppo} {percorso}")
+        else:
+            righe.append(
+                "Causa probabile: proprietario o permessi del file. Il "
+                "preflight va eseguito come l'utente che eseguirà il server."
+            )
+        referto.aggiungi(
+            "configurazione",
+            Esito.ERRORE,
+            f"illeggibile: {type(err).__name__}: {percorso}",
+            "\n             ".join(righe),
+        )
+        return False
+    return True
+
+
 def _configurazione(referto: Referto, percorso: Path) -> ServerConfig | None:
+    if not _leggibilita_config(referto, percorso):
+        return None
     try:
         cfg = load_config(percorso)
     except ConfigError as err:
@@ -453,6 +527,22 @@ def _utente_di_servizio(cfg: ServerConfig) -> str | None:
         return None
     nome = _utente(st.st_uid)
     return nome if nome != str(st.st_uid) else None
+
+
+def _gruppo(percorso: Path) -> str | None:
+    """Nome del gruppo proprietario, o ``None`` se il percorso non si ispeziona.
+
+    Non solleva: serve alla diagnosi, e una diagnosi che muore trasforma un
+    errore riportato in un traceback — che è esattamente il guasto che il
+    controllo zero esiste per togliere.
+    """
+    st = _stat(percorso)
+    if st is None:
+        return None
+    try:
+        return grp.getgrgid(st.st_gid).gr_name
+    except (KeyError, OSError):  # pragma: no cover
+        return str(st.st_gid)
 
 
 def _proprietario(percorso: Path) -> str | None:
