@@ -11,6 +11,85 @@ Non è uno strumento d'uso diretto: è il prerequisito (Milestone 0) che abilita
 agenti operativi delle milestone successive (vulnerability assessment, pentest/Kali
 containerizzato).
 
+## Installazione
+
+Da zero a server funzionante su una VM Debian/Ubuntu. Qui solo la sequenza; il
+perché di ogni scelta, le trappole e cosa fare quando qualcosa non torna sono
+in [docs/setup-vm-hermes.md](docs/setup-vm-hermes.md).
+
+**1. Il repo**, prima di tutto: contiene gli script e la documentazione.
+
+```sh
+sudo git clone https://github.com/gabriele1701/hermes-core.git /opt/hermes-core
+sudo chown -R "$USER:$USER" /opt/hermes-core
+cd /opt/hermes-core
+```
+
+**2. I pacchetti.** `acl` su Ubuntu Server non c'è, e senza `setfacl` il passo
+3 si ferma subito.
+
+```sh
+sudo apt update && sudo apt install -y git python3-venv openssh-server acl
+```
+
+**3. Il bootstrap:** utenti, directory, permessi, ACL, artefatti fuori
+dall'albero di git, configurazione dai modelli, e poi il preflight. `--dev`
+aggiunge `pytest`.
+
+```sh
+sudo bin/hermes-bootstrap --dev
+```
+
+→ Atteso **`NON PRONTO`**: i valori di questa macchina sono ancora
+`DA_COMPILARE`, e li compila il passo 4.
+
+**4. I valori di questa macchina:** utente ammesso da SSH, chiave del
+servizio, perimetro dei bersagli, regola `ufw`. Chiede, valida, scrive. Non
+ricarica `sshd` e non applica la rete — quelle restano tue.
+
+```sh
+sudo bin/hermes-configura           # --prova per vedere cosa scriverebbe
+```
+
+**5. La chiave dell'amministratore**, se entri ancora con la password: il
+passo 7 le disattiva, e senza chiave resti fuori.
+[Procedura](docs/setup-vm-hermes.md#42-il-drop-in-di-sshd).
+
+**6. Verifica la chiave da una finestra nuova**, senza chiudere quella aperta.
+Senza le due opzioni `ssh` ricade sulla password senza dirlo.
+
+```sh
+ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no UTENTE@VM
+```
+
+**7. Il ricarico di `sshd`**, solo dopo che il passo 6 è entrato.
+
+```sh
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+**8. Il preflight**, come utente di servizio. È il criterio di accettazione:
+non «ho eseguito i passi», ma «i controlli passano».
+
+```sh
+sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml
+```
+
+→ Atteso **`PRONTO`**.
+
+**9. L'indirizzo fisso**, solo quando l'indirizzo finisce nella configurazione
+di Hermes. Il file l'ha scritto il passo 4; applicarlo **dalla console della
+VM**, non da SSH: cambiando indirizzo la sessione cade, non puoi confermare, e
+netplan annulla tutto dopo 120 secondi.
+
+```sh
+sudo netplan try
+```
+
+Fuori da questa sequenza: la registrazione in Hermes desktop
+([§8–9](docs/setup-vm-hermes.md)) e la spedizione del log d'audit a una
+seconda macchina ([§10](docs/setup-vm-hermes.md)), che richiede un collector.
+
 ## Natura del progetto
 
 Hermes è una **toolbox difensiva di postura di sicurezza**, sviluppata come progetto
@@ -59,33 +138,47 @@ hermes-core/
 - Python >= 3.11
 - Dipendenze in `pyproject.toml` (`mcp`, `pydantic`)
 
-## Dispiegamento su una VM
+## I due script del dispiegamento
 
-Serve `acl` oltre ai pacchetti di base (`git`, `python3-venv`,
-`openssh-server`): su Ubuntu Server non c'è, e senza `setfacl` lo script si
-ferma all'inizio — dicendolo, e senza aver toccato la macchina.
+La sequenza è nell'[installazione](#installazione) qui sopra. Questa sezione
+dice **cosa fanno e cosa non fanno**, che è la parte che conta quando qualcosa
+non torna.
 
-```sh
-sudo bin/hermes-bootstrap           # dispiegamento di esercizio
-sudo bin/hermes-bootstrap --dev     # anche pytest, per eseguire la suite
-```
+### `bin/hermes-bootstrap`
 
-Prepara la macchina — utenti, permessi, ACL, artefatti installati fuori
-dall'albero di git, configurazione dai modelli — e poi chiama il preflight,
-che è il criterio di accettazione: non «ho eseguito i passi», ma «i controlli
-passano».
-
-`--dev` aggiunge le dipendenze di sviluppo, che **non sono nel lock**: senza
-di esso `pytest` non c'è e la suite non si può eseguire sulla macchina. Il
-preflight segnala quei pacchetti, perché su un dispiegamento di esercizio non
-devono starci.
+Fa il deterministico: utenti, directory, permessi, ACL, gli artefatti che si
+installano fuori dall'albero di git, e i file di configurazione quando non ci
+sono ancora. Poi chiama il preflight, che è il criterio di accettazione.
 
 Non sovrascrive mai una configurazione esistente, non genera chiavi, non
-ricarica `sshd`, non attiva `ufw`, non attiva la spedizione del log. Quello
-che resta da fare **lo elenca alla fine**, in due elenchi distinti: ciò che ha
-verificato e manca, e ciò che non guarda affatto. Il resto, incluso il
-collector della spedizione del log, è in
-[docs/setup-vm-hermes.md](docs/setup-vm-hermes.md).
+ricarica `sshd`, non attiva `ufw`, non attiva la spedizione del log. Dove
+serve una decisione umana lascia `DA_COMPILARE`, che ogni validatore del
+progetto rifiuta: un segnaposto plausibile passerebbe i controlli dando una
+configurazione sbagliata, e quello è il guasto peggiore dei due.
+
+Due regole di idempotenza, distinte: gli artefatti la cui fonte è il **repo**
+si reinstallano quando differiscono, dichiarandolo; i file che contengono
+**decisioni dell'operatore** non si toccano se esistono, qualunque cosa
+contengano. Su una macchina già a posto finisce senza cambiare niente.
+
+### `bin/hermes-configura`
+
+Riempie i `DA_COMPILARE` e installa la chiave del servizio. Chiede, valida,
+scrive — e `--prova` fa tutto tranne scrivere.
+
+Valida con i validatori veri: il perimetro viene dato al caricatore del
+progetto e si installa solo se quello lo accetta; l'utente deve esistere, e
+la chiave deve stare su una riga sola, perché una chiave privata incollata
+per sbaglio ne ha molte.
+
+Non ricarica `sshd`, non cancella le regole aperte di `ufw`, non applica la
+rete. Sono le tre azioni da cui non si torna indietro con un comando: se il
+valore è sbagliato, il sintomo è una macchina remota che non si raggiunge
+più, e arriva alla prossima connessione invece che adesso.
+
+Entrambi chiudono con **due elenchi distinti**: ciò che hanno verificato e
+trovato mancante — che sparisce quando il lavoro è fatto, quindi la sua
+assenza è un'informazione — e ciò che non guardano affatto.
 
 ## Setup sviluppo
 

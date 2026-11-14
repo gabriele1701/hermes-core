@@ -1,0 +1,589 @@
+#!/bin/sh
+# Compila i valori per-installazione che bin/hermes-bootstrap lascia a
+# DA_COMPILARE, e installa la chiave del servizio.
+#
+#     sudo bin/hermes-configura            # chiede ciò che manca
+#     sudo bin/hermes-configura --prova    # valida e mostra, senza scrivere
+#     sudo bin/hermes-configura --utente gabri --reti 192.168.56.0/24 \
+#          --alias lab-web=192.168.56.20 --chiave ~/chiave.pub \
+#          --postazione 192.168.56.1
+#
+# Va eseguito DOPO il bootstrap: riempie i file che quello ha generato.
+#
+# Perché esiste
+# -------------
+#
+# I valori per-installazione erano sei, sparsi in cinque file, da mettere a
+# mano seguendo quattro sezioni del documento. Durante il test di
+# accettazione quella trafila ha prodotto, in una sera: una chiave privata
+# sovrascritta, un YAML digitato a mano sulla console della VM, un
+# AllowUsers dimenticato che ha chiuso fuori l'amministratore, e un
+# perimetro con una virgoletta mancante alla riga 31. Nessuno di quegli
+# errori era difficile da evitare. Erano tutti facili da fare.
+#
+# Cosa NON fa, ed è la parte che conta
+# ------------------------------------
+#
+# NON RICARICA sshd. Scrivere un file è reversibile, ricaricare no: una
+# riga sbagliata in AllowUsers e una macchina remota non si raggiunge più,
+# con le password già disattivate dal drop-in. Quel comando resta
+# all'operatore, DOPO aver verificato la chiave da una finestra nuova. È
+# l'errore che il test di accettazione ha prodotto due volte in un giorno,
+# entrambe seguendo la procedura alla lettera.
+#
+# NON TOGLIE le regole aperte di ufw. Aggiunge quella ristretta alla
+# postazione e dice quali togliere: cancellare l'accesso SSH è nella stessa
+# classe del ricarico - se l'indirizzo è sbagliato ci si chiude fuori, e il
+# sintomo arriva alla prossima connessione, non adesso.
+#
+# NON APPLICA la configurazione di rete. Scrive il file e si ferma:
+# `netplan try` cambia indirizzo, fa cadere la sessione SSH, e senza
+# conferma annulla tutto. Va eseguito dalla console, ed è una riga da
+# digitare invece di quindici di YAML indentato.
+#
+# NON INDOVINA. Risposta vuota o non valida: richiede. Nessun default
+# plausibile, mai - un segnaposto plausibile passa i validatori e consegna
+# una configurazione sbagliata, che è il guasto peggiore dei due. `monika`
+# in AllowUsers e `192.168.205.0/24` nel modello del perimetro erano
+# entrambi valori plausibili, e sono entrambi arrivati in produzione.
+#
+# NON SOVRASCRIVE un valore già compilato senza dirlo e chiedere.
+#
+# Come valida
+# -----------
+#
+# Con i validatori veri, dove esistono. Il perimetro viene scritto in un
+# file temporaneo e dato al caricatore del progetto: si installa solo se
+# quello lo accetta. Riscrivere le regole delle reti in shell vorrebbe dire
+# avere due verità che col tempo divergono, e la verità sbagliata sarebbe
+# quella che l'operatore vede per prima.
+#
+# L'utente deve ESISTERE su questa macchina: un nome con un refuso passa
+# `sshd -t`, passa il preflight, e chiude fuori. La chiave deve stare su una
+# riga sola, perché una chiave privata incollata per sbaglio ne ha molte e
+# non deve finire in authorized_keys.
+
+set -eu
+
+# --- Costanti ------------------------------------------------------------- #
+#
+# Gli stessi percorsi del bootstrap. Un test della suite li legge dai due
+# script e li confronta: dove la copia è inevitabile, la coincidenza va
+# verificata, non sperata.
+
+UTENTE_SERVIZIO=hermes
+UTENTE_TOOL=hermes-tool
+UTENTE_SPEDIZIONE=hermes-ship
+
+# I percorsi si possono sovrascrivere da ambiente, e serve a una cosa sola:
+# permettere alla suite di esercitare questo script su una directory
+# temporanea. Non è una via per redirigere un'esecuzione vera - `sudo` di
+# default azzera l'ambiente (env_reset), quindi queste variabili non
+# arrivano nemmeno. Uno script di dispiegamento che nessun test può lanciare
+# è uno script che nessuno ha mai visto sbagliare, e quel debito il
+# bootstrap ce l'ha già.
+DIR_CONFIG=${HERMES_DIR_CONFIG:-/etc/hermes}
+SCOPE=$DIR_CONFIG/scope.toml
+DIR_SSHD=${HERMES_DIR_SSHD:-/etc/ssh/sshd_config.d}
+DROPIN=$DIR_SSHD/10-hermes.conf
+DROPIN_UTENTI=$DIR_SSHD/09-hermes-allowusers.conf
+DIR_CHIAVI=${HERMES_DIR_CHIAVI:-/etc/ssh/authorized_keys.d}
+CHIAVE_SERVIZIO=$DIR_CHIAVI/$UTENTE_SERVIZIO
+NETPLAN=${HERMES_NETPLAN:-/etc/netplan/99-hermes-static.yaml}
+
+NON_COMPILATO=DA_COMPILARE
+
+PROVA=no
+FORZA=no
+UTENTE=""
+CHIAVE=""
+RETI=""
+ALIAS=""
+POSTAZIONE=""
+INTERFACCIA=""
+INDIRIZZO=""
+GATEWAY=""
+
+RESTA=""
+PROMEMORIA=""
+CAMBIATO=no
+
+# --- Uscita --------------------------------------------------------------- #
+
+fatto()     { CAMBIATO=si; printf '[  fatto  ] %s\n' "$1"; }
+invariato() { printf '[invariato] %s\n' "$1"; }
+saltato()   { printf '[ saltato ] %s\n' "$1"; }
+mostra()    { printf '[  prova  ] %s\n' "$1"; }
+
+fermati() {
+    printf '\n[ FERMO ] %s\n' "$1" >&2
+    if [ $# -gt 1 ]; then
+        printf '          %s\n' "$2" >&2
+    fi
+    exit 1
+}
+
+resta()      { RESTA="$RESTA  · $1
+"; }
+promemoria() { PROMEMORIA="$PROMEMORIA  · $1
+"; }
+
+aiuto() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+    cat <<'EOF'
+Opzioni:
+  --prova             valida tutto e mostra cosa scriverebbe, senza scrivere
+  --forza             sostituisce anche i valori già compilati
+  --utente NOME       utente amministrativo ammesso da SSH (deve esistere)
+  --chiave FILE|TESTO chiave PUBBLICA del servizio
+  --reti A,B          reti del perimetro, in forma canonica
+  --alias n=IP,...    alias dei bersagli, dentro le reti
+  --postazione IP     indirizzo da cui Hermes si connette (regola ufw)
+  --interfaccia NOME  interfaccia per l'indirizzo fisso
+  --indirizzo CIDR    indirizzo fisso, per esempio 192.168.56.10/24
+  --gateway IP        solo se questa interfaccia deve portare la rotta di
+                      default: con una seconda scheda che la porta già,
+                      ometterlo - due rotte di default spengono l'uscita
+  --aiuto             questo testo
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --prova)       PROVA=si ;;
+        --forza)       FORZA=si ;;
+        --utente)      shift; UTENTE=${1:-} ;;
+        --chiave)      shift; CHIAVE=${1:-} ;;
+        --reti)        shift; RETI=${1:-} ;;
+        --alias)       shift; ALIAS=${1:-} ;;
+        --postazione)  shift; POSTAZIONE=${1:-} ;;
+        --interfaccia) shift; INTERFACCIA=${1:-} ;;
+        --indirizzo)   shift; INDIRIZZO=${1:-} ;;
+        --gateway)     shift; GATEWAY=${1:-} ;;
+        --aiuto|-h)    aiuto; exit 0 ;;
+        *)             fermati "opzione non riconosciuta: $1" "bin/hermes-configura --aiuto" ;;
+    esac
+    shift
+done
+
+# In prova non serve root: è il modo di esercitare questo script senza che
+# possa fare danni, e la suite lo usa così. Un test che deve girare da root
+# per dire qualcosa è un test che da root installa davvero.
+if [ "$PROVA" = no ] && [ "$(id -u)" -ne 0 ]; then
+    fermati "serve root" "sudo bin/hermes-configura"
+fi
+
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+
+# Serve un Python solo per VALIDARE: le reti con `ipaddress`, il perimetro
+# con il caricatore del progetto. Si preferisce quello del virtualenv perché
+# è l'interprete con cui girerà il server, ma per validare basta qualunque
+# python3: la libreria è standard e il modulo si importa dalla radice del
+# repo. L'ordine rispetto al bootstrap non lo impone questa riga - lo
+# impongono i file che questo script riempie, che è il bootstrap a generare.
+if [ -x "$REPO/.venv/bin/python" ]; then
+    PY=$REPO/.venv/bin/python
+elif PY=$(command -v python3); then
+    :
+else
+    fermati "serve python3" "su Debian/Ubuntu: apt install python3"
+fi
+
+interattivo() { [ -t 0 ]; }
+
+# Chiede un valore finché non passa il suo validatore.
+#
+# Il validatore stampa il valore CANONICO e esce 0, oppure stampa il motivo
+# e esce 1. Canonico e non "quello battuto": `192.168.56.0/255.255.255.0`
+# diventa `192.168.56.0/24`, e il file contiene la forma che il caricatore
+# confronterà.
+chiedi() {
+    nome=$1; domanda=$2; validatore=$3; opzione=$4
+    eval "valore=\${$nome}"
+    while : ; do
+        if [ -n "$valore" ]; then
+            if esito=$("$validatore" "$valore" 2>&1); then
+                eval "$nome=\$esito"
+                return 0
+            fi
+            printf '  rifiutato: %s\n' "$esito" >&2
+            interattivo || fermati "valore non valido per $opzione" "$esito"
+            valore=""
+        fi
+        interattivo || fermati "manca $opzione" "in modo non interattivo ogni valore va passato come opzione"
+        printf '%s ' "$domanda"
+        read -r valore || fermati "ingresso chiuso senza risposta"
+    done
+}
+
+# --- Validatori ----------------------------------------------------------- #
+
+valida_utente() {
+    # Prima il nome, poi l'esistenza: il nome è una proprietà della stringa e
+    # la risposta è la stessa su ogni macchina, mentre l'esistenza dipende da
+    # dove girimo. Nell'ordine inverso, su una macchina dove gli utenti di
+    # servizio non ci sono ancora, a chi scrive `hermes` si risponderebbe
+    # «non esiste» invece di «è il servizio, qui va il tuo utente» - vero, e
+    # inutile.
+    case $1 in
+        "$UTENTE_SERVIZIO"|"$UTENTE_TOOL"|"$UTENTE_SPEDIZIONE")
+            printf "'%s' è un utente di servizio: qui va il TUO utente amministrativo" "$1"
+            return 1 ;;
+    esac
+    if ! id -u "$1" >/dev/null 2>&1; then
+        printf "l'utente '%s' non esiste su questa macchina: un nome con un refuso passa 'sshd -t' e chiude fuori" "$1"
+        return 1
+    fi
+    printf '%s' "$1"
+}
+
+valida_chiave() {
+    testo=$1
+    if [ -f "$1" ]; then
+        testo=$(cat "$1")
+    fi
+    righe=$(printf '%s\n' "$testo" | grep -c '[^[:space:]]' || true)
+    if [ "$righe" -ne 1 ]; then
+        printf 'sono %s righe non vuote: una chiave pubblica sta su una riga sola. Hai incollato la chiave PRIVATA?' "$righe"
+        return 1
+    fi
+    testo=$(printf '%s' "$testo" | tr -d '\n\r')
+    case $testo in
+        "ssh-ed25519 "*|"ssh-rsa "*|"ecdsa-sha2-"*|"sk-ssh-ed25519@"*|"sk-ecdsa-sha2-"*) ;;
+        *) printf "non ha la forma di una chiave pubblica OpenSSH (atteso 'ssh-ed25519 AAAA... commento')"
+           return 1 ;;
+    esac
+    printf '%s' "$testo"
+}
+
+valida_ip() {
+    "$PY" - "$1" <<'PYEOF'
+import ipaddress, sys
+try:
+    print(ipaddress.ip_address(sys.argv[1].strip()))
+except ValueError as err:
+    print(err); sys.exit(1)
+PYEOF
+}
+
+valida_interfaccia() {
+    # L'interfaccia deve esistere: un nome con un refuso produce un file
+    # netplan sintatticamente valido che non configura niente, e lo scopri
+    # applicandolo - cioè quando l'indirizzo vecchio è già sparito.
+    if [ -d /sys/class/net ] && [ ! -e "/sys/class/net/$1" ]; then
+        disponibili=$(ls /sys/class/net 2>/dev/null | tr '\n' ' ')
+        printf "l'interfaccia '%s' non esiste. Su questa macchina: %s" "$1" "$disponibili"
+        return 1
+    fi
+    printf '%s' "$1"
+}
+
+valida_cidr() {
+    "$PY" - "$1" <<'PYEOF'
+import ipaddress, sys
+grezzo = sys.argv[1].strip()
+if "/" not in grezzo:
+    print("manca la lunghezza del prefisso: per esempio 192.168.56.10/24")
+    sys.exit(1)
+try:
+    print(ipaddress.ip_interface(grezzo))
+except ValueError as err:
+    print(err); sys.exit(1)
+PYEOF
+}
+
+valida_reti() {
+    "$PY" - "$1" <<'PYEOF'
+import ipaddress, sys
+grezze = [x.strip() for x in sys.argv[1].split(",") if x.strip()]
+if not grezze:
+    print("nessuna rete indicata"); sys.exit(1)
+fuori = []
+for g in grezze:
+    try:
+        # strict: 192.168.56.1/24 non è una rete, è un host dentro una rete.
+        # Accettarlo e "correggerlo" in silenzio darebbe un perimetro che
+        # non è quello che l'operatore crede di aver scritto.
+        fuori.append(str(ipaddress.ip_network(g, strict=True)))
+    except ValueError as err:
+        print(f"'{g}': {err}"); sys.exit(1)
+print(",".join(fuori))
+PYEOF
+}
+
+valida_alias() {
+    "$PY" - "$1" "$RETI" <<'PYEOF'
+import ipaddress, sys
+grezzi = [x.strip() for x in sys.argv[1].split(",") if x.strip()]
+reti = [ipaddress.ip_network(r) for r in sys.argv[2].split(",") if r.strip()]
+fuori = []
+for g in grezzi:
+    if "=" not in g:
+        print(f"'{g}': manca l'uguale (atteso nome=indirizzo)"); sys.exit(1)
+    nome, _, grezzo = g.partition("=")
+    nome, grezzo = nome.strip(), grezzo.strip()
+    if not nome:
+        print(f"'{g}': nome vuoto"); sys.exit(1)
+    try:
+        indirizzo = ipaddress.ip_address(grezzo)
+    except ValueError as err:
+        print(f"alias '{nome}': {err}"); sys.exit(1)
+    # Un alias fuori dalle reti non è un errore di battitura innocuo: è un
+    # bersaglio che il gate rifiuterebbe comunque, dichiarato come se fosse
+    # ammesso.
+    if not any(indirizzo in r for r in reti):
+        print(f"alias '{nome}' ({indirizzo}) non è in nessuna delle reti dichiarate")
+        sys.exit(1)
+    fuori.append(f"{nome}={indirizzo}")
+print(",".join(fuori))
+PYEOF
+}
+
+# --- Scrittura ------------------------------------------------------------ #
+#
+# Ogni scrittura passa da qui, così `--prova` è una proprietà dello script e
+# non di chi si ricorda di controllare la variabile.
+
+installa() {
+    sorgente=$1; destinazione=$2; modo=$3; etichetta=$4
+    if [ "$PROVA" = si ]; then
+        mostra "$etichetta"
+        printf '           ---8<--- %s (modo %s)\n' "$destinazione" "$modo"
+        sed 's/^/           /' "$sorgente"
+        printf '           --->8---\n'
+        rm -f "$sorgente"
+        return 0
+    fi
+    install -m "$modo" -o root -g root "$sorgente" "$destinazione"
+    rm -f "$sorgente"
+    fatto "$etichetta"
+}
+
+# --- 1. Chi può entrare --------------------------------------------------- #
+#
+# Primo, e non per caso: è il valore che chiude fuori l'amministratore se
+# resta a DA_COMPILARE quando qualcuno ricarica sshd. Tutto il resto si
+# ripara in SSH, questo no.
+
+if [ ! -f "$DROPIN_UTENTI" ]; then
+    fermati "manca $DROPIN_UTENTI" "lo genera il bootstrap: sudo bin/hermes-bootstrap"
+fi
+
+if grep -q "^AllowUsers .*$NON_COMPILATO" "$DROPIN_UTENTI" 2>/dev/null; then
+    DA_CHIEDERE=si
+elif [ "$FORZA" = si ]; then
+    DA_CHIEDERE=si
+else
+    DA_CHIEDERE=no
+    invariato "accesso SSH: $DROPIN_UTENTI è già compilato ($(grep '^AllowUsers' "$DROPIN_UTENTI" || true))"
+fi
+
+if [ "$DA_CHIEDERE" = si ]; then
+    if [ -z "$UTENTE" ] && interattivo; then
+        printf '\nIl tuo utente amministrativo, quello con cui entri in SSH.\n'
+        printf 'Resterà ammesso quando il drop-in disattiverà le password.\n'
+    fi
+    chiedi UTENTE "  utente amministrativo:" valida_utente --utente
+    tmp=$(mktemp)
+    sed "s/^AllowUsers .*/AllowUsers $UTENTE $UTENTE_SERVIZIO/" \
+        "$DROPIN_UTENTI" > "$tmp"
+    installa "$tmp" "$DROPIN_UTENTI" 644 \
+             "accesso SSH: AllowUsers $UTENTE $UTENTE_SERVIZIO"
+    resta "verificare la chiave di '$UTENTE' DA UNA FINESTRA NUOVA, forzando il metodo,
+      prima di ricaricare sshd:
+      ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no $UTENTE@<questa-vm>"
+fi
+
+# --- 2. La chiave del servizio -------------------------------------------- #
+
+if [ -s "$CHIAVE_SERVIZIO" ] && [ "$FORZA" = no ]; then
+    invariato "chiave del servizio: $CHIAVE_SERVIZIO già presente"
+else
+    if [ -z "$CHIAVE" ] && interattivo; then
+        printf '\nLa chiave PUBBLICA del servizio, generata sulla postazione.\n'
+        printf 'Percorso di un file .pub, o il testo incollato.\n'
+    fi
+    chiedi CHIAVE "  chiave pubblica:" valida_chiave --chiave
+
+    # Il commento della chiave è l'unico modo che hai di riconoscerla dopo:
+    # mostrarlo evita di installare quella sbagliata fra due simili.
+    COMMENTO=$(printf '%s' "$CHIAVE" | cut -d' ' -f3-)
+    [ -n "$COMMENTO" ] && printf '  chiave riconosciuta: %s\n' "$COMMENTO"
+
+    if [ "$PROVA" = no ]; then
+        install -d -m 755 -o root -g root "$DIR_CHIAVI"
+    fi
+    tmp=$(mktemp)
+    cat > "$tmp" <<EOF
+# Chiave del canale di servizio, installata da bin/hermes-configura.
+# Le restrizioni stanno qui E nel drop-in di sshd: qui sono la seconda rete.
+command="$REPO/bin/hermes-core-server",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty $CHIAVE
+EOF
+    installa "$tmp" "$CHIAVE_SERVIZIO" 644 \
+             "chiave del servizio: $CHIAVE_SERVIZIO"
+fi
+
+# --- 3. Il perimetro dei bersagli ----------------------------------------- #
+
+if [ ! -f "$SCOPE" ]; then
+    fermati "manca $SCOPE" "lo genera il bootstrap: sudo bin/hermes-bootstrap"
+fi
+
+if ! grep -q "$NON_COMPILATO" "$SCOPE" && [ "$FORZA" = no ]; then
+    invariato "perimetro: $SCOPE è già compilato"
+else
+    if [ -z "$RETI" ] && interattivo; then
+        printf '\nLe reti dei bersagli ammessi, separate da virgola.\n'
+        printf 'In forma canonica: 192.168.56.0/24, non 192.168.56.1/24.\n'
+    fi
+    chiedi RETI "  reti:" valida_reti --reti
+
+    if [ -z "$ALIAS" ] && interattivo; then
+        printf '\nAlias dei bersagli, nome=indirizzo separati da virgola.\n'
+        printf 'Niente DNS: gli alias sono una tabella dichiarata. Invio per nessuno.\n'
+        printf '  alias: '
+        read -r ALIAS || ALIAS=""
+    fi
+    if [ -n "$ALIAS" ]; then
+        chiedi ALIAS "  alias:" valida_alias --alias
+    fi
+
+    tmp=$(mktemp)
+    {
+        printf '# Perimetro dei bersagli ammessi (A2).\n'
+        printf '# Compilato da bin/hermes-configura. Di root, fuori da state_dir:\n'
+        printf '# un tool che potesse riscrivere la propria allowlist non ne avrebbe una.\n\n'
+        printf 'reti = [\n'
+        # Il \n finale non è cosmetico: senza, `read` incontra la fine del
+        # flusso sull'ultimo valore, esce diverso da zero, e il corpo del
+        # ciclo non viene eseguito nemmeno una volta. Con una rete sola si
+        # ottiene un perimetro vuoto, e l'unica cosa che se ne accorge è il
+        # caricatore - che infatti se n'è accorto.
+        printf '%s\n' "$RETI" | tr ',' '\n' | while read -r rete; do
+            [ -n "$rete" ] && printf '    "%s",\n' "$rete"
+        done
+        printf ']\n\n'
+        printf '# Nessuna risoluzione DNS, per scelta: una tabella dichiarata non\n'
+        printf '# cambia sotto i piedi fra il controllo e l'\''uso.\n'
+        printf '[alias]\n'
+        if [ -n "$ALIAS" ]; then
+            printf '%s\n' "$ALIAS" | tr ',' '\n' | while read -r voce; do
+                [ -n "$voce" ] || continue
+                printf '%s = "%s"\n' \
+                       "$(printf '%s' "$voce" | cut -d= -f1)" \
+                       "$(printf '%s' "$voce" | cut -d= -f2)"
+            done
+        fi
+    } > "$tmp"
+
+    # Il validatore vero. Se il caricatore del progetto non lo accetta, non
+    # si installa: meglio un giro in più adesso che un server che non parte
+    # con un messaggio da interpretare.
+    if ! esito=$(cd "$REPO" && "$PY" - "$tmp" <<'PYEOF' 2>&1
+import sys
+from pathlib import Path
+from mcp_server.scope import ScopeAllowlist, ScopeError
+try:
+    perimetro = ScopeAllowlist.carica(Path(sys.argv[1]))
+except ScopeError as err:
+    print(err); sys.exit(1)
+print(perimetro)
+PYEOF
+    ); then
+        rm -f "$tmp"
+        fermati "il perimetro generato non è caricabile: $esito" \
+                "è un difetto di questo script: segnalarlo invece di correggere a mano"
+    fi
+    installa "$tmp" "$SCOPE" 644 "perimetro: reti $RETI${ALIAS:+ · alias $ALIAS}"
+fi
+
+# --- 4. La regola di ufw -------------------------------------------------- #
+
+if [ -z "$POSTAZIONE" ] && interattivo; then
+    printf '\nIndirizzo della postazione da cui Hermes si connette.\n'
+    printf 'Si legge dal server, invece di dedurlo: echo $SSH_CONNECTION, primo valore.\n'
+    printf 'Invio per saltare.\n'
+    printf '  postazione: '
+    read -r POSTAZIONE || POSTAZIONE=""
+fi
+
+if [ -z "$POSTAZIONE" ]; then
+    saltato "regola ufw: nessuna postazione indicata"
+    promemoria "la 22 va ristretta alla sola postazione (docs §4.3)"
+else
+    chiedi POSTAZIONE "  postazione:" valida_ip --postazione
+    if [ "$PROVA" = si ]; then
+        mostra "regola ufw: allow from $POSTAZIONE to any port 22 proto tcp"
+    elif ! command -v ufw >/dev/null 2>&1; then
+        saltato "regola ufw: ufw non è installato"
+    else
+        ufw allow from "$POSTAZIONE" to any port 22 proto tcp \
+            comment 'SSH postazione Hermes' >/dev/null
+        fatto "regola ufw: 22 aperta da $POSTAZIONE"
+        # Le regole aperte NON si toccano qui: cancellare l'accesso SSH è
+        # nella stessa classe del ricarico di sshd. Se l'indirizzo è
+        # sbagliato, il sintomo arriva alla prossima connessione.
+        if ufw status 2>/dev/null | grep -q '22.*Anywhere'; then
+            resta "togliere le regole aperte della 22, dopo aver verificato che
+      la regola ristretta funzioni. I numeri cambiano a ogni cancellazione,
+      quindi si parte dal più alto:
+      sudo ufw status numbered"
+        fi
+    fi
+fi
+
+# --- 5. L'indirizzo fisso (scritto, non applicato) ------------------------ #
+
+if [ -z "$INTERFACCIA" ] && [ -z "$INDIRIZZO" ] && interattivo; then
+    printf '\nIndirizzo fisso. Serve solo quando l'\''indirizzo finisce nella\n'
+    printf 'configurazione di Hermes: fino a lì il DHCP va bene. Il file viene\n'
+    printf 'scritto, non applicato. Invio per saltare.\n'
+    printf '  interfaccia: '
+    read -r INTERFACCIA || INTERFACCIA=""
+fi
+
+if [ -z "$INTERFACCIA" ] && [ -z "$INDIRIZZO" ]; then
+    saltato "indirizzo fisso: nessuna interfaccia indicata"
+    promemoria "l'indirizzo fisso serve quando l'indirizzo finisce nella
+      configurazione di Hermes (docs §8). Fino a lì il DHCP va bene."
+else
+    chiedi INTERFACCIA "  interfaccia:" valida_interfaccia --interfaccia
+    chiedi INDIRIZZO "  indirizzo (CIDR):" valida_cidr --indirizzo
+    tmp=$(mktemp)
+    {
+        printf 'network:\n  version: 2\n  renderer: networkd\n  ethernets:\n'
+        printf '    %s:\n      dhcp4: false\n      addresses:\n' "$INTERFACCIA"
+        printf '        - %s\n' "$INDIRIZZO"
+        if [ -n "$GATEWAY" ]; then
+            printf '      routes:\n        - to: default\n          via: %s\n' "$GATEWAY"
+        fi
+    } > "$tmp"
+    installa "$tmp" "$NETPLAN" 600 "indirizzo fisso: $INDIRIZZO su $INTERFACCIA (scritto, NON applicato)"
+    resta "applicare la rete DALLA CONSOLE della VM, non da SSH: cambiando
+      indirizzo la sessione cade, non puoi confermare, e netplan annulla
+      tutto dopo 120 secondi senza dirti perché.
+      sudo netplan try"
+fi
+
+# --- Cio' che resta ------------------------------------------------------- #
+
+promemoria "il ricarico di sshd. Questo script non lo fa di proposito: va
+      fatto DOPO aver verificato la chiave, e non prima.
+      sudo sshd -t && sudo systemctl reload ssh"
+promemoria "il preflight, come utente di servizio, che è il criterio di
+      accettazione:
+      sudo -u $UTENTE_SERVIZIO .venv/bin/python -m mcp_server.doctor config/hermes.toml"
+
+printf '\n========================================================================\n'
+if [ "$PROVA" = si ]; then
+    printf 'Prova: tutto validato, niente scritto.\n'
+elif [ "$CAMBIATO" = no ]; then
+    printf 'Niente da compilare: era già tutto a posto.\n'
+else
+    printf 'Compilazione completata.\n'
+fi
+if [ -n "$RESTA" ]; then
+    printf '\nVERIFICATO ORA, E MANCA:\n%s' "$RESTA"
+fi
+printf '\nQUESTO SCRIPT NON LI FA — di proposito:\n%s' "$PROMEMORIA"
+printf '========================================================================\n'
