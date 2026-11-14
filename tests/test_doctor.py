@@ -1746,6 +1746,34 @@ def test_pacchetto_in_piu_non_e_grave_ma_si_dice():
     assert deriva.grave is False
 
 
+def test_il_set_di_sviluppo_non_viene_accusato_di_essere_manuale():
+    """`--dev` è un'opzione ufficiale: l'avviso non deve dire «a mano».
+
+    La sostanza dell'avviso resta — codice non fissato nel processo che
+    custodisce log e vault — ma la causa dichiarata deve essere quella vera.
+    Un diagnostico che indica una causa falsa è peggio di uno che tace.
+    """
+    from mcp_server.doctor import separa_extra_di_sviluppo
+
+    noti, ignoti = separa_extra_di_sviluppo(["pytest", "pluggy", "iniconfig"])
+    assert ignoti == []
+    assert noti == ["pytest", "pluggy", "iniconfig"]
+
+
+def test_un_pacchetto_non_previsto_resta_un_intervento_non_spiegato():
+    """Il verso giusto in cui sbagliare: ciò che non si riconosce si dice.
+
+    Se le dipendenze di `pytest` cambiano, il nuovo arrivato finisce fra gli
+    ignoti e il preflight lo nomina, invece di tacere perché «sarà roba di
+    sviluppo».
+    """
+    from mcp_server.doctor import separa_extra_di_sviluppo
+
+    noti, ignoti = separa_extra_di_sviluppo(["pytest", "requests"])
+    assert noti == ["pytest"]
+    assert ignoti == ["requests"]
+
+
 def test_pip_e_il_progetto_non_sono_pacchetti_in_piu():
     """Un avviso che compare su ogni installazione sana smette di essere letto."""
     from mcp_server.doctor import FUORI_CONFRONTO, confronta_dipendenze

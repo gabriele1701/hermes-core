@@ -1176,16 +1176,63 @@ def _dipendenze(referto: Referto, cfg: ServerConfig) -> None:
         )
 
     if deriva.in_piu:
-        referto.aggiungi(
-            "pacchetti fuori dal lock",
-            Esito.AVVISO,
-            f"{len(deriva.in_piu)} installati e non fissati: "
-            + ", ".join(deriva.in_piu[:_MAX_SEGNALATI])
-            + (" …" if len(deriva.in_piu) > _MAX_SEGNALATI else ""),
-            "Non smentiscono il lock, ma qualcuno li ha messi lì a mano: "
-            "sono codice che gira nel processo che custodisce log e vault, e "
-            "che nessuna revisione ha visto.",
-        )
+        noti, ignoti = separa_extra_di_sviluppo(deriva.in_piu)
+
+        if ignoti:
+            referto.aggiungi(
+                "pacchetti fuori dal lock",
+                Esito.AVVISO,
+                f"{len(ignoti)} installati e non fissati: "
+                + ", ".join(ignoti[:_MAX_SEGNALATI])
+                + (" …" if len(ignoti) > _MAX_SEGNALATI else ""),
+                "Non smentiscono il lock, ma qualcuno li ha messi lì a mano: "
+                "sono codice che gira nel processo che custodisce log e "
+                "vault, e che nessuna revisione ha visto.",
+            )
+
+        if noti:
+            referto.aggiungi(
+                "extra di sviluppo",
+                Esito.AVVISO,
+                f"{len(noti)} installati fuori dal lock: "
+                + ", ".join(noti[:_MAX_SEGNALATI])
+                + (" …" if len(noti) > _MAX_SEGNALATI else ""),
+                "Sono il set di `bin/hermes-bootstrap --dev`, non un "
+                "intervento manuale.\n"
+                "             Restano però codice non fissato nel processo "
+                "che custodisce log e vault: su un dispiegamento di esercizio "
+                "si installa senza `--dev`.",
+            )
+
+
+#: Il set che ``bin/hermes-bootstrap --dev`` aggiunge al lock: ``pytest`` e ciò
+#: che si porta dietro.
+#:
+#: Serve solo a **nominare la causa giusta**. Prima questi pacchetti finivano
+#: nell'avviso «qualcuno li ha messi lì a mano», che accusava un intervento
+#: manuale mai avvenuto: li aveva installati un'opzione ufficiale dello script,
+#: e un diagnostico che indica una causa falsa è peggio di uno che tace, perché
+#: viene creduto.
+#:
+#: L'avviso non sparisce, perché la sostanza resta vera: è codice non fissato
+#: nel processo che custodisce log e vault. Cambia solo da cosa viene fatto
+#: risalire. Tutto ciò che non è qui dentro continua a essere trattato come
+#: un'aggiunta non spiegata — se le dipendenze di ``pytest`` cambiano, il
+#: preflight lo dice invece di tacere, ed è il verso giusto in cui sbagliare.
+EXTRA_DI_SVILUPPO = frozenset(
+    {"pytest", "iniconfig", "pluggy", "packaging", "pygments"}
+)
+
+
+def separa_extra_di_sviluppo(in_piu: list[str]) -> tuple[list[str], list[str]]:
+    """``(set di sviluppo, aggiunte non spiegate)``, nell'ordine ricevuto.
+
+    Separata dal controllo che la usa perché è l'unica parte con una regola:
+    il resto è formattazione di due avvisi.
+    """
+    noti = [n for n in in_piu if n.lower() in EXTRA_DI_SVILUPPO]
+    ignoti = [n for n in in_piu if n.lower() not in EXTRA_DI_SVILUPPO]
+    return noti, ignoti
 
 
 def _tool(referto: Referto, cfg: ServerConfig) -> None:
