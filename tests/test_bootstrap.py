@@ -138,6 +138,39 @@ def test_il_bootstrap_installa_dove_le_unita_e_il_preflight_cercano(script: str)
     assert f"ExecStart={MITTENTE_INSTALLATO}\n" in unita
 
 
+def test_la_riga_di_apt_del_documento_copre_cio_che_il_bootstrap_pretende(
+    script: str,
+):
+    """§1 deve installare tutto ciò che il bootstrap richiede.
+
+    Il guasto osservato su due macchine indipendenti: §1 installava `git`,
+    `python3-venv` e `openssh-server`, e il bootstrap si fermava su
+    `comando assente: setfacl` perché `acl` non c'è su Ubuntu Server. Si
+    fermava bene — prima di toccare la macchina, nominando il rimedio — ma
+    chi segue il documento dall'inizio fa comunque un giro a vuoto.
+
+    Il controllo non confronta i comandi ma i **pacchetti**: lo script
+    suggerisce già la riga di `apt` giusta nel proprio messaggio d'errore, e
+    quella riga è la specifica. Se un domani servisse un comando nuovo, il
+    messaggio cambia e questo test chiede che §1 lo segua.
+    """
+    import re
+
+    suggerita = re.search(r"apt install ([a-z0-9 .+-]+)", script)
+    assert suggerita, "il bootstrap non suggerisce più una riga di apt install"
+    pretesi = set(suggerita.group(1).split())
+
+    documento = (RADICE / "docs" / "setup-vm-hermes.md").read_text(encoding="utf-8")
+    righe = [r for r in documento.splitlines() if "apt install -y" in r]
+    assert righe, "§1 non ha più una riga di apt install"
+    installati = set(righe[0].replace("sudo apt install -y", "").split())
+
+    # `passwd`, `sudo` e `systemd` sono in ogni installazione Debian/Ubuntu:
+    # il bootstrap li nomina per completezza, non perché possano mancare.
+    mancanti = pretesi - installati - {"passwd", "sudo", "systemd"}
+    assert not mancanti, f"§1 non installa: {sorted(mancanti)}"
+
+
 def test_il_dropin_versionato_non_decide_chi_entra():
     """`AllowUsers` non deve stare in un file che il bootstrap reinstalla.
 

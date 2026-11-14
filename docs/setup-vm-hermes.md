@@ -37,14 +37,24 @@ Ogni sezione dice in testa **chi fa cosa**: se la esegue lo script, se resta
 all'operatore, o se è divisa. Due procedure per la stessa macchina
 divergono, quindi il documento è uno solo e la divisione è marcata dentro.
 
-Lo script **non sovrascrive mai** un file di configurazione esistente, non
-genera chiavi, non ricarica `sshd`, non attiva `ufw` e non abilita il timer.
-Dove serve una decisione dell'operatore lascia `DA_COMPILARE`, che ogni
-validatore del progetto rifiuta: un segnaposto plausibile passerebbe i
-controlli dando una configurazione sbagliata, e quello è il guasto peggiore
-dei due.
+**Dove una sezione riporta anche i comandi a mano**, sono l'alternativa per
+chi non può usare lo script, e stanno sotto un titolo che lo dice — mai da
+eseguire *in aggiunta*. Eseguirli dopo il bootstrap, nel migliore dei casi
+non fa niente; nel peggiore sovrascrive un file generato con uno del repo, ed
+è così che un modello d'esempio è finito a fare da configurazione vera su una
+macchina a cui non apparteneva.
 
-Quello che resta da fare, lo script **lo elenca alla fine**.
+Lo script **non sovrascrive mai** un file di configurazione esistente, non
+genera chiavi, non ricarica `sshd`, non attiva `ufw`, non abilita il timer e
+non attiva la spedizione del log. Dove serve una decisione dell'operatore
+lascia `DA_COMPILARE`, che ogni validatore del progetto rifiuta: un
+segnaposto plausibile passerebbe i controlli dando una configurazione
+sbagliata, e quello è il guasto peggiore dei due.
+
+Quello che resta da fare, lo script **lo elenca alla fine**, in due elenchi
+che non vanno confusi: *«verificato ora, e manca»* sparisce quando il lavoro
+è fatto, quindi la sua assenza è un'informazione; *«questo script non li
+guarda»* resta sempre, perché sono cose che non controlla.
 
 ---
 
@@ -69,7 +79,7 @@ quindi va scelta solo se i bersagli stanno tutti lì.
 
 ```sh
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y git python3-venv openssh-server
+sudo apt install -y git python3-venv openssh-server acl
 sudo systemctl enable --now ssh
 sudo ufw default deny incoming
 sudo ufw allow ssh          # prima di 'enable', o ti chiudi fuori
@@ -79,6 +89,11 @@ sudo ufw enable
 `openssh-server` non è dato per scontato: su Ubuntu Server è presente solo se
 è stato selezionato durante l'installazione. Se `systemctl status ssh`
 risponde `Unit ssh.service could not be found`, è semplicemente assente.
+
+`acl` nemmeno, e su Ubuntu Server 26.04 **non c'è** — verificato su due
+installazioni indipendenti. Serve a `bin/hermes-bootstrap`, che senza
+`setfacl` si ferma all'inizio. Si ferma bene, dicendo cosa manca e senza
+toccare la macchina, ma è un giro a vuoto che questa riga evita.
 
 ### Indirizzo fisso
 
@@ -98,6 +113,17 @@ Con la NAT di VMware il gateway è tipicamente `.2` e il pool DHCP parte da
 *bridged* dipende dal router, e vale la pena guardare la sua configurazione —
 oppure usare una **riserva DHCP**, che ha il vantaggio di sopravvivere a una
 reinstallazione della VM.
+
+> **Fuori dal pool, non solo «libero adesso».** Congelare come statico un
+> indirizzo che il DHCP può ancora assegnare funziona il primo giorno e si
+> rompe quando un'altra macchina riceve lo stesso indirizzo: due host con lo
+> stesso IP, a settimane di distanza dalla scelta che l'ha causato, con un
+> sintomo intermittente che non punta da nessuna parte. È il modo più caro di
+> risparmiare trenta secondi.
+
+**Se `ip -br a` mostra più di un'interfaccia, decidi prima quale.** L'indirizzo
+fisso va su quella **da cui ti raggiunge la postazione**, perché è quello che
+finisce nella configurazione di Hermes. L'altra la lasci com'è.
 
 ```sh
 sudo tee /etc/netplan/99-hermes-static.yaml >/dev/null <<'NETPLAN'
@@ -119,11 +145,33 @@ sudo chmod 600 /etc/netplan/99-hermes-static.yaml
 sudo netplan try
 ```
 
+> **Con due schede, togli `routes` e `nameservers`.** Il blocco qui sopra
+> vale per una macchina con una sola interfaccia, che quindi porta sia
+> internet sia te. Una VM con NAT *più* host-only — assetto ordinario, e il
+> default di VirtualBox — ha già la rotta di default e i resolver
+> sull'interfaccia NAT: aggiungerne una seconda su quella host-only crea due
+> rotte di default, vince la statica, e **l'uscita verso internet muore**
+> (osservato: `100% packet loss`, con la NAT perfettamente funzionante a
+> un'interfaccia di distanza). Il blocco giusto in quel caso è soltanto:
+>
+> ```yaml
+>     enp0s8:                       # la scheda da cui ti raggiunge la postazione
+>       dhcp4: false
+>       addresses:
+>         - 192.168.56.10/24
+> ```
+>
+> Niente `routes`, niente `nameservers`: quelli restano dove c'è una rete che
+> va davvero da qualche parte.
+
 Due dettagli che fanno la differenza:
 
 Il prefisso **`99-`** non è estetico: netplan applica i file in ordine e
-l'ultimo vince. Con un nome più basso, il `50-cloud-init.yaml` di Ubuntu
-Server sovrascriverebbe questa configurazione.
+l'ultimo vince. Deve stare sopra i file già presenti in `/etc/netplan/` —
+su Ubuntu Server 26.04 è `00-installer-config.yaml`, su immagini cloud un
+`50-cloud-init.yaml` — che altrimenti sovrascriverebbero questa
+configurazione. Guarda cosa c'è con `ls /etc/netplan/` invece di fidarti del
+nome: cambia fra installer e immagine.
 
 `netplan try` tiene la configurazione per 120 secondi e la annulla da sola se
 non confermi — ma **va eseguito dalla console della VM, non via SSH**:
@@ -178,22 +226,55 @@ sudo passwd -l hermes      # nessun accesso con password
 sudo git clone https://github.com/gabriele1701/hermes-core.git /opt/hermes-core
 sudo chown -R <TUO-UTENTE>:<TUO-UTENTE> /opt/hermes-core
 cd /opt/hermes-core
-
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+sudo bin/hermes-bootstrap --dev
 .venv/bin/pytest -q -m "not slow"     # atteso: verde
 ```
 
-Poi la configurazione, con il log **fuori dal repo**:
+**`--dev` non è opzionale se vuoi eseguire la suite.** Senza, il bootstrap
+installa solo le dipendenze di esercizio dal lock e `pytest` non c'è: il
+comando qui sopra non esiste. Su un dispiegamento di esercizio si installa
+*senza* `--dev`, e il preflight ricorda che quei pacchetti non sono fissati.
+
+Lo script si ferma elencando ciò che resta. Due elenchi, e la differenza
+conta: **«verificato ora, e manca»** sparisce quando il lavoro è fatto, quindi
+la sua assenza è un'informazione; **«questo script non li guarda»** resta
+sempre, perché sono cose che non controlla.
+
+### Modificare `config/hermes.toml` senza chiudere fuori il servizio
+
+Il bootstrap genera la configurazione già compilata — `repo_root`, `log_path`,
+`state_dir`, `scope_file`, `tool_runner` e gli SHA dei tool. Se però la
+modifichi, attenzione a **come**:
+
+> Il repo è `o-rwx` con gruppo `hermes`, quindi il servizio legge *solo*
+> grazie al gruppo. Ogni editor che scrive-e-rinomina — `sed -i`, `vim` con
+> la configurazione predefinita — non modifica il file: ne crea uno nuovo e
+> lo rinomina sopra, con il **tuo** gruppo primario. L'unica via d'accesso
+> sparisce, e il sintomo arriva al primo avvio del server senza puntare alla
+> causa.
+>
+> ```sh
+> sudo chown <TUO-UTENTE>:hermes config/hermes.toml   # dopo ogni modifica
+> ```
+>
+> Oppure `sudo bin/hermes-bootstrap`, che riapplica i permessi del repo. Il
+> preflight comunque lo diagnostica e compone il `chown` con i nomi di questa
+> macchina.
+
+### Senza il bootstrap
+
+Solo se lo script non è utilizzabile. Fa le stesse cose, a mano e senza
+controlli di precondizione:
 
 ```sh
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
 cp config/hermes.example.toml config/hermes.toml
 ```
 
-Modifica `config/hermes.toml`:
+Poi in `config/hermes.toml`, sezione `[server]`:
 
 ```toml
-[server]
 agent = "echo_dummy"
 repo_root = "/opt/hermes-core"
 log_path = "/var/log/hermes/audit.jsonl"
@@ -201,7 +282,8 @@ state_dir = "/var/lib/hermes/state"
 container_available = false
 ```
 
-Il resto del file va bene così.
+Il resto del file va bene così. Mancano gli SHA dei tool, che vanno calcolati
+a mano — vedere §6.4 — e tutti i passi delle sezioni seguenti.
 
 ### Permessi: sola lettura per il servizio
 
@@ -287,9 +369,17 @@ log lo dicesse. La restrizione era custodita da chi dovrebbe subirla.
 Su **Windows**, da PowerShell:
 
 ```powershell
-ssh-keygen -t ed25519 -C "hermes-core@windows" -f $env:USERPROFILE\.ssh\id_ed25519_hermes_mcp
-type $env:USERPROFILE\.ssh\id_ed25519_hermes_mcp.pub
+ssh-keygen -t ed25519 -C "hermes-core@windows" -f $env:USERPROFILE\.ssh\id_ed25519_hermes_<NOME-VM>
+type $env:USERPROFILE\.ssh\id_ed25519_hermes_<NOME-VM>.pub
 ```
+
+> **Il nome del file porti il nome della VM.** Con un nome fisso, la seconda
+> VM servita dalla stessa postazione — una macchina di collaudo accanto a
+> quella di esercizio, il caso più ordinario che ci sia — fa chiedere a
+> `ssh-keygen` *«already exists. Overwrite (y/n)?»*, e un `y` distratto
+> cancella la chiave che serviva alla prima. Il prompt è l'unico avviso che
+> ricevi, arriva mentre stai pensando ad altro, e dopo non c'è ripristino:
+> la chiave privata non esiste più.
 
 Sulla **VM**, la chiave pubblica va in una directory di **root**, non nella home
 del servizio, preceduta dalle restrizioni e tutto su una riga:
@@ -417,6 +507,31 @@ il `forcecommand` e `authorizedkeysfile /etc/ssh/authorized_keys.d/hermes`.
 > il tuo nome è nella lista. La verifica che risponde davvero è
 > `sudo sshd -T | grep -i allowusers`.
 
+**Se l'utente amministrativo entra ancora con la password** — il caso normale
+dopo un'installazione di Ubuntu Server, dove `~/.ssh/authorized_keys` esiste
+ed è vuota — la chiave va creata adesso, perché fra due comandi le password
+non ci saranno più.
+
+Su **Windows**:
+
+```powershell
+ssh-keygen -t ed25519 -C "<TUO-UTENTE>@<NOME-VM>" -f $env:USERPROFILE\.ssh\id_ed25519_<NOME-VM>_admin
+type $env:USERPROFILE\.ssh\id_ed25519_<NOME-VM>_admin.pub
+```
+
+Sulla **VM**, nella home dell'utente amministrativo — qui sì, è la sua chiave
+personale e non quella di un servizio:
+
+```sh
+cat >> ~/.ssh/authorized_keys <<'EOF'
+ssh-ed25519 AAAA...INCOLLA_QUI... <TUO-UTENTE>@<NOME-VM>
+EOF
+chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
+```
+
+Poi verifica **da una finestra nuova**, forzando il metodo come sopra, senza
+chiudere la sessione aperta. Solo allora:
+
 ```sh
 sudo systemctl reload ssh
 ```
@@ -425,14 +540,21 @@ La sessione aperta sopravvive al reload: **non chiuderla** finché una seconda
 connessione nuova non ha funzionato. Per tornare indietro basta
 `sudo rm /etc/ssh/sshd_config.d/10-hermes.conf && sudo systemctl reload ssh`.
 
-Infine, togli il file che non è più letto:
+Infine, **solo se vieni da un'installazione precedente**, togli il file che
+non è più letto:
 
 ```sh
-sudo rm /var/lib/hermes/.ssh/authorized_keys
+sudo rm -f /var/lib/hermes/.ssh/authorized_keys
 ```
 
-Lasciarlo significa che la prossima modifica a quelle chiavi verrà fatta nel
-file sbagliato, senza effetto e senza errore. Il preflight lo segnala.
+Su un'installazione pulita quel file non è mai esistito e il comando non ha
+nulla da fare: `-f` perché un `rm` che fallisce con `No such file or
+directory` a metà di una procedura fa fermare chi la segue a chiedersi cosa
+abbia sbagliato, e la risposta è niente.
+
+Dove invece il file c'è, lasciarlo significa che la prossima modifica a quelle
+chiavi verrà fatta nel file sbagliato, senza effetto e senza errore. Il
+preflight lo segnala.
 
 ### 4.3 Il perimetro di rete
 
@@ -934,8 +1056,22 @@ L'accesso agli script:
 sudo setfacl -R -x u:hermes-tool /opt/hermes-core/agents      # entry di accesso
 sudo setfacl -R -d -x u:hermes-tool /opt/hermes-core/agents   # entry di default
 sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml | grep -iA6 lettura
-# ripristino: i tre comandi di 6.4
+
+sudo bin/hermes-bootstrap                                     # ripristino
 ```
+
+**Il ripristino è rilanciare il bootstrap**, che riapplica le ACL fra i suoi
+artefatti. In alternativa i tre comandi di §6.4, per esteso:
+
+```sh
+sudo setfacl -m u:hermes-tool:--x /opt/hermes-core
+sudo setfacl -R -m u:hermes-tool:rX /opt/hermes-core/agents
+sudo setfacl -R -d -m u:hermes-tool:rX /opt/hermes-core/agents
+```
+
+Stanno qui e non solo in §6.4 perché chi rompe apposta deve poter riparare
+senza scorrere indietro: un ripristino che rimanda a un'altra sezione è un
+ripristino che si salta, e la macchina resta rotta.
 
 Deve dare `[ERRORE] lettura degli script dai tool`, con i `setfacl` nel
 rimedio. È il guasto che il 4 novembre si è visto per la prima volta come

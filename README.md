@@ -61,8 +61,13 @@ hermes-core/
 
 ## Dispiegamento su una VM
 
+Serve `acl` oltre ai pacchetti di base (`git`, `python3-venv`,
+`openssh-server`): su Ubuntu Server non c'è, e senza `setfacl` lo script si
+ferma all'inizio — dicendolo, e senza aver toccato la macchina.
+
 ```sh
-sudo bin/hermes-bootstrap
+sudo bin/hermes-bootstrap           # dispiegamento di esercizio
+sudo bin/hermes-bootstrap --dev     # anche pytest, per eseguire la suite
 ```
 
 Prepara la macchina — utenti, permessi, ACL, artefatti installati fuori
@@ -70,9 +75,16 @@ dall'albero di git, configurazione dai modelli — e poi chiama il preflight,
 che è il criterio di accettazione: non «ho eseguito i passi», ma «i controlli
 passano».
 
+`--dev` aggiunge le dipendenze di sviluppo, che **non sono nel lock**: senza
+di esso `pytest` non c'è e la suite non si può eseguire sulla macchina. Il
+preflight segnala quei pacchetti, perché su un dispiegamento di esercizio non
+devono starci.
+
 Non sovrascrive mai una configurazione esistente, non genera chiavi, non
-ricarica `sshd`, non attiva `ufw`. Quello che resta da fare **lo elenca alla
-fine**. Il resto, incluso il collector della spedizione del log, è in
+ricarica `sshd`, non attiva `ufw`, non attiva la spedizione del log. Quello
+che resta da fare **lo elenca alla fine**, in due elenchi distinti: ciò che ha
+verificato e manca, e ciò che non guarda affatto. Il resto, incluso il
+collector della spedizione del log, è in
 [docs/setup-vm-hermes.md](docs/setup-vm-hermes.md).
 
 ## Setup sviluppo
