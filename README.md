@@ -43,20 +43,46 @@ sudo bin/hermes-bootstrap --dev
 → Atteso **`NON PRONTO`**: i valori di questa macchina sono ancora
 `DA_COMPILARE`, e li compila il passo 4.
 
-**4. I valori di questa macchina:** utente ammesso da SSH, chiave del
-servizio, perimetro dei bersagli, regola `ufw`. Chiede, valida, scrive. Non
-ricarica `sshd` e non applica la rete — quelle restano tue.
+**4. Le due chiavi**, generate sulla **postazione** — non sulla VM. Servono
+adesso: il passo 5 chiede quella del servizio, e il passo 7 disattiva le
+password, quindi senza la tua resti fuori.
+
+Su Windows, in PowerShell, con `VM` sostituito dal nome di questa macchina:
+
+```powershell
+ssh-keygen -t ed25519 -C "hermes-core@windows" -f $env:USERPROFILE\.ssh\id_ed25519_hermes_VM
+ssh-keygen -t ed25519 -C "UTENTE@VM"           -f $env:USERPROFILE\.ssh\id_ed25519_VM_admin
+type $env:USERPROFILE\.ssh\id_ed25519_hermes_VM.pub
+type $env:USERPROFILE\.ssh\id_ed25519_VM_admin.pub
+```
+
+Il nome del file porti il nome della VM: con un nome fisso, la seconda VM
+servita dalla stessa postazione fa chiedere *«already exists. Overwrite?»*, e
+un sì distratto cancella la chiave della prima.
+
+La prima chiave è del **servizio**, e la installa il passo 5. La seconda è
+**tua**, e va messa adesso, sulla VM:
+
+```sh
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+cat >> ~/.ssh/authorized_keys <<'EOF'
+INCOLLA_QUI_LA_PUBBLICA_AMMINISTRATIVA
+EOF
+chmod 600 ~/.ssh/authorized_keys
+```
+
+**5. I valori di questa macchina:** utente ammesso da SSH, chiave del servizio
+(quella stampata al passo 4), perimetro dei bersagli, regola `ufw`. Chiede,
+valida, scrive. Non ricarica `sshd` e non applica la rete — quelle restano
+tue, e sono le due da cui non si torna indietro.
 
 ```sh
 sudo bin/hermes-configura           # --prova per vedere cosa scriverebbe
 ```
 
-**5. La chiave dell'amministratore**, se entri ancora con la password: il
-passo 7 le disattiva, e senza chiave resti fuori.
-[Procedura](docs/setup-vm-hermes.md#42-il-drop-in-di-sshd).
-
-**6. Verifica la chiave da una finestra nuova**, senza chiudere quella aperta.
-Senza le due opzioni `ssh` ricade sulla password senza dirlo.
+**6. Verifica la tua chiave da una finestra nuova**, senza chiudere quella
+aperta. Senza le due opzioni `ssh` ricade sulla password senza dirlo, e
+concluderesti che funziona.
 
 ```sh
 ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no UTENTE@VM
@@ -78,7 +104,7 @@ sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml
 → Atteso **`PRONTO`**.
 
 **9. L'indirizzo fisso**, solo quando l'indirizzo finisce nella configurazione
-di Hermes. Il file l'ha scritto il passo 4; applicarlo **dalla console della
+di Hermes. Il file l'ha scritto il passo 5; applicarlo **dalla console della
 VM**, non da SSH: cambiando indirizzo la sessione cade, non puoi confermare, e
 netplan annulla tutto dopo 120 secondi.
 
