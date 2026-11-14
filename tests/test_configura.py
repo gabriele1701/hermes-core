@@ -105,6 +105,35 @@ def test_la_prova_non_scrive_niente(radice_finta: Path):
     assert dopo == prima
 
 
+def test_un_valore_gia_compilato_non_viene_sovrascritto_da_sola(
+    radice_finta: Path,
+):
+    """Senza terminale non c'è nessuno a cui chiedere, quindi non si tocca.
+
+    Un automatismo che sovrascrive una decisione dell'operatore solo perché è
+    stato rilanciato è la regola di idempotenza del bootstrap al contrario.
+    """
+    (radice_finta / "sshd" / "09-hermes-allowusers.conf").write_text(
+        "AllowUsers gabri hermes\n", encoding="utf-8"
+    )
+    esito = esegui(radice_finta, *completo())
+    assert esito.returncode == 0, esito.stderr
+    assert "già compilato (gabri hermes)" in esito.stdout
+
+
+def test_con_forza_un_valore_gia_compilato_viene_sostituito(radice_finta: Path):
+    """`--forza` è la risposta «sì» data in anticipo.
+
+    Serve dove la domanda non si può fare: senza terminale, e nei test.
+    """
+    (radice_finta / "sshd" / "09-hermes-allowusers.conf").write_text(
+        "AllowUsers gabri hermes\n", encoding="utf-8"
+    )
+    esito = esegui(radice_finta, "--forza", *completo())
+    assert esito.returncode == 0, esito.stderr
+    assert "AllowUsers root hermes" in esito.stdout
+
+
 def test_il_perimetro_generato_passa_il_caricatore_vero(radice_finta: Path):
     """Non si riscrivono le regole delle reti: si usa il caricatore.
 
