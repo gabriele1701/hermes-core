@@ -1746,6 +1746,54 @@ def test_pacchetto_in_piu_non_e_grave_ma_si_dice():
     assert deriva.grave is False
 
 
+def test_un_perimetro_malformato_non_accusa_l_utente_di_essere_sbagliato(
+    tmp_path: Path, radice: Path
+):
+    """La causa dichiarata dev'essere quella vera, o è peggio di nessuna.
+
+    Visto durante il test di accettazione: una virgoletta mancante in
+    `scope.toml` produceva «appartiene a root, tu sei hermes: è il preflight
+    a essere lanciato dall'utente sbagliato» — detto a chi lo stava
+    lanciando con l'utente giusto. La diagnosi su proprietario e permessi
+    vale quando il file non si lascia leggere, non quando non si lascia
+    interpretare.
+    """
+    scope = tmp_path / "scope.toml"
+    scope.write_text('reti = ["192.168.56.0/24\n', encoding="utf-8")
+
+    referto = esegui(scrivi_config(tmp_path, radice, scope_file=scope))
+    c = _controllo(referto, "perimetro dei bersagli")
+
+    assert c.esito is Esito.ERRORE
+    assert "non parsabile" in c.messaggio
+    assert "utente sbagliato" not in c.rimedio
+    assert "proprietario e permessi non c'entrano" in c.rimedio
+
+
+def test_un_perimetro_illeggibile_accusa_invece_i_permessi(
+    tmp_path: Path, radice: Path
+):
+    """E il verso opposto, altrimenti il rimedio utile sparirebbe.
+
+    Quando il file davvero non si lascia leggere, proprietario e permessi
+    sono la risposta giusta e devono restare nel referto.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("da root i permessi non bloccano: il guasto non si riproduce")
+
+    scope = tmp_path / "scope.toml"
+    scope.write_text('reti = ["192.168.56.0/24"]\n', encoding="utf-8")
+    scope.chmod(0o000)
+    try:
+        referto = esegui(scrivi_config(tmp_path, radice, scope_file=scope))
+    finally:
+        scope.chmod(0o600)
+
+    c = _controllo(referto, "perimetro dei bersagli")
+    assert c.esito is Esito.ERRORE
+    assert "In esecuzione come" in c.rimedio
+
+
 def test_un_dropin_numerato_piu_basso_viene_segnalato():
     """Il vicino che parla prima di noi rende inerte l'irrigidimento.
 

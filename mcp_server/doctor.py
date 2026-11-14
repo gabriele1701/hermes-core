@@ -1701,13 +1701,38 @@ def _perimetro(referto: Referto, cfg: ServerConfig, percorso_config: Path) -> No
     try:
         perimetro = ScopeAllowlist.carica(cfg.scope_file)
     except ScopeError as err:
+        # La diagnosi su proprietario e permessi si attacca SOLO quando il
+        # guasto è l'accesso al file.
+        #
+        # Prima si attaccava sempre. Su un errore di contenuto — una
+        # virgoletta mancante, vista durante il test di accettazione — il
+        # referto concludeva «appartiene a root, tu sei hermes: è il
+        # preflight a essere lanciato dall'utente sbagliato», detto a chi lo
+        # stava lanciando con l'utente giusto, mentre la causa vera era alla
+        # riga 31 del file. Una causa plausibile e falsa è peggio di nessuna
+        # causa, perché viene creduta e manda a cercare dalla parte sbagliata.
+        #
+        # Si distingue dall'eccezione incatenata e non dal testo del
+        # messaggio: un OSError dice che il file non si è lasciato leggere,
+        # qualunque parola ci sia intorno.
+        if isinstance(err.__cause__, OSError):
+            dettaglio = _perche_non_scrivibile(
+                cfg.scope_file, cfg, percorso_config
+            )
+        else:
+            dettaglio = (
+                f"Il file si legge: proprietario e permessi non c'entrano, "
+                f"il contenuto sì.\n"
+                f"             Correggere {cfg.scope_file} — il formato e le "
+                f"regole sono in config/scope.example.toml."
+            )
         referto.aggiungi(
             "perimetro dei bersagli",
             Esito.ERRORE,
             str(err),
             f"Il server non parte finché il perimetro è configurato e non "
             f"caricabile.\n"
-            f"             {_perche_non_scrivibile(cfg.scope_file, cfg, percorso_config)}",
+            f"             {dettaglio}",
         )
         return
 
