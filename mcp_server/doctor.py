@@ -1574,7 +1574,7 @@ def _ordine_dei_dropin(referto: Referto) -> None:
         referto.aggiungi(
             "ordine dei drop-in di sshd",
             Esito.OK,
-            f"{PERCORSO_DROPIN_SSH.name} è il primo a parlare "
+            f"nessun drop-in estraneo precede {PERCORSO_DROPIN_SSH.name} "
             f"({len(nomi)} drop-in in {directory})",
         )
         return
