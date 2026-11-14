@@ -138,6 +138,71 @@ def test_il_bootstrap_installa_dove_le_unita_e_il_preflight_cercano(script: str)
     assert f"ExecStart={MITTENTE_INSTALLATO}\n" in unita
 
 
+def test_il_dropin_versionato_non_decide_chi_entra():
+    """`AllowUsers` non deve stare in un file che il bootstrap reinstalla.
+
+    Il guasto osservato nel test di accettazione: il drop-in versionato
+    conteneva `AllowUsers <nome-vero> hermes`. È un artefatto la cui fonte è
+    il repo, quindi il bootstrap lo riscrive ogni volta che differisce —
+    cancellando in silenzio l'adattamento dell'operatore, dopo di che la
+    lista finale invitava a ricaricare sshd. Su una macchina il cui
+    amministratore ha un altro nome quella sequenza chiude fuori chi la
+    esegue, e si ripresenta a ogni aggiornamento del repo.
+
+    Chi può entrare è una decisione di chi amministra: vive nel file che il
+    bootstrap genera una volta sola e non tocca più.
+    """
+    dropin = (RADICE / "config" / "sshd" / "10-hermes.conf").read_text(
+        encoding="utf-8"
+    )
+    attive = [
+        r.strip()
+        for r in dropin.splitlines()
+        if r.strip() and not r.strip().startswith("#")
+    ]
+    assert not [r for r in attive if r.lower().startswith("allowusers")]
+
+
+def test_il_file_di_allowusers_precede_il_dropin_e_nasce_non_compilato(script: str):
+    """Due proprietà, e senza entrambe la correzione non tiene.
+
+    In `sshd` vince il **primo** valore incontrato e i drop-in si leggono in
+    ordine lessicale: se il file degli utenti non precedesse `10-hermes.conf`
+    la sua riga sarebbe inerte. E deve nascere con il segnaposto, non con un
+    nome indovinato: un nome plausibile ma sbagliato passa `sshd -t`, passa
+    il preflight, e chiude fuori in silenzio.
+    """
+    utenti = _assegnazione(script, "DROPIN_UTENTI")
+    dropin = _assegnazione(script, "DROPIN")
+
+    assert Path(utenti).parent == Path(dropin).parent
+    assert Path(utenti).name < Path(dropin).name
+
+    # Il segnaposto si prende dalla costante condivisa, non da una copia
+    # letterale: se un giorno cambiasse, un `DA_COMPILARE` scritto a mano qui
+    # resterebbe indietro e il preflight smetterebbe di riconoscerlo.
+    assert "AllowUsers $NON_COMPILATO" in script
+
+
+def test_il_bootstrap_non_attiva_la_spedizione(script: str):
+    """`log_shipping` deve restare commentata: assente è diverso da rotto.
+
+    Attivandola, il file generato con i segnaposti rendeva la configurazione
+    «presente e non utilizzabile», che è un errore: su una macchina sola
+    PRONTO diventava irraggiungibile e nessun documento diceva come uscirne.
+    A5 resta disponibile, e si accende togliendo un `#`.
+    """
+    assert '# log_shipping = \\"" spedizione "\\""' in script
+
+    modello = (RADICE / "config" / "hermes.example.toml").read_text(encoding="utf-8")
+    attive = [
+        r.strip()
+        for r in modello.splitlines()
+        if r.strip().startswith("log_shipping")
+    ]
+    assert attive == []
+
+
 def test_il_segnaposto_e_lo_stesso_ovunque(script: str):
     """Shell, mittente e preflight devono parlare dello stesso valore.
 

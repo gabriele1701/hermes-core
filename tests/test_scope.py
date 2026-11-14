@@ -28,6 +28,24 @@ def _scrivi(tmp_path: Path, contenuto: str) -> Path:
     return percorso
 
 
+def test_il_modello_versionato_non_e_un_perimetro_utilizzabile():
+    """`config/scope.example.toml` deve essere RIFIUTATO dal caricatore.
+
+    Prima conteneva una rete vera — quella del laboratorio di chi ha scritto
+    il progetto. Durante il test di accettazione su una seconda macchina,
+    installarlo come dice la documentazione dava un perimetro **verde** su
+    una rete che lì non esisteva: negava ogni bersaglio reale e autorizzava
+    un intervallo che su una rete altrui può appartenere a chiunque.
+
+    È la patologia contro cui il file stesso è stato scritto: un segnaposto
+    plausibile passa ogni validatore, e il guasto si scopre dopo. Questo test
+    rende impossibile reintrodurla senza che la suite se ne accorga.
+    """
+    modello = Path(__file__).resolve().parent.parent / "config" / "scope.example.toml"
+    with pytest.raises(ScopeError):
+        ScopeAllowlist.carica(modello)
+
+
 def _perimetro(reti=("10.10.0.0/16",), alias=None) -> ScopeAllowlist:
     return ScopeAllowlist(
         tuple(ipaddress.ip_network(r) for r in reti),

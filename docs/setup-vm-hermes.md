@@ -325,8 +325,34 @@ Le stesse restrizioni vanno anche nella configurazione di `sshd`, che il
 servizio non può modificare. Le opzioni dentro `authorized_keys` restano come
 seconda rete, ma non sono più l'unica.
 
-Il file è versionato nel repo: `config/sshd/10-hermes.conf`. Prima di
-installarlo, **verifica che `sshd` legga i drop-in**:
+**I file sono due, e la divisione è deliberata:**
+
+| File | Chi lo scrive | Quando cambia |
+|---|---|---|
+| `10-hermes.conf` | il repo, installato dal bootstrap | **a ogni aggiornamento**, se differisce |
+| `09-hermes-allowusers.conf` | il bootstrap, una volta sola | mai: lo modifichi tu |
+
+Nel `10-` non c'è nessun `AllowUsers`, ed è una regola. Chi può entrare è una
+decisione di chi amministra *questa* macchina, e un file che il bootstrap
+reinstalla non può custodire una decisione: un `AllowUsers` scritto lì veniva
+riportato al valore del repo a ogni esecuzione, in silenzio, e lo script
+invitava subito dopo a ricaricare `sshd`. Su una macchina il cui
+amministratore ha un altro nome, quella sequenza chiude fuori chi la esegue —
+e si ripresenta a ogni `git pull`.
+
+Il `09-` nasce con `DA_COMPILARE`. Il prefisso non è estetico: in `sshd` vince
+il **primo** valore incontrato e i drop-in si leggono in ordine lessicale,
+quindi quel file precede il `10-` e la sua riga è quella che conta.
+
+```sh
+sudo nano /etc/ssh/sshd_config.d/09-hermes-allowusers.conf
+# AllowUsers DA_COMPILARE hermes   →   AllowUsers <tuo-utente> hermes
+```
+
+`hermes` deve restare in elenco: è il canale del servizio, già vincolato a un
+comando unico dal `10-`.
+
+Prima di installare il `10-`, **verifica che `sshd` legga i drop-in**:
 
 ```sh
 grep -n '^Include' /etc/ssh/sshd_config
@@ -360,9 +386,11 @@ sudo sshd -T -C user=hermes | grep -iE 'forcecommand|authorizedkeysfile|permittt
 `passwordauthentication no`, `authenticationmethods publickey`, e per `hermes`
 il `forcecommand` e `authorizedkeysfile /etc/ssh/authorized_keys.d/hermes`.
 
-> **Il drop-in disattiva l'accesso con password per tutti.** Prima di
-> ricaricare `sshd`, assicurati di avere una chiave funzionante anche per
-> l'utente amministrativo, verificata forzando il metodo:
+> **Il drop-in disattiva l'accesso con password per tutti**, e
+> `09-hermes-allowusers.conf` decide chi è ammesso. Prima di ricaricare
+> `sshd` servono **entrambe** le cose: il tuo utente al posto di
+> `DA_COMPILARE`, e una chiave funzionante per quell'utente — verificata
+> forzando il metodo:
 >
 > ```
 > ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no utente@vm
@@ -370,8 +398,10 @@ il `forcecommand` e `authorizedkeysfile /etc/ssh/authorized_keys.d/hermes`.
 >
 > Senza `-o`, `ssh` ricade sulla password **senza dirlo**: entreresti,
 > concluderesti che la chiave funziona, e dopo il reload ti troveresti fuori.
-> Modifica `AllowUsers` nel drop-in se l'utente amministrativo ha un altro
-> nome.
+>
+> `sshd -t` non ti salva da nessuna delle due: controlla la sintassi, non se
+> il tuo nome è nella lista. La verifica che risponde davvero è
+> `sudo sshd -T | grep -i allowusers`.
 
 ```sh
 sudo systemctl reload ssh
@@ -484,17 +514,22 @@ direttamente sfruttabile da una prompt injection.
 
 ### Dove va il file, e perché non in `state_dir`
 
+Il bootstrap ha già generato `/etc/hermes/scope.toml` con le reti a
+`DA_COMPILARE`, e ha già messo `scope_file` in `hermes.toml`. All'operatore
+resta solo il contenuto:
+
 ```sh
-sudo install -d -m 755 -o root -g root /etc/hermes
-sudo install -m 644 -o root -g root config/scope.example.toml /etc/hermes/scope.toml
-sudo nano /etc/hermes/scope.toml      # mettere le proprie reti e i propri alias
+sudo nano /etc/hermes/scope.toml      # le proprie reti e i propri alias
 ```
 
-Poi in `hermes.toml`, sezione `[server]`:
-
-```toml
-scope_file = "/etc/hermes/scope.toml"
-```
+> **Non installare `config/scope.example.toml` al suo posto.** Il modello nel
+> repo non è un perimetro utilizzabile — le reti dicono `DA_COMPILARE` e il
+> caricatore le rifiuta, come dev'essere. Prima conteneva una rete vera, e
+> durante il test di accettazione su una seconda macchina quel file dava un
+> perimetro **verde** su una rete che lì non esisteva: negava ogni bersaglio
+> reale e autorizzava un intervallo che su una rete altrui può appartenere a
+> chiunque. Un segnaposto plausibile passa ogni validatore, ed è il guasto
+> peggiore dei due.
 
 Di **root**, e non dentro `state_dir`: quella è scrivibile dal servizio, e un
 tool compromesso che potesse riscrivere la propria allowlist non avrebbe
@@ -1075,6 +1110,23 @@ devono comparire le righe della catena sotto un unico `correlation_id`.
 > decisione umana, e la verifica dell'impronta **deve** restare fuori
 > banda — automatizzarla significherebbe fidarsi della rete, che è ciò da
 > cui protegge.
+
+**La spedizione nasce spenta, e va accesa qui.** Il bootstrap genera il
+modello in `/etc/hermes/log-shipping.conf` ma lascia `log_shipping`
+**commentata** in `config/hermes.toml`: finché resta così il server gira
+normalmente e il preflight lo dichiara con un avviso — il log vive solo su
+questa macchina. Questa sezione richiede una **seconda macchina**, e
+un'installazione che non ce l'ha deve poter arrivare a `PRONTO` lo stesso:
+attivare una configurazione con i segnaposti dentro la renderebbe «presente e
+non utilizzabile», cioè un errore, bloccando un dispiegamento che non ha
+nulla di rotto. *Assente* è diverso da *rotto*.
+
+Quando il collector è pronto, si accende togliendo un `#`:
+
+```sh
+# su hermesmcp, in config/hermes.toml, sezione [server]
+log_shipping = "/etc/hermes/log-shipping.conf"
+```
 
 ### Cosa compra, e cosa no
 
