@@ -132,7 +132,9 @@ aiuto() {
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     cat <<'EOF'
 Opzioni:
-  --prova             valida tutto e mostra cosa scriverebbe, senza scrivere
+  --prova             non scrive niente: valida ogni risposta e stampa i file
+                      che scriverebbe. Non richiede root, ed è così che la
+                      suite esercita questo script - per te è un'anteprima
   --forza             sostituisce anche i valori già compilati
   --utente NOME       utente amministrativo ammesso da SSH (deve esistere)
   --chiave FILE|TESTO chiave PUBBLICA del servizio
@@ -453,6 +455,10 @@ if da_compilare "La chiave del canale di servizio" "$ATTUALE"; then
         printf 'Va generata sulla POSTAZIONE, non qui, e di quella coppia serve\n'
         printf 'solo la parte pubblica: il contenuto del file .pub.\n'
         printf 'Puoi indicare un percorso di file oppure incollare il testo.\n'
+        printf 'Riconoscila dal COMMENTO: le due chiavi che hai generato hanno la\n'
+        printf 'stessa forma e la stessa lunghezza, e si distinguono solo da lì.\n'
+        printf '    ssh-ed25519 AAAA…  hermes-core@…   <- questa, del servizio\n'
+        printf '    ssh-ed25519 AAAA…  tuoutente@…     <- la tua, NON va qui\n'
         suggerimento 'type $env:USERPROFILE\.ssh\id_ed25519_hermes_VM.pub' \
                      'da eseguire SULLA POSTAZIONE, non qui (su Linux: cat ~/.ssh/....pub)'
     fi

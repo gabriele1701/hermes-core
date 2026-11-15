@@ -23,6 +23,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -301,6 +302,142 @@ def _log(
         )
     else:
         referto.aggiungi("log append-only", Esito.OK, "attributo +a impostato")
+
+    _orologio(referto)
+
+
+def strumento_ntp(*, chrony: bool, timesyncd: bool) -> str:
+    """Il rimedio nomina lo strumento che c'è su QUESTA macchina.
+
+    La prima versione di questo controllo diceva «guarda il journal di
+    systemd-timesyncd». Su Ubuntu Server 26.04 quel servizio non è nemmeno
+    installato — il tempo lo gestisce chrony — e il rimedio mandava a
+    interrogare un'unità inesistente, mentre il comando che risolve davvero
+    (``chronyc makestep``) non compariva.
+
+    È la stessa patologia che il test di accettazione ha trovato in §1, dove
+    il documento giustificava una scelta citando un file di netplan che su
+    quella distribuzione non esiste: un rimedio che nomina ciò che non c'è non
+    è solo inutile, manda a cercare un guasto diverso da quello che si ha.
+
+    Separata perché è l'unica parte con una regola, e perché così si prova
+    senza dipendere da cosa è installato dove girano i test.
+    """
+    if chrony:
+        return (
+            "Qui il tempo lo gestisce chrony:\n"
+            "             chronyc tracking    (di quanto è sbagliato, e se lo "
+            "sta correggendo)\n"
+            "             Un salto grande chrony non lo fa da sé passati i "
+            "primi aggiornamenti dall'avvio: corregge per deriva, e venti ore "
+            "a quel ritmo richiedono giorni. Si forza:\n"
+            "             sudo chronyc makestep"
+        )
+    if timesyncd:
+        return (
+            "Qui il tempo lo gestisce systemd-timesyncd:\n"
+            "             journalctl -u systemd-timesyncd -n 20"
+        )
+    return (
+        "Nessun client NTP riconosciuto su questa macchina: installarne uno "
+        "(apt install chrony), oppure sincronizzare a mano e documentare che "
+        "l'orario del log non ha una fonte."
+    )
+
+
+def _orologio(referto: Referto) -> None:
+    """L'orario del log d'audit deve essere credibile, non solo presente.
+
+    Tutto A5 esiste per rendere il log difficile da manomettere: copia su una
+    seconda macchina, rifiuto degli offset divergenti, impronta degli ultimi
+    byte. Un orologio sbagliato non viola nessuno di quei controlli — li passa
+    tutti — e intanto produce righe che non si possono correlare con nessuna
+    altra fonte. Si finisce per costruire una catena di custodia attorno a un
+    orario che non è quello.
+
+    Trovato per caso, e nel modo più istruttivo: una VM ripristinata da
+    snapshot è ripartita venti ore indietro, RTC compreso, e il referto del
+    preflight era l'unico posto dove si sarebbe potuto notare — se solo
+    l'avesse detto.
+
+    Avviso e non errore: una macchina con l'ora sbagliata funziona
+    perfettamente. Semplicemente non è testimone di niente.
+
+    Si interroga ``timedatectl``, che risponde per qualunque implementazione
+    NTP, invece di cercare ``/run/systemd/timesync/synchronized``, che esiste
+    solo con ``systemd-timesyncd`` e tacerebbe su una macchina con chrony —
+    dicendo «non sincronizzato» di una macchina sincronizzata.
+    """
+    adesso = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+    if not shutil.which("timedatectl"):
+        referto.aggiungi(
+            "orologio",
+            Esito.AVVISO,
+            f"non verificabile: manca timedatectl · ora di questa macchina: {adesso}",
+            "Il log d'audit porta questo orario: va confrontato a mano con una "
+            "fonte esterna.",
+        )
+        return
+
+    def interroga(proprieta: str) -> str:
+        try:
+            esito = subprocess.run(
+                ["timedatectl", "show", "-p", proprieta, "--value"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):  # pragma: no cover
+            return ""
+        return esito.stdout.strip()
+
+    sincronizzato = interroga("NTPSynchronized") == "yes"
+    ntp_attivo = interroga("NTP") == "yes"
+
+    if sincronizzato:
+        referto.aggiungi(
+            "orologio",
+            Esito.OK,
+            f"sincronizzato · {adesso}",
+        )
+        return
+
+    # Il rimedio nomina lo strumento DI QUESTA macchina.
+    #
+    # La prima versione diceva «guarda il journal di systemd-timesyncd»: su
+    # Ubuntu Server 26.04 quel servizio non è nemmeno installato, il tempo lo
+    # gestisce chrony, e il rimedio mandava a interrogare un'unità
+    # inesistente. È la stessa patologia che il test di accettazione ha
+    # trovato in §1, dove il documento citava un file di netplan che su quella
+    # distribuzione non c'è: un rimedio che nomina ciò che non esiste manda a
+    # cercare un guasto diverso da quello che si ha.
+    strumento = strumento_ntp(
+        chrony=shutil.which("chronyc") is not None,
+        timesyncd=any(
+            Path(p).exists()
+            for p in (
+                "/usr/lib/systemd/systemd-timesyncd",
+                "/lib/systemd/systemd-timesyncd",
+            )
+        ),
+    )
+
+    referto.aggiungi(
+        "orologio",
+        Esito.AVVISO,
+        f"NON sincronizzato (NTP {'attivo' if ntp_attivo else 'disattivo'}) · "
+        f"ora di questa macchina: {adesso}",
+        "Le righe del log d'audit portano questo orario. Finché non è "
+        "sincronizzato non sono correlabili con nessun'altra fonte, e le "
+        "difese di A5 proteggono una cronologia che non corrisponde ai fatti.\n"
+        "             Il server gira comunque: questo non è un guasto, è una "
+        "prova che vale meno.\n"
+        "             Se l'ora qui sopra è assurda, questa macchina è una VM "
+        "ripristinata da snapshot: riparte con l'ora salvata, RTC compreso.\n"
+        f"             {strumento}",
+    )
 
 
 def _stato(

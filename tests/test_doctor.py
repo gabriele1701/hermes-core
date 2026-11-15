@@ -1746,6 +1746,120 @@ def test_pacchetto_in_piu_non_e_grave_ma_si_dice():
     assert deriva.grave is False
 
 
+def test_un_orologio_non_sincronizzato_e_un_avviso_con_la_sua_conseguenza(
+    tmp_path: Path, radice: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Un orologio sbagliato passa ogni difesa di A5 e le rende inutili.
+
+    Copia remota, rifiuto degli offset, impronta degli ultimi byte: niente di
+    tutto questo si accorge che l'orario è falso. Il log resta integro e
+    smette di essere correlabile con qualunque altra fonte.
+
+    Avviso e non errore: il server gira. È la prova che vale meno.
+    """
+    import datetime as dt
+    import subprocess as sp
+
+    from mcp_server import doctor
+
+    # Si sostituisce solo `timedatectl`: il resto del preflight usa lo stesso
+    # `subprocess.run` per `lsattr` e `getfacl`, e intercettarlo tutto
+    # sostituirebbe metà dei controlli con una finzione.
+    reale = sp.run
+
+    def finto_run(comando, **kwargs):
+        if comando[0] != "timedatectl":
+            return reale(comando, **kwargs)
+        valore = "no" if "NTPSynchronized" in comando else "yes"
+        return sp.CompletedProcess(comando, 0, stdout=valore + "\n", stderr="")
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda _nome: "/usr/bin/timedatectl")
+    monkeypatch.setattr(doctor.subprocess, "run", finto_run)
+
+    referto = esegui(scrivi_config(tmp_path, radice))
+    c = _controllo(referto, "orologio")
+
+    assert c.esito is Esito.AVVISO
+    assert "NON sincronizzato" in c.messaggio
+    # La conseguenza, non il sintomo: chi legge deve capire cosa perde.
+    assert "log d'audit" in c.rimedio
+    # Qualunque implementazione ci sia, il rimedio ne nomina una sola e
+    # concreta: la scelta ha i suoi test, qui si pretende che ci sia.
+    assert "il tempo lo gestisce" in c.rimedio or "Nessun client NTP" in c.rimedio
+    # E l'ora di questa macchina nel messaggio, perché un referto datato venti
+    # ore fa si riconosce a occhio — che è come l'abbiamo trovato.
+    assert dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d") in c.messaggio
+
+
+def test_il_rimedio_nomina_lo_strumento_che_c_e_su_questa_macchina():
+    """Un rimedio che nomina ciò che non esiste manda a cercare altrove.
+
+    La prima versione diceva «guarda il journal di systemd-timesyncd». Su
+    Ubuntu Server 26.04 quel servizio non è installato — il tempo lo gestisce
+    chrony — e il comando che risolve davvero, `chronyc makestep`, non
+    compariva affatto: chrony con un salto grande corregge per deriva e non
+    salta, passati i primi aggiornamenti dall'avvio.
+    """
+    from mcp_server.doctor import strumento_ntp
+
+    con_chrony = strumento_ntp(chrony=True, timesyncd=False)
+    assert "chronyc makestep" in con_chrony
+    assert "timesyncd" not in con_chrony
+
+    con_timesyncd = strumento_ntp(chrony=False, timesyncd=True)
+    assert "systemd-timesyncd" in con_timesyncd
+    assert "chronyc" not in con_timesyncd
+
+    # Chrony vince quando ci sono entrambi: è quello che sa dire di quanto
+    # è sbagliato e forzarne la correzione.
+    assert "chronyc" in strumento_ntp(chrony=True, timesyncd=True)
+
+    senza = strumento_ntp(chrony=False, timesyncd=False)
+    assert "Nessun client NTP" in senza
+    # Non si suggerisce un comando di uno strumento che non c'è.
+    assert "chronyc tracking" not in senza
+    assert "journalctl" not in senza
+
+
+def test_un_orologio_sincronizzato_non_disturba(
+    tmp_path: Path, radice: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import subprocess as sp
+
+    from mcp_server import doctor
+
+    reale = sp.run
+
+    def finto_run(comando, **kwargs):
+        if comando[0] != "timedatectl":
+            return reale(comando, **kwargs)
+        return sp.CompletedProcess(comando, 0, stdout="yes\n", stderr="")
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda _nome: "/usr/bin/timedatectl")
+    monkeypatch.setattr(doctor.subprocess, "run", finto_run)
+
+    c = _controllo(esegui(scrivi_config(tmp_path, radice)), "orologio")
+    assert c.esito is Esito.OK
+
+
+def test_senza_timedatectl_lo_dice_invece_di_tacere(
+    tmp_path: Path, radice: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Non verificabile è diverso da sincronizzato.
+
+    Cercare `/run/systemd/timesync/synchronized` avrebbe dato «non
+    sincronizzato» su una macchina con chrony, cioè una risposta sbagliata su
+    una macchina a posto. Qui, quando non si può sapere, si dice così.
+    """
+    from mcp_server import doctor
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda _nome: None)
+
+    c = _controllo(esegui(scrivi_config(tmp_path, radice)), "orologio")
+    assert c.esito is Esito.AVVISO
+    assert "non verificabile" in c.messaggio
+
+
 def test_un_perimetro_malformato_non_accusa_l_utente_di_essere_sbagliato(
     tmp_path: Path, radice: Path
 ):

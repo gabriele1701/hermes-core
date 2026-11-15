@@ -60,6 +60,19 @@ Il nome del file porti il nome della VM: con un nome fisso, la seconda VM
 servita dalla stessa postazione fa chiedere *«already exists. Overwrite?»*, e
 un sì distratto cancella la chiave della prima.
 
+Le due chiavi hanno la stessa forma e la stessa lunghezza: **si distinguono
+solo dal commento**, e scambiarle è l'errore più facile di tutta la procedura.
+
+```
+ssh-ed25519 AAAAC3Nza…  hermes-core@windows   → del SERVIZIO, la installa il passo 5
+ssh-ed25519 AAAAC3Nza…  UTENTE@VM             → TUA, va in ~/.ssh/authorized_keys
+```
+
+Ogni chiave sta su **una riga sola**. Se incollandola si spezza in due, `sshd`
+non la legge e al passo 6 ricevi `Permission denied (publickey)`, che non dice
+perché. La causa si vede con `cut -d' ' -f1,3- ~/.ssh/authorized_keys`, che
+stampa tipo e commento di ciascuna, e in `sudo journalctl -u ssh`.
+
 La prima chiave è del **servizio**, e la installa il passo 5. La seconda è
 **tua**, e va messa adesso, sulla VM:
 
@@ -70,6 +83,25 @@ INCOLLA_QUI_LA_PUBBLICA_AMMINISTRATIVA
 EOF
 chmod 600 ~/.ssh/authorized_keys
 ```
+
+Infine, **sulla postazione**, lega la chiave a questa VM una volta per tutte.
+Il nome del file non è fra quelli che `ssh` prova da sé, quindi senza questo
+ogni comando va passato con `-i` — e dimenticarlo dà `Permission denied
+(publickey)`, che non dice perché.
+
+In `%USERPROFILE%\.ssh\config` su Windows, `~/.ssh/config` su Linux:
+
+```
+Host VM
+    HostName 192.168.56.101
+    User UTENTE
+    IdentityFile ~/.ssh/id_ed25519_VM_admin
+    IdentitiesOnly yes
+```
+
+`IdentitiesOnly yes` non è di contorno: senza, `ssh` offre anche le altre
+chiavi che trova, e su una postazione che serve più di una VM la prima che
+offre può non essere quella giusta.
 
 **5. I valori di questa macchina:** utente ammesso da SSH, chiave del servizio
 (quella stampata al passo 4), perimetro dei bersagli, regola `ufw`. Chiede,
@@ -85,8 +117,13 @@ aperta. Senza le due opzioni `ssh` ricade sulla password senza dirlo, e
 concluderesti che funziona.
 
 ```sh
-ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no UTENTE@VM
+ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no VM
 ```
+
+Qui `VM` è il nome del blocco `Host` scritto al passo 4, non l'indirizzo: è
+quel blocco a dire quale chiave offrire. Se preferisci non scriverlo, il
+comando equivalente è
+`ssh -i ~/.ssh/id_ed25519_VM_admin -o IdentitiesOnly=yes … UTENTE@INDIRIZZO`.
 
 **7. Il ricarico di `sshd`**, solo dopo che il passo 6 è entrato.
 
