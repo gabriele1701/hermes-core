@@ -17,6 +17,13 @@ Da zero a server funzionante su una VM Debian/Ubuntu. Qui solo la sequenza; il
 perché di ogni scelta, le trappole e cosa fare quando qualcosa non torna sono
 in [docs/setup-vm-hermes.md](docs/setup-vm-hermes.md).
 
+> **Tutti i comandi sulla VM si eseguono dentro `/opt/hermes-core`**, dove il
+> passo 1 ti lascia. `bin/hermes-bootstrap`, `bin/hermes-configura` e il
+> preflight sono percorsi relativi: fuori da quella directory non esistono, e
+> l'errore che ricevi parla di un file che non c'è invece del fatto che sei
+> altrove. Dove un comando va dato sulla **postazione** o dalla **console
+> della VM**, è scritto nel passo.
+
 **1. Il repo**, prima di tutto: contiene gli script e la documentazione.
 
 ```sh
@@ -47,42 +54,43 @@ sudo bin/hermes-bootstrap --dev
 adesso: il passo 5 chiede quella del servizio, e il passo 9 disattiva le
 password, quindi senza la tua resti fuori.
 
-Su Windows, in PowerShell, con `VM` sostituito dal nome di questa macchina:
+Sulla **postazione**, in PowerShell. Sostituisci `NOME-VM` con il nome di
+questa macchina, e `UTENTE@INDIRIZZO` con i tuoi:
 
 ```powershell
-ssh-keygen -t ed25519 -C "hermes-core@windows" -f $env:USERPROFILE\.ssh\id_ed25519_hermes_VM
-ssh-keygen -t ed25519 -C "UTENTE@VM"           -f $env:USERPROFILE\.ssh\id_ed25519_VM_admin
-type $env:USERPROFILE\.ssh\id_ed25519_hermes_VM.pub
-type $env:USERPROFILE\.ssh\id_ed25519_VM_admin.pub
+ssh-keygen -t ed25519 -C "hermes-core@postazione" -f $env:USERPROFILE\.ssh\id_ed25519_hermes_NOME-VM
+ssh-keygen -t ed25519 -C "UTENTE@NOME-VM"         -f $env:USERPROFILE\.ssh\id_ed25519_NOME-VM_admin
 ```
 
 Il nome del file porti il nome della VM: con un nome fisso, la seconda VM
 servita dalla stessa postazione fa chiedere *«already exists. Overwrite?»*, e
 un sì distratto cancella la chiave della prima.
 
-Le due chiavi hanno la stessa forma e la stessa lunghezza: **si distinguono
-solo dal commento**, e scambiarle è l'errore più facile di tutta la procedura.
+Ora le due chiavi vanno sulla VM, **senza copiarle e incollarle**. Le password
+funzionano ancora — il ricarico di `sshd` è al passo 9 — quindi passano da lì:
 
+```powershell
+# la TUA chiave, diretta in authorized_keys
+type $env:USERPROFILE\.ssh\id_ed25519_NOME-VM_admin.pub | ssh UTENTE@INDIRIZZO "mkdir -p ~/.ssh && chmod 700 ~/.ssh && tr -d '\r' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+
+# quella del SERVIZIO, come file: la installa il passo 5
+scp $env:USERPROFILE\.ssh\id_ed25519_hermes_NOME-VM.pub UTENTE@INDIRIZZO:/tmp/
 ```
-ssh-ed25519 AAAAC3Nza…  hermes-core@windows   → del SERVIZIO, la installa il passo 5
-ssh-ed25519 AAAAC3Nza…  UTENTE@VM             → TUA, va in ~/.ssh/authorized_keys
-```
 
-Ogni chiave sta su **una riga sola**. Se incollandola si spezza in due, `sshd`
-non la legge e al passo 8 ricevi `Permission denied (publickey)`, che non dice
-perché. La causa si vede con `cut -d' ' -f1,3- ~/.ssh/authorized_keys`, che
-stampa tipo e commento di ciascuna, e in `sudo journalctl -u ssh`.
+Niente incollate, e non è pigrizia: **una chiave incollata che si spezza su
+due righe `sshd` non la legge**, e l'errore che ricevi al passo 8 è `Permission
+denied (publickey)`, che non nomina la causa. Lo stesso vale per lo scambio
+fra le due, che hanno la stessa forma e la stessa lunghezza e si distinguono
+solo dal commento finale: passandole per nome di file, lo scambio si vede
+mentre si scrive il comando.
 
-La prima chiave è del **servizio**, e la installa il passo 5. La seconda è
-**tua**, e va messa adesso, sulla VM:
+`tr -d '\r'` al posto di `cat` c'è perché PowerShell manda le righe con il
+fine-riga di Windows, e un `\r` in coda alla chiave finisce dentro il
+commento — innocuo nove volte su dieci, e la decima si cerca per mezz'ora.
 
-```sh
-mkdir -p ~/.ssh && chmod 700 ~/.ssh
-cat >> ~/.ssh/authorized_keys <<'EOF'
-INCOLLA_QUI_LA_PUBBLICA_AMMINISTRATIVA
-EOF
-chmod 600 ~/.ssh/authorized_keys
-```
+Se qualcosa non torna, i due comandi che lo dicono sulla VM sono
+`cut -d' ' -f1,3- ~/.ssh/authorized_keys`, che stampa tipo e commento di ogni
+chiave installata, e `sudo journalctl -u ssh`.
 
 **5. I valori di questa macchina:** utente ammesso da SSH, chiave del servizio
 (quella stampata al passo 4), perimetro dei bersagli, regola `ufw`, e il file
@@ -91,8 +99,13 @@ applica la rete — quelle restano tue, e sono le due da cui non si torna
 indietro.
 
 ```sh
-sudo bin/hermes-configura           # --prova per vedere cosa scriverebbe
+sudo bin/hermes-configura --chiave /tmp/id_ed25519_hermes_NOME-VM.pub
 ```
+
+`--chiave` indica il file arrivato col passo 4, così quella risposta non si
+incolla. Tutto il resto lo chiede, e per ogni domanda suggerisce il comando
+che mostra da dove ricavare la risposta. `--prova` valida tutto e non scrive
+niente.
 
 **6. L'indirizzo fisso**, applicato **dalla console della VM** e non da SSH:
 cambiando indirizzo la sessione cade, non puoi confermare, e `netplan`
@@ -116,13 +129,16 @@ quelli che `ssh` prova da sé, quindi senza questo ogni comando va passato con
 ```powershell
 Add-Content -Path $env:USERPROFILE\.ssh\config -Value @'
 
-Host VM
+Host NOME-VM
     HostName INDIRIZZO
     User UTENTE
-    IdentityFile ~/.ssh/id_ed25519_VM_admin
+    IdentityFile ~/.ssh/id_ed25519_NOME-VM_admin
     IdentitiesOnly yes
 '@
 ```
+
+`NOME-VM` è il nome con cui chiamerai la VM nei comandi `ssh`: scegli il nome
+della macchina, non la parola `VM`.
 
 Su Linux lo stesso blocco in `~/.ssh/config`. `IdentitiesOnly yes` non è di
 contorno: senza, `ssh` offre anche le altre chiavi che trova, e su una
@@ -134,11 +150,11 @@ aperta. Senza le due opzioni `ssh` ricade sulla password senza dirlo, e
 concluderesti che funziona.
 
 ```sh
-ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no VM
+ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no NOME-VM
 ```
 
-Qui `VM` è il nome del blocco `Host`, non l'indirizzo: è quel blocco a dire
-quale chiave offrire.
+Qui `NOME-VM` è il nome del blocco `Host` scritto al passo 7, non l'indirizzo:
+è quel blocco a dire quale chiave offrire.
 
 **9. Il ricarico di `sshd`**, solo dopo che il passo 8 è entrato.
 

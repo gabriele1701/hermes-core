@@ -382,12 +382,20 @@ type $env:USERPROFILE\.ssh\id_ed25519_hermes_<NOME-VM>.pub
 > la chiave privata non esiste più.
 
 Sulla **VM**, la chiave pubblica va in una directory di **root**, non nella home
-del servizio, preceduta dalle restrizioni e tutto su una riga:
+del servizio, preceduta dalle restrizioni e tutto su una riga.
+
+Normalmente la installa `bin/hermes-configura`, a cui si passa il file invece
+di incollarne il contenuto — `--chiave /tmp/chiave.pub`, dopo averlo portato
+sulla VM con `scp`. Non è una scorciatoia: una chiave incollata che si spezza
+su due righe non viene letta, e il sintomo è un `Permission denied
+(publickey)` che non nomina la causa.
+
+A mano, se lo script non è utilizzabile:
 
 ```sh
 sudo install -d -m 755 -o root -g root /etc/ssh/authorized_keys.d
 sudo tee /etc/ssh/authorized_keys.d/hermes >/dev/null <<'EOF'
-command="/opt/hermes-core/bin/hermes-core-server",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA...INCOLLA_QUI... hermes-core@windows
+command="/opt/hermes-core/bin/hermes-core-server",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA...INCOLLA_QUI... hermes-core@postazione
 EOF
 sudo chmod 644 /etc/ssh/authorized_keys.d/hermes
 ```
