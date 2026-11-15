@@ -623,11 +623,13 @@ fi
 
 if [ -z "$INTERFACCIA" ] && [ -z "$INDIRIZZO" ] && interattivo; then
     printf "\nL'INDIRIZZO FISSO DI QUESTA VM.\n"
-    printf 'Serve solo quando questo indirizzo finirà nella configurazione di\n'
-    printf 'Hermes sul tuo PC: fino a quel momento il DHCP va benissimo.\n'
+    printf 'Da qui in avanti questo indirizzo viene registrato altrove — nella\n'
+    printf 'configurazione ssh della postazione, e poi in Hermes — quindi va\n'
+    printf 'fissato adesso: se cambia dopo, quelle registrazioni puntano a\n'
+    printf 'una macchina che non risponde.\n'
     printf 'Il file viene scritto ma NON applicato: applicarlo cambia indirizzo\n'
     printf 'e fa cadere questa sessione, quindi va fatto dalla console.\n'
-    printf 'Invio per saltare.\n'
+    printf 'Invio per restare in DHCP, sapendo che cambierà.\n'
     suggerimento 'ip -br a' \
                  "l'interfaccia da cui ti raggiunge la postazione, non quella che porta internet"
     printf '  interfaccia (per esempio enp0s8): '
