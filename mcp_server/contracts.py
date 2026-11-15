@@ -103,6 +103,14 @@ class TargetKind(StrEnum):
 
     NONE = "none"
     HOST = "host"
+    #: Un file o una directory sulla macchina. Il perimetro è una lista di
+    #: prefissi (``percorsi`` nel file di perimetro) e ha due strati: il gate
+    #: risolve e confronta, e il wrapper monta nell'unità del tool **solo** i
+    #: prefissi dichiarati, quindi ciò che sta fuori non esiste dal punto di
+    #: vista del tool. Manca di proposito ``process``: per un processo il
+    #: confine è l'isolamento e non una lista — vedere
+    #: ``docs/vocabolari-condivisi.md``.
+    PATH = "path"
 
 
 class AgentStatus(StrEnum):

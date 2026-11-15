@@ -52,6 +52,33 @@
 # 444 MB nello swap. La macchina non va in OOM ma può essere portata a
 # nuotare nello swap, che è una negazione di servizio con un altro nome —
 # mentre il log dice che è andato tutto bene.
+#
+# Perché il montaggio ristretto, e perché i prefissi si leggono QUI
+# -----------------------------------------------------------------
+#
+# Un tool con bersaglio di tipo percorso — un binario da analizzare — ha un
+# perimetro fatto di prefissi. Il gate risolve il percorso e lo confronta, ma
+# quello è un controllo in userspace PRIMA dell'uso: un symlink sostituito
+# fra il controllo e l'apertura lo supera. Con `--percorsi` l'unità parte in
+# uno spazio dei nomi di mount in cui la radice è un tmpfs vuoto e in sola
+# lettura, e dentro ci sono soltanto il sistema di base, la directory degli
+# script e i prefissi dichiarati. Un percorso fuori perimetro lì non è
+# vietato: NON ESISTE, e un symlink che punta fuori non risolve nulla. Lo
+# applica il kernel, e la finestra non ha niente su cui aprirsi.
+#
+# I prefissi non arrivano dal chiamante. Dal gate arriva una parola sola,
+# `--percorsi`; QUALI percorsi montare lo dice il file di perimetro, di root,
+# letto qui. Se li passasse il chiamante sarebbe il chiamante a disegnare il
+# proprio confine — la restrizione custodita da chi la subisce, un'altra
+# volta. Il percorso del file è una costante per lo stesso motivo dell'uid.
+#
+# Cosa resta visibile oltre ai prefissi, da sapere: /usr e i suoi alias
+# (/bin, /sbin, /lib, /lib64), /etc/ld.so.cache e /etc/alternatives — senza,
+# l'interprete non parte — e la directory degli script. Un symlink dal
+# perimetro verso /usr quindi risolve: ci trova il sistema di base, in sola
+# lettura, che il tool vede comunque. Non ci sono /home, /var, /proc, /sys,
+# il resto di /etc, il log d'audit, lo stato del servizio, il perimetro
+# stesso. /tmp e /dev sono privati dell'unità.
 
 set -eu
 
@@ -77,6 +104,24 @@ TASKS_MAX=128
 # nmap ucciso a metà, con un sintomo che non punta alla causa. Si stringono
 # quando c'è qualcosa da misurare — è una voce di debito aperta.
 RUNTIME_MAX_CEILING=600
+
+# Il montaggio ristretto. Tre costanti, nessuna negoziabile dal chiamante.
+#
+# SCOPE_FILE è lo stesso file che il server carica come `server.scope_file`:
+# il preflight verifica che coincidano, perché se differissero il gate
+# validerebbe contro un file e qui si monterebbero i prefissi di un altro.
+#
+# RADICE_SCRIPT_FILE contiene una riga: la directory degli script dei tool,
+# da montare perché il tool possa leggere se stesso. Dove sta il repo è un
+# fatto dell'installazione — lo scrive il bootstrap — e non una costante.
+SCOPE_FILE=/etc/hermes/scope.toml
+RADICE_SCRIPT_FILE=/etc/hermes/radice-script
+PYTHON=/usr/bin/python3
+
+# Il sistema di base, in sola lettura. Il '-' davanti dice a systemd di
+# ignorare una sorgente che non esiste: /lib64 non c'è su ogni architettura,
+# /etc/alternatives non su ogni distribuzione.
+BASE_SOLA_LETTURA="/usr -/bin -/sbin -/lib -/lib64 -/etc/ld.so.cache -/etc/alternatives"
 
 nome_unita_valido() {
     # Solo il prefisso del progetto più un UUID: il chiamante non deve poter
@@ -105,20 +150,145 @@ fi
 
 # --- Verbo implicito: esegui ----------------------------------------------- #
 
-[ $# -ge 4 ] || muori "uso: hermes-tool-run <unita> <timeout> -- <comando...>"
+[ $# -ge 4 ] || muori "uso: hermes-tool-run <unita> <timeout> [--percorsi] -- <comando...>"
 
 UNITA="$1"
 shift
 TIMEOUT="$1"
 shift
-[ "$1" = "--" ] || muori "il comando deve essere introdotto da '--'"
+CON_PERCORSI=no
+if [ "$1" = "--percorsi" ]; then
+    CON_PERCORSI=si
+    shift
+fi
+[ "${1:-}" = "--" ] || muori "il comando deve essere introdotto da '--'"
 shift
+[ $# -ge 1 ] || muori "manca il comando da eseguire"
 
 nome_unita_valido "$UNITA" || muori "nome di unità non valido: $UNITA"
 
 printf '%s' "$TIMEOUT" | grep -Eq '^[0-9]+$' || muori "timeout non numerico: $TIMEOUT"
 [ "$TIMEOUT" -ge 1 ] || muori "timeout non positivo"
 [ "$TIMEOUT" -le "$RUNTIME_MAX_CEILING" ] || TIMEOUT="$RUNTIME_MAX_CEILING"
+
+# --- Il montaggio ristretto, se richiesto ----------------------------------- #
+#
+# Qualunque cosa non torni, si muore PRIMA di avviare l'unità: un perimetro
+# promesso e non applicabile nega, non ricade sull'unità senza montaggio.
+if [ "$CON_PERCORSI" = si ]; then
+    # Si legge con l'interprete di sistema, isolato (-I -S): il file è TOML e
+    # interpretarlo con sed vorrebbe dire avere due parser dello stesso
+    # perimetro, cioè prima o poi due perimetri. Le regole di forma sono
+    # ricontrollate qui anche se il server le ha già applicate: questo è il
+    # punto in cui i prefissi diventano mount, e gira da root.
+    set +e
+    VOCI=$("$PYTHON" -I -S - "$SCOPE_FILE" "$RADICE_SCRIPT_FILE" <<'LEGGI'
+import os
+import re
+import stat
+import sys
+import tomllib
+
+FORMA = re.compile(r"(/[A-Za-z0-9._-]+)+")
+
+
+def fermo(motivo):
+    sys.stderr.write(motivo + "\n")
+    sys.exit(1)
+
+
+def apri(percorso):
+    # Si interroga il descrittore aperto, non il nome: fra uno stat e una
+    # open il file potrebbe non essere più lo stesso.
+    try:
+        fh = open(percorso, "rb")
+    except OSError as err:
+        fermo(f"{percorso} non leggibile: {err}")
+    st = os.fstat(fh.fileno())
+    if not stat.S_ISREG(st.st_mode):
+        fermo(f"{percorso} non è un file regolare")
+    if st.st_uid != 0 or stat.S_IMODE(st.st_mode) & 0o022:
+        fermo(
+            f"{percorso} deve essere di root e non scrivibile da altri "
+            f"(uid {st.st_uid}, permessi {stat.S_IMODE(st.st_mode):04o}): "
+            f"decide cosa viene montato"
+        )
+    return fh
+
+
+def valido(voce):
+    return (
+        isinstance(voce, str)
+        and FORMA.fullmatch(voce) is not None
+        and not any(s in (".", "..") for s in voce.split("/"))
+    )
+
+
+def canonico(voce, cosa):
+    # Un prefisso che è un symlink monterebbe la sua destinazione: un posto
+    # diverso da quello che il file dichiara.
+    try:
+        reale = os.path.realpath(voce, strict=True)
+    except OSError:
+        fermo(f"{cosa} {voce} non esiste su questa macchina")
+    if reale != voce:
+        fermo(f"{cosa} {voce} risolve in {reale}: va dichiarato il percorso reale")
+
+
+perimetro, radice = sys.argv[1], sys.argv[2]
+
+with apri(perimetro) as fh:
+    try:
+        dati = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as err:
+        fermo(f"{perimetro} non parsabile: {err}")
+percorsi = dati.get("percorsi", [])
+if not isinstance(percorsi, list) or not percorsi:
+    fermo(f"{perimetro} non dichiara nessun prefisso in 'percorsi'")
+for voce in percorsi:
+    if not valido(voce):
+        fermo(f"{perimetro}: prefisso non valido {voce!r}")
+    canonico(voce, "il prefisso")
+
+with apri(radice) as fh:
+    righe = fh.read().decode("utf-8", errors="replace").split("\n")
+script = righe[0]
+if not valido(script) or any(r for r in righe[1:]):
+    fermo(f"{radice} deve contenere una sola riga: un percorso assoluto")
+canonico(script, "la directory degli script")
+if not os.path.isdir(script):
+    fermo(f"la directory degli script {script} non è una directory")
+
+for voce in [script, *percorsi]:
+    print(voce)
+LEGGI
+    )
+    ESITO_LETTURA=$?
+    set -e
+    [ "$ESITO_LETTURA" -eq 0 ] || muori "montaggio ristretto non applicabile: tool non avviato"
+
+    # Le voci non contengono spazi né caratteri di glob — la forma è appena
+    # stata verificata — ma il glob si spegne comunque: un controllo che
+    # dipende da un solo meccanismo non è un controllo.
+    set -f
+    MONTAGGI="$BASE_SOLA_LETTURA"
+    for VOCE in $VOCI; do
+        MONTAGGI="$MONTAGGI $VOCE"
+    done
+    set +f
+
+    # PrivateTmp e PrivateDevices: la radice è un tmpfs in sola lettura, e un
+    # tool ha bisogno almeno di /dev/null e di un posto dove scrivere un
+    # temporaneo. Sono privati dell'unità e spariscono con lei.
+    set -- \
+        -p TemporaryFileSystem=/:ro \
+        -p BindReadOnlyPaths="$MONTAGGI" \
+        -p PrivateTmp=yes \
+        -p PrivateDevices=yes \
+        -- "$@"
+else
+    set -- -- "$@"
+fi
 
 # `--` prima del comando: senza, un argomento del tool che inizia per '-'
 # verrebbe letto come opzione di systemd-run. È lo stesso ruolo del `--` che
@@ -135,7 +305,7 @@ set +e
     -p MemorySwapMax="$MEMORY_SWAP_MAX" \
     -p TasksMax="$TASKS_MAX" \
     -p RuntimeMaxSec="$TIMEOUT" \
-    -- "$@"
+    "$@"
 ESITO_RUN=$?
 set -e
 

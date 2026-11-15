@@ -66,6 +66,10 @@ DIR_SPEDIZIONE=/var/lib/hermes-ship
 DIR_STATO_SPEDIZIONE=$DIR_SPEDIZIONE/stato
 DIR_CONFIG=/etc/hermes
 SCOPE=$DIR_CONFIG/scope.toml
+# La directory degli script dei tool, scritta dove il wrapper la legge per
+# montarla nell'unità ristretta dei bersagli di tipo percorso. Deve
+# coincidere con RADICE_SCRIPT_FILE nel wrapper: un test confronta i due.
+RADICE_SCRIPT=$DIR_CONFIG/radice-script
 SPEDIZIONE_CONF=$DIR_CONFIG/log-shipping.conf
 
 WRAPPER=/usr/local/sbin/hermes-tool-run
@@ -461,6 +465,36 @@ else
     fatto "perimetro dei bersagli: $SCOPE"
     resta "le reti e gli alias in $SCOPE: dicono $NON_COMPILATO, e il server
       non parte finché restano così."
+fi
+
+# Dove stanno gli script dei tool. Non è una decisione dell'operatore ma un
+# fatto di questa installazione - dov'è il repo - quindi non è un file da
+# generare una volta e lasciare: si riscrive quando non corrisponde, come gli
+# artefatti che hanno la fonte nel repo. Se restasse quello di un repo
+# spostato, l'unità ristretta monterebbe una directory che non contiene gli
+# script, e il tool non partirebbe.
+#
+# Il wrapper accetta solo alfanumerici, '.', '_' e '-' nei segmenti: il
+# percorso finisce in una direttiva di montaggio. Un repo in un percorso con
+# altri caratteri non impedisce nulla di ciò che c'era prima; impedisce i
+# tool con bersaglio di tipo percorso, e va detto qui invece che alla prima
+# invocazione.
+if printf '%s' "$REPO/agents" | grep -Eq '^(/[A-Za-z0-9._-]+)+$'; then
+    if [ -f "$RADICE_SCRIPT" ] \
+       && [ "$(cat "$RADICE_SCRIPT")" = "$REPO/agents" ] \
+       && [ "$(stat -c '%U:%G %a' "$RADICE_SCRIPT")" = "root:root 644" ]; then
+        invariato "directory degli script per il wrapper: $RADICE_SCRIPT"
+    else
+        printf '%s\n' "$REPO/agents" > "$RADICE_SCRIPT"
+        chown root:root "$RADICE_SCRIPT"
+        chmod 644 "$RADICE_SCRIPT"
+        fatto "directory degli script per il wrapper: $RADICE_SCRIPT"
+    fi
+else
+    avviso "il percorso del repo ($REPO) contiene caratteri che il wrapper
+            non monta: i tool con bersaglio di tipo percorso non partiranno.
+            Tutto il resto funziona. Spostare il repo in un percorso fatto di
+            alfanumerici, '.', '_' e '-' e rieseguire."
 fi
 
 if [ -f "$SPEDIZIONE_CONF" ]; then

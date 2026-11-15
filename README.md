@@ -265,6 +265,22 @@ Entrambi chiudono con **due elenchi distinti**: ciò che hanno verificato e
 trovato mancante — che sparisce quando il lavoro è fatto, quindi la sua
 assenza è un'informazione — e ciò che non guardano affatto.
 
+### `bin/hermes-collauda-percorsi`
+
+Serve solo se il perimetro dichiara dei `percorsi`, cioè se si registrano
+tool che puntano a un file invece che a un host. Prova a uscire dal
+perimetro e guarda il kernel dire di no:
+
+```sh
+sudo bin/hermes-collauda-percorsi
+```
+
+Percorre la catena vera — wrapper installato, file di perimetro, unità
+transiente sotto `hermes-tool` — con una sonda che legge un byte al posto di
+un tool. Ogni lettura che deve fallire nell'unità ristretta è prima provata
+nell'unità normale, dove deve riuscire: un rifiuto che arriva dai permessi
+non conta. Dettagli in `docs/setup-vm-hermes.md` §5 e §6.2.
+
 ## Setup sviluppo
 
 ```sh

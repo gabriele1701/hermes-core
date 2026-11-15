@@ -1,0 +1,196 @@
+#!/bin/sh
+# Collauda il perimetro dei percorsi sulla macchina vera: prova a uscire, e
+# guarda il kernel dire di no.
+#
+# Perché esiste questo file
+# -------------------------
+#
+# Che `bin/hermes-tool-run` contenga le direttive di montaggio non dice che
+# confinino: lo dice solo aprire un file fuori perimetro dall'interno
+# dell'unità e vederlo non aprirsi. È la regola del progetto — un controllo
+# deve riprodurre l'operazione che diagnostica — e i test della suite non
+# possono applicarla, perché girano senza systemd e senza root.
+#
+# Questo script percorre la catena vera: il wrapper INSTALLATO, il file di
+# perimetro VERO, un'unità transiente vera sotto l'utente dei tool. Cambia
+# solo l'ultimo anello: invece di un tool, una sonda che legge un byte.
+#
+# Ogni rifiuto è preceduto dal suo controllo
+# ------------------------------------------
+#
+# Un «non si apre» non prova niente se il file non si aprirebbe comunque.
+# Quindi ogni lettura che DEVE fallire nell'unità ristretta è prima provata
+# nell'unità normale, dove DEVE riuscire: stesso utente, stesso file, stessa
+# sonda, cambia solo il montaggio. Se il controllo non riesce il collaudo si
+# ferma e lo dice, invece di contare come successo un rifiuto che arriva dai
+# permessi.
+#
+# Cosa tocca
+# ----------
+#
+# Crea una directory `.hermes-collaudo-<pid>` dentro il PRIMO prefisso del
+# perimetro e un file in /var/lib, e li rimuove all'uscita, comunque vada.
+# Non modifica nient'altro e non esegue nessun tool.
+#
+# Uso:  sudo bin/hermes-collauda-percorsi
+
+set -eu
+
+WRAPPER=/usr/local/sbin/hermes-tool-run
+PYTHON=/usr/bin/python3
+
+# Esito con cui la sonda dice «non si apre»: distinto da un wrapper che
+# rifiuta (64) e da systemd che non costruisce il montaggio (226).
+NON_APRIBILE=3
+
+SONDA_LETTURA='import sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        f.read(1)
+except OSError as err:
+    print(f"{type(err).__name__}: {err}", file=sys.stderr)
+    raise SystemExit(3)
+'
+
+SONDA_SCRITTURA='import sys
+try:
+    with open(sys.argv[1], "x") as f:
+        f.write("x")
+except OSError as err:
+    print(f"{type(err).__name__}: {err}", file=sys.stderr)
+    raise SystemExit(3)
+'
+
+GUASTI=0
+
+fermati() {
+    printf '\n[ FERMO ] %s\n' "$1" >&2
+    exit 2
+}
+
+[ "$(id -u)" -eq 0 ] || fermati "serve root: sudo $0"
+[ -x "$WRAPPER" ] || fermati "$WRAPPER non c'è: eseguire prima bin/hermes-bootstrap"
+
+SCOPE=$(sed -n 's/^SCOPE_FILE=//p' "$WRAPPER")
+[ -n "$SCOPE" ] || fermati "$WRAPPER non conosce il montaggio ristretto: è una versione
+          precedente. Reinstallarlo: sudo install -m 755 -o root -g root bin/hermes-tool-run $WRAPPER"
+[ -f "$SCOPE" ] || fermati "il perimetro $SCOPE non c'è"
+
+PREFISSI=$("$PYTHON" -I -S -c '
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    for p in tomllib.load(f).get("percorsi", []):
+        print(p)
+' "$SCOPE") || fermati "$SCOPE non si legge come TOML"
+[ -n "$PREFISSI" ] || fermati "$SCOPE non dichiara nessun prefisso in 'percorsi':
+          non c'è un perimetro dei percorsi da collaudare."
+
+PREFISSO=$(printf '%s\n' "$PREFISSI" | head -n 1)
+[ -d "$PREFISSO" ] || fermati "il primo prefisso, $PREFISSO, non è una directory esistente"
+
+DENTRO="$PREFISSO/.hermes-collaudo-$$"
+# In /var/lib e NON in /tmp o /var/tmp, e la differenza è il collaudo: il
+# wrapper dà all'unità ristretta un /tmp e un /var/tmp privati, quindi un
+# file lì sparirebbe per quel motivo e non per il perimetro. La prima
+# versione di questo script lo metteva in /var/tmp: tolto il montaggio dal
+# wrapper per esercitare il guasto, la prova «fuori perimetro» continuava a
+# passare. Un collaudo che passa anche col confine rimosso non collauda.
+FUORI=$(mktemp /var/lib/hermes-collaudo-fuori.XXXXXX)
+
+pulisci() {
+    rm -rf "$DENTRO"
+    rm -f "$FUORI"
+}
+trap pulisci EXIT INT TERM
+
+# Il file «fuori» deve essere fuori da OGNI prefisso, o il collaudo
+# misurerebbe un file che il perimetro ammette.
+for P in $PREFISSI; do
+    case "$FUORI" in
+        "$P"/*) fermati "/var/lib sta dentro il prefisso $P: il collaudo non ha un «fuori» da provare" ;;
+    esac
+done
+
+# Leggibile e scrivibile da tutti, di proposito: se la sonda viene fermata
+# non devono essere stati i permessi.
+printf 'fuori\n' > "$FUORI"
+chmod 644 "$FUORI"
+mkdir "$DENTRO"
+chmod 777 "$DENTRO"
+printf 'dentro\n' > "$DENTRO/dentro.txt"
+chmod 644 "$DENTRO/dentro.txt"
+ln -s "$FUORI" "$DENTRO/esce"
+
+printf 'wrapper:    %s\n' "$WRAPPER"
+printf 'perimetro:  %s\n' "$SCOPE"
+printf 'prefissi:   %s\n' "$(printf '%s' "$PREFISSI" | tr '\n' ' ')"
+printf 'dentro:     %s\n' "$DENTRO"
+printf 'fuori:      %s\n\n' "$FUORI"
+
+# prova <atteso> <ristretto si|no> <sonda> <percorso> <descrizione>
+#
+# Ritorna 0 se l'esito è quello atteso. Non ferma lo script: un collaudo che
+# si ferma al primo guasto nasconde gli altri.
+prova() {
+    ATTESO="$1"; RISTRETTO="$2"; SONDA="$3"; BERSAGLIO="$4"; COSA="$5"
+    UNITA="hermes-tool-$(cat /proc/sys/kernel/random/uuid)"
+    set +e
+    if [ "$RISTRETTO" = si ]; then
+        MOTIVO=$("$WRAPPER" "$UNITA" 20 --percorsi -- "$PYTHON" -I -S -c "$SONDA" "$BERSAGLIO" 2>&1 >/dev/null)
+    else
+        MOTIVO=$("$WRAPPER" "$UNITA" 20 -- "$PYTHON" -I -S -c "$SONDA" "$BERSAGLIO" 2>&1 >/dev/null)
+    fi
+    ESITO=$?
+    set -e
+    if [ "$ESITO" -eq "$ATTESO" ]; then
+        printf '[   ok   ] %s\n' "$COSA"
+        return 0
+    fi
+    GUASTI=$((GUASTI + 1))
+    printf '[ GUASTO ] %s\n' "$COSA"
+    printf '           atteso esito %s, ottenuto %s%s\n' "$ATTESO" "$ESITO" \
+        "${MOTIVO:+: $(printf '%s' "$MOTIVO" | tail -n 1)}"
+    return 1
+}
+
+printf -- '-- controlli: senza montaggio ristretto tutto questo DEVE riuscire\n'
+CONTROLLI=si
+prova 0 no "$SONDA_LETTURA" "$FUORI" \
+    "unità normale: il file fuori perimetro si apre" || CONTROLLI=no
+prova 0 no "$SONDA_LETTURA" "$DENTRO/esce" \
+    "unità normale: il symlink che esce dal perimetro si segue" || CONTROLLI=no
+prova 0 no "$SONDA_LETTURA" "$SCOPE" \
+    "unità normale: il file di perimetro si apre" || CONTROLLI=no
+prova 0 no "$SONDA_SCRITTURA" "$DENTRO/scritto-senza" \
+    "unità normale: nel perimetro si scrive" || CONTROLLI=no
+
+if [ "$CONTROLLI" = no ]; then
+    fermati "i controlli non riescono: l'utente dei tool non arriva a questi file
+          nemmeno senza montaggio, quindi un rifiuto dall'unità ristretta non
+          proverebbe niente. Causa tipica: hermes-tool non attraversa
+          $PREFISSO (manca il bit x o un'ACL su una directory del percorso).
+          Collaudo NON eseguito."
+fi
+
+printf -- '\n-- il perimetro: con il montaggio ristretto\n'
+prova 0 si "$SONDA_LETTURA" "$DENTRO/dentro.txt" \
+    "un file dentro il perimetro si apre" || true
+prova "$NON_APRIBILE" si "$SONDA_LETTURA" "$FUORI" \
+    "un file fuori perimetro NON si apre" || true
+prova "$NON_APRIBILE" si "$SONDA_LETTURA" "$DENTRO/esce" \
+    "un symlink dentro il perimetro che punta fuori NON dà accesso" || true
+prova "$NON_APRIBILE" si "$SONDA_LETTURA" "$SCOPE" \
+    "il file di perimetro NON si apre" || true
+prova "$NON_APRIBILE" si "$SONDA_SCRITTURA" "$DENTRO/scritto-con" \
+    "nel perimetro NON si scrive (sola lettura)" || true
+
+printf '\n'
+if [ "$GUASTI" -eq 0 ]; then
+    printf 'Collaudo riuscito: il perimetro dei percorsi confina, verificato leggendo.\n'
+    exit 0
+fi
+printf 'Collaudo FALLITO: %s prove non hanno dato l'"'"'esito atteso.\n' "$GUASTI"
+printf 'Un esito 64 è il wrapper che rifiuta (il motivo è sulla riga); 226 è\n'
+printf 'systemd che non costruisce il montaggio; 0 dove era atteso %s è il\n' "$NON_APRIBILE"
+printf 'confine che non tiene.\n'
+exit 1
