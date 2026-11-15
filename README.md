@@ -84,6 +84,25 @@ EOF
 chmod 600 ~/.ssh/authorized_keys
 ```
 
+Infine, **sulla postazione**, lega la chiave a questa VM una volta per tutte.
+Il nome del file non è fra quelli che `ssh` prova da sé, quindi senza questo
+ogni comando va passato con `-i` — e dimenticarlo dà `Permission denied
+(publickey)`, che non dice perché.
+
+In `%USERPROFILE%\.ssh\config` su Windows, `~/.ssh/config` su Linux:
+
+```
+Host VM
+    HostName 192.168.56.101
+    User UTENTE
+    IdentityFile ~/.ssh/id_ed25519_VM_admin
+    IdentitiesOnly yes
+```
+
+`IdentitiesOnly yes` non è di contorno: senza, `ssh` offre anche le altre
+chiavi che trova, e su una postazione che serve più di una VM la prima che
+offre può non essere quella giusta.
+
 **5. I valori di questa macchina:** utente ammesso da SSH, chiave del servizio
 (quella stampata al passo 4), perimetro dei bersagli, regola `ufw`. Chiede,
 valida, scrive. Non ricarica `sshd` e non applica la rete — quelle restano
@@ -98,8 +117,13 @@ aperta. Senza le due opzioni `ssh` ricade sulla password senza dirlo, e
 concluderesti che funziona.
 
 ```sh
-ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no UTENTE@VM
+ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no VM
 ```
+
+Qui `VM` è il nome del blocco `Host` scritto al passo 4, non l'indirizzo: è
+quel blocco a dire quale chiave offrire. Se preferisci non scriverlo, il
+comando equivalente è
+`ssh -i ~/.ssh/id_ed25519_VM_admin -o IdentitiesOnly=yes … UTENTE@INDIRIZZO`.
 
 **7. Il ricarico di `sshd`**, solo dopo che il passo 6 è entrato.
 
