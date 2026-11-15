@@ -1783,9 +1783,42 @@ def test_un_orologio_non_sincronizzato_e_un_avviso_con_la_sua_conseguenza(
     assert "NON sincronizzato" in c.messaggio
     # La conseguenza, non il sintomo: chi legge deve capire cosa perde.
     assert "log d'audit" in c.rimedio
+    # Qualunque implementazione ci sia, il rimedio ne nomina una sola e
+    # concreta: la scelta ha i suoi test, qui si pretende che ci sia.
+    assert "il tempo lo gestisce" in c.rimedio or "Nessun client NTP" in c.rimedio
     # E l'ora di questa macchina nel messaggio, perché un referto datato venti
     # ore fa si riconosce a occhio — che è come l'abbiamo trovato.
     assert dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d") in c.messaggio
+
+
+def test_il_rimedio_nomina_lo_strumento_che_c_e_su_questa_macchina():
+    """Un rimedio che nomina ciò che non esiste manda a cercare altrove.
+
+    La prima versione diceva «guarda il journal di systemd-timesyncd». Su
+    Ubuntu Server 26.04 quel servizio non è installato — il tempo lo gestisce
+    chrony — e il comando che risolve davvero, `chronyc makestep`, non
+    compariva affatto: chrony con un salto grande corregge per deriva e non
+    salta, passati i primi aggiornamenti dall'avvio.
+    """
+    from mcp_server.doctor import strumento_ntp
+
+    con_chrony = strumento_ntp(chrony=True, timesyncd=False)
+    assert "chronyc makestep" in con_chrony
+    assert "timesyncd" not in con_chrony
+
+    con_timesyncd = strumento_ntp(chrony=False, timesyncd=True)
+    assert "systemd-timesyncd" in con_timesyncd
+    assert "chronyc" not in con_timesyncd
+
+    # Chrony vince quando ci sono entrambi: è quello che sa dire di quanto
+    # è sbagliato e forzarne la correzione.
+    assert "chronyc" in strumento_ntp(chrony=True, timesyncd=True)
+
+    senza = strumento_ntp(chrony=False, timesyncd=False)
+    assert "Nessun client NTP" in senza
+    # Non si suggerisce un comando di uno strumento che non c'è.
+    assert "chronyc tracking" not in senza
+    assert "journalctl" not in senza
 
 
 def test_un_orologio_sincronizzato_non_disturba(

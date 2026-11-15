@@ -306,6 +306,45 @@ def _log(
     _orologio(referto)
 
 
+def strumento_ntp(*, chrony: bool, timesyncd: bool) -> str:
+    """Il rimedio nomina lo strumento che c'è su QUESTA macchina.
+
+    La prima versione di questo controllo diceva «guarda il journal di
+    systemd-timesyncd». Su Ubuntu Server 26.04 quel servizio non è nemmeno
+    installato — il tempo lo gestisce chrony — e il rimedio mandava a
+    interrogare un'unità inesistente, mentre il comando che risolve davvero
+    (``chronyc makestep``) non compariva.
+
+    È la stessa patologia che il test di accettazione ha trovato in §1, dove
+    il documento giustificava una scelta citando un file di netplan che su
+    quella distribuzione non esiste: un rimedio che nomina ciò che non c'è non
+    è solo inutile, manda a cercare un guasto diverso da quello che si ha.
+
+    Separata perché è l'unica parte con una regola, e perché così si prova
+    senza dipendere da cosa è installato dove girano i test.
+    """
+    if chrony:
+        return (
+            "Qui il tempo lo gestisce chrony:\n"
+            "             chronyc tracking    (di quanto è sbagliato, e se lo "
+            "sta correggendo)\n"
+            "             Un salto grande chrony non lo fa da sé passati i "
+            "primi aggiornamenti dall'avvio: corregge per deriva, e venti ore "
+            "a quel ritmo richiedono giorni. Si forza:\n"
+            "             sudo chronyc makestep"
+        )
+    if timesyncd:
+        return (
+            "Qui il tempo lo gestisce systemd-timesyncd:\n"
+            "             journalctl -u systemd-timesyncd -n 20"
+        )
+    return (
+        "Nessun client NTP riconosciuto su questa macchina: installarne uno "
+        "(apt install chrony), oppure sincronizzare a mano e documentare che "
+        "l'orario del log non ha una fonte."
+    )
+
+
 def _orologio(referto: Referto) -> None:
     """L'orario del log d'audit deve essere credibile, non solo presente.
 
@@ -365,6 +404,26 @@ def _orologio(referto: Referto) -> None:
         )
         return
 
+    # Il rimedio nomina lo strumento DI QUESTA macchina.
+    #
+    # La prima versione diceva «guarda il journal di systemd-timesyncd»: su
+    # Ubuntu Server 26.04 quel servizio non è nemmeno installato, il tempo lo
+    # gestisce chrony, e il rimedio mandava a interrogare un'unità
+    # inesistente. È la stessa patologia che il test di accettazione ha
+    # trovato in §1, dove il documento citava un file di netplan che su quella
+    # distribuzione non c'è: un rimedio che nomina ciò che non esiste manda a
+    # cercare un guasto diverso da quello che si ha.
+    strumento = strumento_ntp(
+        chrony=shutil.which("chronyc") is not None,
+        timesyncd=any(
+            Path(p).exists()
+            for p in (
+                "/usr/lib/systemd/systemd-timesyncd",
+                "/lib/systemd/systemd-timesyncd",
+            )
+        ),
+    )
+
     referto.aggiungi(
         "orologio",
         Esito.AVVISO,
@@ -377,9 +436,7 @@ def _orologio(referto: Referto) -> None:
         "prova che vale meno.\n"
         "             Se l'ora qui sopra è assurda, questa macchina è una VM "
         "ripristinata da snapshot: riparte con l'ora salvata, RTC compreso.\n"
-        "             sudo timedatectl set-ntp true\n"
-        "             Se resta 'no', la causa è nel journal del servizio: "
-        "journalctl -u systemd-timesyncd -n 20",
+        f"             {strumento}",
     )
 
 
