@@ -60,6 +60,19 @@ Il nome del file porti il nome della VM: con un nome fisso, la seconda VM
 servita dalla stessa postazione fa chiedere *«already exists. Overwrite?»*, e
 un sì distratto cancella la chiave della prima.
 
+Le due chiavi hanno la stessa forma e la stessa lunghezza: **si distinguono
+solo dal commento**, e scambiarle è l'errore più facile di tutta la procedura.
+
+```
+ssh-ed25519 AAAAC3Nza…  hermes-core@windows   → del SERVIZIO, la installa il passo 5
+ssh-ed25519 AAAAC3Nza…  UTENTE@VM             → TUA, va in ~/.ssh/authorized_keys
+```
+
+Ogni chiave sta su **una riga sola**. Se incollandola si spezza in due, `sshd`
+non la legge e al passo 6 ricevi `Permission denied (publickey)`, che non dice
+perché. La causa si vede con `cut -d' ' -f1,3- ~/.ssh/authorized_keys`, che
+stampa tipo e commento di ciascuna, e in `sudo journalctl -u ssh`.
+
 La prima chiave è del **servizio**, e la installa il passo 5. La seconda è
 **tua**, e va messa adesso, sulla VM:
 
