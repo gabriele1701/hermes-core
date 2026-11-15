@@ -191,6 +191,24 @@ fi
 
 interattivo() { [ -t 0 ]; }
 
+# Ogni domanda dice da dove si ricava la risposta.
+#
+# È un suggerimento, non un oracolo, e la parola «prova» è scelta: il comando
+# mostra dove guardare, la scelta resta di chi installa. `$SUDO_USER` è vuoto
+# se si è entrati come root; l'ARP conosce solo le macchine che hanno parlato
+# di recente; fra due reti attaccate, quale sia quella giusta dipende da cosa
+# serve, non da `ip route`.
+#
+# Un comando presentato come risposta definitiva diventa un valore incollato
+# senza guardarlo. `monika` e `192.168.205.0/24` sono arrivati dove sono
+# arrivati esattamente così: erano plausibili, e nessuno li ha riletti.
+suggerimento() {
+    printf '  prova:  %s\n' "$1"
+    if [ $# -gt 1 ]; then
+        printf '          %s\n' "$2"
+    fi
+}
+
 # Chiede un valore finché non passa il suo validatore.
 #
 # Il validatore stampa il valore CANONICO e esce 0, oppure stampa il motivo
@@ -406,6 +424,8 @@ if da_compilare "Chi può entrare via SSH" "$ATTUALE"; then
         printf 'Il tuo utente amministrativo: quello con cui ti colleghi adesso.\n'
         printf "Quando ricaricherai sshd le password verranno disattivate, e chi\n"
         printf 'non è in questo elenco resta fuori — compreso te, se sbagli il nome.\n'
+        suggerimento 'echo $SUDO_USER' \
+                     "chi ha lanciato questo script con sudo (vuoto se sei entrato come root)"
     fi
     chiedi UTENTE "  utente amministrativo:" valida_utente --utente
     tmp=$(mktemp)
@@ -433,6 +453,8 @@ if da_compilare "La chiave del canale di servizio" "$ATTUALE"; then
         printf 'Va generata sulla POSTAZIONE, non qui, e di quella coppia serve\n'
         printf 'solo la parte pubblica: il contenuto del file .pub.\n'
         printf 'Puoi indicare un percorso di file oppure incollare il testo.\n'
+        suggerimento 'type $env:USERPROFILE\.ssh\id_ed25519_hermes_VM.pub' \
+                     'da eseguire SULLA POSTAZIONE, non qui (su Linux: cat ~/.ssh/....pub)'
     fi
     chiedi CHIAVE "  chiave pubblica:" valida_chiave --chiave
 
@@ -473,6 +495,8 @@ if da_compilare "Il perimetro dei bersagli" "$ATTUALE"; then
         printf 'viene rifiutato, anche se qualcuno lo chiede esplicitamente.\n'
         printf 'Esempio: 192.168.56.0/24 vale tutta la sottorete .56.\n'
         printf 'Più reti: separate da virgola.\n'
+        suggerimento "ip -o route show scope link | awk '{print \$1}'" \
+                     'le reti a cui questa macchina è attaccata: di solito una sola serve'
     fi
     chiedi RETI "  reti:" valida_reti --reti
 
@@ -483,6 +507,8 @@ if da_compilare "Il perimetro dei bersagli" "$ATTUALE"; then
         printf 'fra nome e indirizzo la decidi qui, e non cambia sotto i piedi.\n'
         printf 'Esempio: lab-web=192.168.56.20,lab-db=192.168.56.21\n'
         printf 'Invio per non definirne nessuno.\n'
+        suggerimento 'ip neigh' \
+                     'le macchine che questa VM ha già visto parlare: non è un inventario'
         printf '  alias: '
         read -r ALIAS || ALIAS=""
     fi
@@ -554,10 +580,10 @@ elif [ -z "$POSTAZIONE" ] && interattivo; then
     printf "\nL'INDIRIZZO DEL PC DA CUI TI COLLEGHI.\n"
     printf 'Serve a restringere la porta 22 a quel solo indirizzo, invece di\n'
     printf 'lasciarla aperta a tutta la rete.\n'
-    printf 'Non indovinarlo: lo stampa questo server stesso, con\n'
-    printf '    echo $SSH_CONNECTION\n'
-    printf 'ed è il primo dei quattro valori.\n'
+    printf 'Non indovinarlo: lo stampa questo server stesso.\n'
     printf 'Invio per saltare.\n'
+    suggerimento 'echo "$SSH_CONNECTION" | cut -d" " -f1' \
+                 "l'indirizzo da cui arriva la sessione aperta adesso"
     printf '  postazione: '
     read -r POSTAZIONE || POSTAZIONE=""
 fi
@@ -596,6 +622,8 @@ if [ -z "$INTERFACCIA" ] && [ -z "$INDIRIZZO" ] && interattivo; then
     printf 'Il file viene scritto ma NON applicato: applicarlo cambia indirizzo\n'
     printf 'e fa cadere questa sessione, quindi va fatto dalla console.\n'
     printf 'Invio per saltare.\n'
+    suggerimento 'ip -br a' \
+                 "l'interfaccia da cui ti raggiunge la postazione, non quella che porta internet"
     printf '  interfaccia (per esempio enp0s8): '
     read -r INTERFACCIA || INTERFACCIA=""
 fi
@@ -606,6 +634,14 @@ if [ -z "$INTERFACCIA" ] && [ -z "$INDIRIZZO" ]; then
       configurazione di Hermes (docs §8). Fino a lì il DHCP va bene."
 else
     chiedi INTERFACCIA "  interfaccia:" valida_interfaccia --interfaccia
+    if [ -z "$INDIRIZZO" ] && interattivo; then
+        printf "\nL'indirizzo da assegnare a %s, con la lunghezza del prefisso.\n" "$INTERFACCIA"
+        printf 'Deve stare FUORI dal pool del DHCP, altrimenti il server lo darà\n'
+        printf "prima o poi anche a un'altra macchina, e due host con lo stesso\n"
+        printf 'indirizzo si diagnosticano male e settimane dopo.\n'
+        suggerimento 'ip -br a' \
+                     'la rete attuale: di solito i numeri bassi sono sotto il pool'
+    fi
     chiedi INDIRIZZO "  indirizzo (CIDR):" valida_cidr --indirizzo
     tmp=$(mktemp)
     {

@@ -284,6 +284,35 @@ def test_non_ricarica_sshd_e_non_tocca_le_regole_aperte():
         assert not [r for r in eseguite if r.startswith(proibito)], proibito
 
 
+def test_ogni_valore_dice_da_dove_ricavarlo():
+    """Sei domande, sei comandi per andare a guardare.
+
+    Presentati come «prova», non come risposta: il comando mostra dove
+    guardare e la scelta resta di chi installa. `$SUDO_USER` è vuoto se si è
+    entrati come root, l'ARP conosce solo chi ha parlato di recente, e fra due
+    reti attaccate quale serva non lo dice `ip route`. Un comando presentato
+    come definitivo diventa un valore incollato senza riletture — che è
+    esattamente come `monika` e `192.168.205.0/24` sono arrivati dove sono
+    arrivati.
+    """
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "prova:" in script
+    for comando in (
+        "$SUDO_USER",          # utente amministrativo
+        "id_ed25519_hermes",   # chiave del servizio, sulla postazione
+        "route show scope link",  # reti del perimetro
+        "ip neigh",            # candidati per gli alias
+        "$SSH_CONNECTION",     # indirizzo della postazione
+        "ip -br a",            # interfaccia e indirizzo
+    ):
+        assert comando in script, comando
+
+    # Tanti suggerimenti quante sono le domande: se se ne aggiunge una senza
+    # il suo, questo conteggio lo dice.
+    assert script.count("suggerimento ") >= 7
+
+
 def test_i_percorsi_coincidono_con_quelli_del_bootstrap():
     """Dove la copia è inevitabile, la coincidenza va verificata.
 
