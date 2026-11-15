@@ -23,6 +23,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -301,6 +302,85 @@ def _log(
         )
     else:
         referto.aggiungi("log append-only", Esito.OK, "attributo +a impostato")
+
+    _orologio(referto)
+
+
+def _orologio(referto: Referto) -> None:
+    """L'orario del log d'audit deve essere credibile, non solo presente.
+
+    Tutto A5 esiste per rendere il log difficile da manomettere: copia su una
+    seconda macchina, rifiuto degli offset divergenti, impronta degli ultimi
+    byte. Un orologio sbagliato non viola nessuno di quei controlli — li passa
+    tutti — e intanto produce righe che non si possono correlare con nessuna
+    altra fonte. Si finisce per costruire una catena di custodia attorno a un
+    orario che non è quello.
+
+    Trovato per caso, e nel modo più istruttivo: una VM ripristinata da
+    snapshot è ripartita venti ore indietro, RTC compreso, e il referto del
+    preflight era l'unico posto dove si sarebbe potuto notare — se solo
+    l'avesse detto.
+
+    Avviso e non errore: una macchina con l'ora sbagliata funziona
+    perfettamente. Semplicemente non è testimone di niente.
+
+    Si interroga ``timedatectl``, che risponde per qualunque implementazione
+    NTP, invece di cercare ``/run/systemd/timesync/synchronized``, che esiste
+    solo con ``systemd-timesyncd`` e tacerebbe su una macchina con chrony —
+    dicendo «non sincronizzato» di una macchina sincronizzata.
+    """
+    adesso = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+    if not shutil.which("timedatectl"):
+        referto.aggiungi(
+            "orologio",
+            Esito.AVVISO,
+            f"non verificabile: manca timedatectl · ora di questa macchina: {adesso}",
+            "Il log d'audit porta questo orario: va confrontato a mano con una "
+            "fonte esterna.",
+        )
+        return
+
+    def interroga(proprieta: str) -> str:
+        try:
+            esito = subprocess.run(
+                ["timedatectl", "show", "-p", proprieta, "--value"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):  # pragma: no cover
+            return ""
+        return esito.stdout.strip()
+
+    sincronizzato = interroga("NTPSynchronized") == "yes"
+    ntp_attivo = interroga("NTP") == "yes"
+
+    if sincronizzato:
+        referto.aggiungi(
+            "orologio",
+            Esito.OK,
+            f"sincronizzato · {adesso}",
+        )
+        return
+
+    referto.aggiungi(
+        "orologio",
+        Esito.AVVISO,
+        f"NON sincronizzato (NTP {'attivo' if ntp_attivo else 'disattivo'}) · "
+        f"ora di questa macchina: {adesso}",
+        "Le righe del log d'audit portano questo orario. Finché non è "
+        "sincronizzato non sono correlabili con nessun'altra fonte, e le "
+        "difese di A5 proteggono una cronologia che non corrisponde ai fatti.\n"
+        "             Il server gira comunque: questo non è un guasto, è una "
+        "prova che vale meno.\n"
+        "             Se l'ora qui sopra è assurda, questa macchina è una VM "
+        "ripristinata da snapshot: riparte con l'ora salvata, RTC compreso.\n"
+        "             sudo timedatectl set-ntp true\n"
+        "             Se resta 'no', la causa è nel journal del servizio: "
+        "journalctl -u systemd-timesyncd -n 20",
+    )
 
 
 def _stato(
