@@ -191,6 +191,24 @@ fi
 
 interattivo() { [ -t 0 ]; }
 
+# Ogni domanda dice da dove si ricava la risposta.
+#
+# È un suggerimento, non un oracolo, e la parola «prova» è scelta: il comando
+# mostra dove guardare, la scelta resta di chi installa. `$SUDO_USER` è vuoto
+# se si è entrati come root; l'ARP conosce solo le macchine che hanno parlato
+# di recente; fra due reti attaccate, quale sia quella giusta dipende da cosa
+# serve, non da `ip route`.
+#
+# Un comando presentato come risposta definitiva diventa un valore incollato
+# senza guardarlo. `monika` e `192.168.205.0/24` sono arrivati dove sono
+# arrivati esattamente così: erano plausibili, e nessuno li ha riletti.
+suggerimento() {
+    printf '  prova:  %s\n' "$1"
+    if [ $# -gt 1 ]; then
+        printf '          %s\n' "$2"
+    fi
+}
+
 # Chiede un valore finché non passa il suo validatore.
 #
 # Il validatore stampa il valore CANONICO e esce 0, oppure stampa il motivo
@@ -214,6 +232,34 @@ chiedi() {
         printf '%s ' "$domanda"
         read -r valore || fermati "ingresso chiuso senza risposta"
     done
+}
+
+# Un valore già compilato non si salta in silenzio: si mostra e si chiede.
+#
+# Saltarlo obbligava a ricordarsi `--forza`, e chi rilancia questo script lo
+# rilancia proprio perché vuole cambiare qualcosa: la risposta «non tocco
+# niente, riesegui con un'opzione che non ti ho detto» è un vicolo. Si
+# scorrono tutte le voci dall'inizio, ogni volta, e dove c'è già un valore
+# lo si fa vedere prima di chiedere.
+#
+# Senza terminale non c'è nessuno a cui chiedere: lì vale `--forza`, perché
+# un automatismo che sovrascrive una decisione dell'operatore solo perché è
+# stato rilanciato è la regola di idempotenza del bootstrap al contrario.
+da_compilare() {
+    etichetta=$1; attuale=$2
+    [ -n "$attuale" ] || return 0
+    [ "$FORZA" = no ] || return 0
+    if ! interattivo; then
+        invariato "$etichetta: già compilato ($attuale)"
+        return 1
+    fi
+    printf '\n%s è già compilato:\n  %s\n' "$etichetta" "$attuale"
+    printf '  sostituire? [s/N] '
+    read -r risposta || risposta=n
+    case $risposta in
+        s|S|si|Si|SI|y|Y) return 0 ;;
+        *) invariato "$etichetta: lasciato come era"; return 1 ;;
+    esac
 }
 
 # --- Validatori ----------------------------------------------------------- #
@@ -369,19 +415,17 @@ if [ ! -f "$DROPIN_UTENTI" ]; then
     fermati "manca $DROPIN_UTENTI" "lo genera il bootstrap: sudo bin/hermes-bootstrap"
 fi
 
-if grep -q "^AllowUsers .*$NON_COMPILATO" "$DROPIN_UTENTI" 2>/dev/null; then
-    DA_CHIEDERE=si
-elif [ "$FORZA" = si ]; then
-    DA_CHIEDERE=si
-else
-    DA_CHIEDERE=no
-    invariato "accesso SSH: $DROPIN_UTENTI è già compilato ($(grep '^AllowUsers' "$DROPIN_UTENTI" || true))"
-fi
+ATTUALE=$(sed -n 's/^AllowUsers //p' "$DROPIN_UTENTI" | head -1)
+case $ATTUALE in *"$NON_COMPILATO"*) ATTUALE="" ;; esac
 
-if [ "$DA_CHIEDERE" = si ]; then
+if da_compilare "Chi può entrare via SSH" "$ATTUALE"; then
     if [ -z "$UTENTE" ] && interattivo; then
-        printf '\nIl tuo utente amministrativo, quello con cui entri in SSH.\n'
-        printf 'Resterà ammesso quando il drop-in disattiverà le password.\n'
+        printf '\nCHI PUÒ ENTRARE IN QUESTA MACCHINA VIA SSH.\n'
+        printf 'Il tuo utente amministrativo: quello con cui ti colleghi adesso.\n'
+        printf "Quando ricaricherai sshd le password verranno disattivate, e chi\n"
+        printf 'non è in questo elenco resta fuori — compreso te, se sbagli il nome.\n'
+        suggerimento 'echo $SUDO_USER' \
+                     "chi ha lanciato questo script con sudo (vuoto se sei entrato come root)"
     fi
     chiedi UTENTE "  utente amministrativo:" valida_utente --utente
     tmp=$(mktemp)
@@ -396,12 +440,21 @@ fi
 
 # --- 2. La chiave del servizio -------------------------------------------- #
 
-if [ -s "$CHIAVE_SERVIZIO" ] && [ "$FORZA" = no ]; then
-    invariato "chiave del servizio: $CHIAVE_SERVIZIO già presente"
-else
+ATTUALE=""
+if [ -s "$CHIAVE_SERVIZIO" ]; then
+    ATTUALE=$(grep -v '^#' "$CHIAVE_SERVIZIO" | head -1 | cut -d' ' -f4-)
+    [ -n "$ATTUALE" ] || ATTUALE="una chiave senza commento"
+fi
+
+if da_compilare "La chiave del canale di servizio" "$ATTUALE"; then
     if [ -z "$CHIAVE" ] && interattivo; then
-        printf '\nLa chiave PUBBLICA del servizio, generata sulla postazione.\n'
-        printf 'Percorso di un file .pub, o il testo incollato.\n'
+        printf '\nLA CHIAVE PUBBLICA DEL CANALE DI SERVIZIO.\n'
+        printf 'È con questa che Hermes, dal tuo PC, parlerà con questo server.\n'
+        printf 'Va generata sulla POSTAZIONE, non qui, e di quella coppia serve\n'
+        printf 'solo la parte pubblica: il contenuto del file .pub.\n'
+        printf 'Puoi indicare un percorso di file oppure incollare il testo.\n'
+        suggerimento 'type $env:USERPROFILE\.ssh\id_ed25519_hermes_VM.pub' \
+                     'da eseguire SULLA POSTAZIONE, non qui (su Linux: cat ~/.ssh/....pub)'
     fi
     chiedi CHIAVE "  chiave pubblica:" valida_chiave --chiave
 
@@ -429,18 +482,33 @@ if [ ! -f "$SCOPE" ]; then
     fermati "manca $SCOPE" "lo genera il bootstrap: sudo bin/hermes-bootstrap"
 fi
 
-if ! grep -q "$NON_COMPILATO" "$SCOPE" && [ "$FORZA" = no ]; then
-    invariato "perimetro: $SCOPE è già compilato"
-else
+ATTUALE=""
+if ! grep -q "$NON_COMPILATO" "$SCOPE"; then
+    ATTUALE=$(sed -n 's/^ *"\(.*\)",$/\1/p' "$SCOPE" | tr '\n' ' ')
+    [ -n "$ATTUALE" ] || ATTUALE="un perimetro senza reti"
+fi
+
+if da_compilare "Il perimetro dei bersagli" "$ATTUALE"; then
     if [ -z "$RETI" ] && interattivo; then
-        printf '\nLe reti dei bersagli ammessi, separate da virgola.\n'
-        printf 'In forma canonica: 192.168.56.0/24, non 192.168.56.1/24.\n'
+        printf '\nQUALI MACCHINE I TOOL POTRANNO ANALIZZARE.\n'
+        printf 'Si dichiarano per rete, non una per una. Tutto ciò che sta fuori\n'
+        printf 'viene rifiutato, anche se qualcuno lo chiede esplicitamente.\n'
+        printf 'Esempio: 192.168.56.0/24 vale tutta la sottorete .56.\n'
+        printf 'Più reti: separate da virgola.\n'
+        suggerimento "ip -o route show scope link | awk '{print \$1}'" \
+                     'le reti a cui questa macchina è attaccata: di solito una sola serve'
     fi
     chiedi RETI "  reti:" valida_reti --reti
 
     if [ -z "$ALIAS" ] && interattivo; then
-        printf '\nAlias dei bersagli, nome=indirizzo separati da virgola.\n'
-        printf 'Niente DNS: gli alias sono una tabella dichiarata. Invio per nessuno.\n'
+        printf '\nNOMI BREVI PER I BERSAGLI CHE USERAI SPESSO.\n'
+        printf "Servono a scrivere 'lab-web' nei comandi invece di ricordarti\n"
+        printf "l'indirizzo. Non c'è nessuna risoluzione DNS: la corrispondenza\n"
+        printf 'fra nome e indirizzo la decidi qui, e non cambia sotto i piedi.\n'
+        printf 'Esempio: lab-web=192.168.56.20,lab-db=192.168.56.21\n'
+        printf 'Invio per non definirne nessuno.\n'
+        suggerimento 'ip neigh' \
+                     'le macchine che questa VM ha già visto parlare: non è un inventario'
         printf '  alias: '
         read -r ALIAS || ALIAS=""
     fi
@@ -499,10 +567,23 @@ fi
 
 # --- 4. La regola di ufw -------------------------------------------------- #
 
-if [ -z "$POSTAZIONE" ] && interattivo; then
-    printf '\nIndirizzo della postazione da cui Hermes si connette.\n'
-    printf 'Si legge dal server, invece di dedurlo: echo $SSH_CONNECTION, primo valore.\n'
+ATTUALE=""
+if command -v ufw >/dev/null 2>&1 &&
+   ufw status 2>/dev/null | grep -q 'SSH postazione Hermes'; then
+    ATTUALE=$(ufw status 2>/dev/null | sed -n 's/.*ALLOW IN *\([0-9.]*\) *# SSH postazione Hermes/\1/p' | head -1)
+    [ -n "$ATTUALE" ] || ATTUALE="una regola già presente"
+fi
+
+if ! da_compilare "La regola ufw per la postazione" "$ATTUALE"; then
+    POSTAZIONE=""
+elif [ -z "$POSTAZIONE" ] && interattivo; then
+    printf "\nL'INDIRIZZO DEL PC DA CUI TI COLLEGHI.\n"
+    printf 'Serve a restringere la porta 22 a quel solo indirizzo, invece di\n'
+    printf 'lasciarla aperta a tutta la rete.\n'
+    printf 'Non indovinarlo: lo stampa questo server stesso.\n'
     printf 'Invio per saltare.\n'
+    suggerimento 'echo "$SSH_CONNECTION" | cut -d" " -f1' \
+                 "l'indirizzo da cui arriva la sessione aperta adesso"
     printf '  postazione: '
     read -r POSTAZIONE || POSTAZIONE=""
 fi
@@ -535,10 +616,15 @@ fi
 # --- 5. L'indirizzo fisso (scritto, non applicato) ------------------------ #
 
 if [ -z "$INTERFACCIA" ] && [ -z "$INDIRIZZO" ] && interattivo; then
-    printf '\nIndirizzo fisso. Serve solo quando l'\''indirizzo finisce nella\n'
-    printf 'configurazione di Hermes: fino a lì il DHCP va bene. Il file viene\n'
-    printf 'scritto, non applicato. Invio per saltare.\n'
-    printf '  interfaccia: '
+    printf "\nL'INDIRIZZO FISSO DI QUESTA VM.\n"
+    printf 'Serve solo quando questo indirizzo finirà nella configurazione di\n'
+    printf 'Hermes sul tuo PC: fino a quel momento il DHCP va benissimo.\n'
+    printf 'Il file viene scritto ma NON applicato: applicarlo cambia indirizzo\n'
+    printf 'e fa cadere questa sessione, quindi va fatto dalla console.\n'
+    printf 'Invio per saltare.\n'
+    suggerimento 'ip -br a' \
+                 "l'interfaccia da cui ti raggiunge la postazione, non quella che porta internet"
+    printf '  interfaccia (per esempio enp0s8): '
     read -r INTERFACCIA || INTERFACCIA=""
 fi
 
@@ -548,6 +634,14 @@ if [ -z "$INTERFACCIA" ] && [ -z "$INDIRIZZO" ]; then
       configurazione di Hermes (docs §8). Fino a lì il DHCP va bene."
 else
     chiedi INTERFACCIA "  interfaccia:" valida_interfaccia --interfaccia
+    if [ -z "$INDIRIZZO" ] && interattivo; then
+        printf "\nL'indirizzo da assegnare a %s, con la lunghezza del prefisso.\n" "$INTERFACCIA"
+        printf 'Deve stare FUORI dal pool del DHCP, altrimenti il server lo darà\n'
+        printf "prima o poi anche a un'altra macchina, e due host con lo stesso\n"
+        printf 'indirizzo si diagnosticano male e settimane dopo.\n'
+        suggerimento 'ip -br a' \
+                     'la rete attuale: di solito i numeri bassi sono sotto il pool'
+    fi
     chiedi INDIRIZZO "  indirizzo (CIDR):" valida_cidr --indirizzo
     tmp=$(mktemp)
     {

@@ -105,6 +105,35 @@ def test_la_prova_non_scrive_niente(radice_finta: Path):
     assert dopo == prima
 
 
+def test_un_valore_gia_compilato_non_viene_sovrascritto_da_sola(
+    radice_finta: Path,
+):
+    """Senza terminale non c'è nessuno a cui chiedere, quindi non si tocca.
+
+    Un automatismo che sovrascrive una decisione dell'operatore solo perché è
+    stato rilanciato è la regola di idempotenza del bootstrap al contrario.
+    """
+    (radice_finta / "sshd" / "09-hermes-allowusers.conf").write_text(
+        "AllowUsers gabri hermes\n", encoding="utf-8"
+    )
+    esito = esegui(radice_finta, *completo())
+    assert esito.returncode == 0, esito.stderr
+    assert "già compilato (gabri hermes)" in esito.stdout
+
+
+def test_con_forza_un_valore_gia_compilato_viene_sostituito(radice_finta: Path):
+    """`--forza` è la risposta «sì» data in anticipo.
+
+    Serve dove la domanda non si può fare: senza terminale, e nei test.
+    """
+    (radice_finta / "sshd" / "09-hermes-allowusers.conf").write_text(
+        "AllowUsers gabri hermes\n", encoding="utf-8"
+    )
+    esito = esegui(radice_finta, "--forza", *completo())
+    assert esito.returncode == 0, esito.stderr
+    assert "AllowUsers root hermes" in esito.stdout
+
+
 def test_il_perimetro_generato_passa_il_caricatore_vero(radice_finta: Path):
     """Non si riscrivono le regole delle reti: si usa il caricatore.
 
@@ -253,6 +282,35 @@ def test_non_ricarica_sshd_e_non_tocca_le_regole_aperte():
     ]
     for proibito in ("systemctl", "ufw delete", "netplan try", "netplan apply"):
         assert not [r for r in eseguite if r.startswith(proibito)], proibito
+
+
+def test_ogni_valore_dice_da_dove_ricavarlo():
+    """Sei domande, sei comandi per andare a guardare.
+
+    Presentati come «prova», non come risposta: il comando mostra dove
+    guardare e la scelta resta di chi installa. `$SUDO_USER` è vuoto se si è
+    entrati come root, l'ARP conosce solo chi ha parlato di recente, e fra due
+    reti attaccate quale serva non lo dice `ip route`. Un comando presentato
+    come definitivo diventa un valore incollato senza riletture — che è
+    esattamente come `monika` e `192.168.205.0/24` sono arrivati dove sono
+    arrivati.
+    """
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "prova:" in script
+    for comando in (
+        "$SUDO_USER",          # utente amministrativo
+        "id_ed25519_hermes",   # chiave del servizio, sulla postazione
+        "route show scope link",  # reti del perimetro
+        "ip neigh",            # candidati per gli alias
+        "$SSH_CONNECTION",     # indirizzo della postazione
+        "ip -br a",            # interfaccia e indirizzo
+    ):
+        assert comando in script, comando
+
+    # Tanti suggerimenti quante sono le domande: se se ne aggiunge una senza
+    # il suo, questo conteggio lo dice.
+    assert script.count("suggerimento ") >= 7
 
 
 def test_i_percorsi_coincidono_con_quelli_del_bootstrap():
