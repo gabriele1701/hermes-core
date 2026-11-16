@@ -1,14 +1,21 @@
 #!/bin/sh
 # Compila i valori per-installazione che bin/hermes-bootstrap lascia a
-# DA_COMPILARE, e installa la chiave del servizio.
+# DA_COMPILARE, e installa le due chiavi: quella dell'amministratore nella
+# sua authorized_keys, quella del servizio dove la legge sshd.
 #
 #     sudo bin/hermes-configura            # chiede ciò che manca
 #     sudo bin/hermes-configura --prova    # valida e mostra, senza scrivere
-#     sudo bin/hermes-configura --utente gabri --reti 192.168.56.0/24 \
-#          --alias lab-web=192.168.56.20 --chiave ~/chiave.pub \
-#          --postazione 192.168.56.1
+#     sudo bin/hermes-configura --utente UTENTE \
+#          --chiave-admin admin.pub --chiave servizio.pub \
+#          --reti 192.0.2.0/24 --alias lab-web=192.0.2.20 \
+#          --postazione 192.0.2.1
 #
 # Va eseguito DOPO il bootstrap: riempie i file che quello ha generato.
+#
+# Gli indirizzi degli esempi sono di 192.0.2.0/24, la rete che la RFC 5737
+# riserva alla documentazione. Non è pignoleria: un esempio copiato per
+# sbaglio in un perimetro non deve autorizzare niente di reale, e un esempio
+# preso da una rete di laboratorio vera lo farebbe.
 #
 # Perché esiste
 # -------------
@@ -43,9 +50,10 @@
 #
 # NON INDOVINA. Risposta vuota o non valida: richiede. Nessun default
 # plausibile, mai - un segnaposto plausibile passa i validatori e consegna
-# una configurazione sbagliata, che è il guasto peggiore dei due. `monika`
-# in AllowUsers e `192.168.205.0/24` nel modello del perimetro erano
-# entrambi valori plausibili, e sono entrambi arrivati in produzione.
+# una configurazione sbagliata, che è il guasto peggiore dei due. Un nome
+# utente vero in AllowUsers e la rete di un laboratorio vero nel modello del
+# perimetro erano entrambi valori plausibili, e sono entrambi arrivati su
+# macchine a cui non appartenevano.
 #
 # NON SOVRASCRIVE un valore già compilato senza dirlo e chiedere.
 #
@@ -59,9 +67,21 @@
 # quella che l'operatore vede per prima.
 #
 # L'utente deve ESISTERE su questa macchina: un nome con un refuso passa
-# `sshd -t`, passa il preflight, e chiude fuori. La chiave deve stare su una
-# riga sola, perché una chiave privata incollata per sbaglio ne ha molte e
-# non deve finire in authorized_keys.
+# `sshd -t`, passa il preflight, e chiude fuori.
+#
+# Le chiavi passano per `ssh-keygen -l`, che è il validatore vero. Prima lo
+# script controllava solo che stessero su una riga e iniziassero con
+# `ssh-ed25519`: una chiave spezzata dall'incollata - di cui il terminale
+# consegna solo la prima riga - o con un carattere in meno passava entrambi i
+# controlli, finiva in authorized_keys, e si manifestava come un `Permission
+# denied (publickey)` che non nomina la causa. Verificato: `ssh-keygen -l`
+# rifiuta entrambe.
+#
+# E le due chiavi non devono essere scambiate. Hanno la stessa forma e la
+# stessa lunghezza, quindi l'unico appiglio è il commento: quello che la
+# procedura fa generare. Una chiave che si dichiara del servizio non viene
+# accettata come quella dell'amministratore, e viceversa, e due chiavi
+# identiche vengono rifiutate.
 
 set -eu
 
@@ -90,13 +110,24 @@ DROPIN_UTENTI=$DIR_SSHD/09-hermes-allowusers.conf
 DIR_CHIAVI=${HERMES_DIR_CHIAVI:-/etc/ssh/authorized_keys.d}
 CHIAVE_SERVIZIO=$DIR_CHIAVI/$UTENTE_SERVIZIO
 NETPLAN=${HERMES_NETPLAN:-/etc/netplan/99-hermes-static.yaml}
+# La home dell'amministratore si legge da getent. L'override serve solo ai
+# test, per esercitare la scrittura della sua authorized_keys - compreso il
+# rifiuto di un ~/.ssh che è un link simbolico - senza toccare la home vera
+# di chi lancia la suite.
+HOME_AMMINISTRATORE_FORZATA=${HERMES_HOME_AMMINISTRATORE:-}
 
 NON_COMPILATO=DA_COMPILARE
+
+# I commenti che la procedura fa dare alle due chiavi. Sono l'unico modo di
+# distinguerle, perché hanno la stessa forma e la stessa lunghezza.
+COMMENTO_SERVIZIO=hermes-core@
+COMMENTO_ADMIN=admin@
 
 PROVA=no
 FORZA=no
 UTENTE=""
 CHIAVE=""
+CHIAVE_ADMIN=""
 RETI=""
 ALIAS=""
 POSTAZIONE=""
@@ -137,12 +168,14 @@ Opzioni:
                       suite esercita questo script - per te è un'anteprima
   --forza             sostituisce anche i valori già compilati
   --utente NOME       utente amministrativo ammesso da SSH (deve esistere)
-  --chiave FILE|TESTO chiave PUBBLICA del servizio
+  --chiave-admin F|T  chiave PUBBLICA dell'amministratore: va nella sua
+                      ~/.ssh/authorized_keys
+  --chiave F|T        chiave PUBBLICA del servizio
   --reti A,B          reti del perimetro, in forma canonica
   --alias n=IP,...    alias dei bersagli, dentro le reti
   --postazione IP     indirizzo da cui Hermes si connette (regola ufw)
   --interfaccia NOME  interfaccia per l'indirizzo fisso
-  --indirizzo CIDR    indirizzo fisso, per esempio 192.168.56.10/24
+  --indirizzo CIDR    indirizzo fisso, per esempio 192.0.2.10/24
   --gateway IP        solo se questa interfaccia deve portare la rotta di
                       default: con una seconda scheda che la porta già,
                       ometterlo - due rotte di default spengono l'uscita
@@ -156,6 +189,7 @@ while [ $# -gt 0 ]; do
         --forza)       FORZA=si ;;
         --utente)      shift; UTENTE=${1:-} ;;
         --chiave)      shift; CHIAVE=${1:-} ;;
+        --chiave-admin) shift; CHIAVE_ADMIN=${1:-} ;;
         --reti)        shift; RETI=${1:-} ;;
         --alias)       shift; ALIAS=${1:-} ;;
         --postazione)  shift; POSTAZIONE=${1:-} ;;
@@ -191,6 +225,13 @@ else
     fermati "serve python3" "su Debian/Ubuntu: apt install python3"
 fi
 
+# `ssh-keygen` è il validatore delle chiavi. Su Debian/Ubuntu arriva con
+# openssh-client, che openssh-server si porta dietro: se manca, manca anche
+# il server, e il problema è a monte di questo script.
+if ! command -v ssh-keygen >/dev/null 2>&1; then
+    fermati "serve ssh-keygen per validare le chiavi" "su Debian/Ubuntu: apt install openssh-client"
+fi
+
 interattivo() { [ -t 0 ]; }
 
 # Ogni domanda dice da dove si ricava la risposta.
@@ -202,8 +243,9 @@ interattivo() { [ -t 0 ]; }
 # serve, non da `ip route`.
 #
 # Un comando presentato come risposta definitiva diventa un valore incollato
-# senza guardarlo. `monika` e `192.168.205.0/24` sono arrivati dove sono
-# arrivati esattamente così: erano plausibili, e nessuno li ha riletti.
+# senza guardarlo. Il nome utente in AllowUsers e la rete nel modello del
+# perimetro sono arrivati dove sono arrivati esattamente così: erano
+# plausibili, e nessuno li ha riletti.
 suggerimento() {
     printf '  prova:  %s\n' "$1"
     if [ $# -gt 1 ]; then
@@ -214,8 +256,8 @@ suggerimento() {
 # Chiede un valore finché non passa il suo validatore.
 #
 # Il validatore stampa il valore CANONICO e esce 0, oppure stampa il motivo
-# e esce 1. Canonico e non "quello battuto": `192.168.56.0/255.255.255.0`
-# diventa `192.168.56.0/24`, e il file contiene la forma che il caricatore
+# e esce 1. Canonico e non "quello battuto": `192.0.2.0/255.255.255.0`
+# diventa `192.0.2.0/24`, e il file contiene la forma che il caricatore
 # confronterà.
 chiedi() {
     nome=$1; domanda=$2; validatore=$3; opzione=$4
@@ -269,7 +311,7 @@ da_compilare() {
 valida_utente() {
     # Prima il nome, poi l'esistenza: il nome è una proprietà della stringa e
     # la risposta è la stessa su ogni macchina, mentre l'esistenza dipende da
-    # dove girimo. Nell'ordine inverso, su una macchina dove gli utenti di
+    # dove giriamo. Nell'ordine inverso, su una macchina dove gli utenti di
     # servizio non ci sono ancora, a chi scrive `hermes` si risponderebbe
     # «non esiste» invece di «è il servizio, qui va il tuo utente» - vero, e
     # inutile.
@@ -301,7 +343,64 @@ valida_chiave() {
         *) printf "non ha la forma di una chiave pubblica OpenSSH (atteso 'ssh-ed25519 AAAA... commento')"
            return 1 ;;
     esac
+
+    # Il giudice finale. I due controlli sopra danno messaggi chiari nei casi
+    # comuni, ma una chiave spezzata dall'incollata li passa entrambi: è una
+    # riga sola - il terminale consegna solo la prima - e inizia nel modo
+    # giusto. `ssh-keygen -l` decodifica il blob e la rifiuta.
+    prova_chiave=$(mktemp)
+    printf '%s\n' "$testo" > "$prova_chiave"
+    if ! ssh-keygen -l -f "$prova_chiave" >/dev/null 2>&1; then
+        rm -f "$prova_chiave"
+        printf "ssh-keygen non la riconosce come chiave: probabilmente è spezzata o incompleta. Se l'hai incollata, riprova copiando la riga intera, oppure indica il percorso del file .pub"
+        return 1
+    fi
+    rm -f "$prova_chiave"
     printf '%s' "$testo"
+}
+
+blob_di()     { printf '%s' "$1" | cut -d' ' -f2; }
+commento_di() { printf '%s' "$1" | cut -d' ' -f3-; }
+
+# Le due chiavi hanno la stessa forma e la stessa lunghezza: l'unico modo di
+# distinguerle è il commento che la procedura fa dare a ciascuna. Si rifiuta
+# solo il segnale positivo dello scambio - una chiave che si DICHIARA
+# dell'altro - così un commento personalizzato non blocca nessuno.
+valida_chiave_admin() {
+    k=$(valida_chiave "$1") || { printf '%s' "$k"; return 1; }
+    case $(commento_di "$k") in
+        "$COMMENTO_SERVIZIO"*)
+            printf "il commento dice '%s': è la chiave del SERVIZIO. Qui va la TUA, quella con commento '%s…'" \
+                   "$(commento_di "$k")" "$COMMENTO_ADMIN"
+            return 1 ;;
+    esac
+    if [ -n "$CHIAVE" ] && [ "$(blob_di "$k")" = "$(blob_di "$CHIAVE")" ]; then
+        printf "è la stessa chiave data come chiave del servizio: le due devono essere diverse"
+        return 1
+    fi
+    printf '%s' "$k"
+}
+
+valida_chiave_servizio() {
+    k=$(valida_chiave "$1") || { printf '%s' "$k"; return 1; }
+    case $(commento_di "$k") in
+        "$COMMENTO_ADMIN"*)
+            printf "il commento dice '%s': è la TUA chiave. Qui va quella del SERVIZIO, con commento '%s…'" \
+                   "$(commento_di "$k")" "$COMMENTO_SERVIZIO"
+            return 1 ;;
+    esac
+    if [ -n "$CHIAVE_ADMIN" ] && [ "$(blob_di "$k")" = "$(blob_di "$CHIAVE_ADMIN")" ]; then
+        printf "è la stessa chiave data come tua: le due devono essere diverse"
+        return 1
+    fi
+    printf '%s' "$k"
+}
+
+impronta() {
+    f=$(mktemp)
+    printf '%s\n' "$1" > "$f"
+    ssh-keygen -l -f "$f" 2>/dev/null | cut -d' ' -f2
+    rm -f "$f"
 }
 
 valida_ip() {
@@ -331,7 +430,7 @@ valida_cidr() {
 import ipaddress, sys
 grezzo = sys.argv[1].strip()
 if "/" not in grezzo:
-    print("manca la lunghezza del prefisso: per esempio 192.168.56.10/24")
+    print("manca la lunghezza del prefisso: per esempio 192.0.2.10/24")
     sys.exit(1)
 try:
     print(ipaddress.ip_interface(grezzo))
@@ -349,7 +448,7 @@ if not grezze:
 fuori = []
 for g in grezze:
     try:
-        # strict: 192.168.56.1/24 non è una rete, è un host dentro una rete.
+        # strict: 192.0.2.1/24 non è una rete, è un host dentro una rete.
         # Accettarlo e "correggerlo" in silenzio darebbe un perimetro che
         # non è quello che l'operatore crede di aver scritto.
         fuori.append(str(ipaddress.ip_network(g, strict=True)))
@@ -394,15 +493,17 @@ PYEOF
 
 installa() {
     sorgente=$1; destinazione=$2; modo=$3; etichetta=$4
+    proprietario=${5:-root}; gruppo=${6:-root}
     if [ "$PROVA" = si ]; then
         mostra "$etichetta"
-        printf '           ---8<--- %s (modo %s)\n' "$destinazione" "$modo"
+        printf '           ---8<--- %s (modo %s, di %s:%s)\n' \
+               "$destinazione" "$modo" "$proprietario" "$gruppo"
         sed 's/^/           /' "$sorgente"
         printf '           --->8---\n'
         rm -f "$sorgente"
         return 0
     fi
-    install -m "$modo" -o root -g root "$sorgente" "$destinazione"
+    install -m "$modo" -o "$proprietario" -g "$gruppo" "$sorgente" "$destinazione"
     rm -f "$sorgente"
     fatto "$etichetta"
 }
@@ -435,12 +536,116 @@ if da_compilare "Chi può entrare via SSH" "$ATTUALE"; then
         "$DROPIN_UTENTI" > "$tmp"
     installa "$tmp" "$DROPIN_UTENTI" 644 \
              "accesso SSH: AllowUsers $UTENTE $UTENTE_SERVIZIO"
-    resta "verificare la chiave di '$UTENTE' DA UNA FINESTRA NUOVA, forzando il metodo,
-      prima di ricaricare sshd:
-      ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no $UTENTE@<questa-vm>"
+    AMMINISTRATORE=$UTENTE
+else
+    # L'amministratore è quello che sta DAVVERO nel file, non quello passato
+    # con --utente. Se il file non è stato toccato, prendere --utente vorrebbe
+    # dire installare la chiave a un utente che sshd non lascia entrare: la
+    # chiave c'è, AllowUsers nomina un altro, e al ricarico si resta fuori.
+    # Trovato dalla suite, non immaginato.
+    AMMINISTRATORE=$(printf '%s' "$ATTUALE" | cut -d' ' -f1)
+    if [ -n "$UTENTE" ] && [ "$UTENTE" != "$AMMINISTRATORE" ]; then
+        printf '  --utente %s ignorato: il file dice %s (per sostituirlo: --forza)\n' \
+               "$UTENTE" "$AMMINISTRATORE"
+    fi
 fi
 
-# --- 2. La chiave del servizio -------------------------------------------- #
+# --- 2. La chiave dell'amministratore ------------------------------------- #
+#
+# Va nella authorized_keys del suo utente, e va messa adesso: il ricarico di
+# sshd disattiva le password, e senza questa chiave l'amministratore resta
+# fuori.
+#
+# Si scrive da root nella home di un altro utente, quindi con due cautele.
+# Si rifiuta un ~/.ssh, o una authorized_keys, che sia un link simbolico:
+# seguirlo da root vorrebbe dire scrivere dove punta il link, cioè dove ha
+# deciso chi l'ha creato. E il file risultante è sempre del suo utente, con i
+# permessi che StrictModes di sshd pretende - altrimenti sshd lo ignora in
+# silenzio, e il sintomo è lo stesso `Permission denied` di una chiave rotta.
+#
+# Le chiavi già presenti non si toccano: si aggiunge, non si sostituisce.
+
+if [ -z "$AMMINISTRATORE" ]; then
+    saltato "chiave dell'amministratore: nessun utente amministrativo compilato"
+else
+    HOME_ADM=$HOME_AMMINISTRATORE_FORZATA
+    if [ -z "$HOME_ADM" ]; then
+        HOME_ADM=$(getent passwd "$AMMINISTRATORE" | cut -d: -f6)
+    fi
+    # Un AllowUsers già compilato può nominare un utente che qui non esiste -
+    # compilato a mano, prima che questo script lo validasse. Meglio dirlo
+    # adesso che scoprirlo al ricarico di sshd.
+    GRUPPO_ADM=$(id -gn "$AMMINISTRATORE" 2>/dev/null) ||
+        fermati "l'utente '$AMMINISTRATORE' in AllowUsers non esiste su questa macchina" \
+                "rilancia e rispondi «s» alla domanda su chi può entrare, per sostituirlo"
+    DIR_SSH_ADM=$HOME_ADM/.ssh
+    AK=$DIR_SSH_ADM/authorized_keys
+
+    if [ -L "$DIR_SSH_ADM" ] || [ -L "$AK" ]; then
+        fermati "$DIR_SSH_ADM, o la sua authorized_keys, è un link simbolico" \
+                "da root non lo seguo: scriverei dove punta il link, non dove credi. Toglilo e rilancia."
+    fi
+
+    PRESENTI=$(grep -c '^[^#[:space:]]' "$AK" 2>/dev/null || true)
+    [ -n "$PRESENTI" ] || PRESENTI=0
+
+    VUOLE=si
+    if [ -z "$CHIAVE_ADMIN" ]; then
+        if ! interattivo; then
+            VUOLE=no
+            if [ "$PRESENTI" -gt 0 ]; then
+                invariato "chiave dell'amministratore: $AK ne contiene già $PRESENTI"
+            else
+                resta "$AK è vuota: dopo il ricarico di sshd '$AMMINISTRATORE' non
+      entrerà più. Rilanciare con --chiave-admin, prima del ricarico."
+            fi
+        elif [ "$PRESENTI" -gt 0 ]; then
+            printf '\n%s contiene già %s chiavi:\n' "$AK" "$PRESENTI"
+            awk '!/^#/ && $1 ~ /^(ssh-|ecdsa-|sk-)/ {
+                     c = ""; for (i = 3; i <= NF; i++) c = c (i > 3 ? " " : "") $i
+                     print "    " (c == "" ? "(senza commento)" : c)
+                 }' "$AK" 2>/dev/null || true
+            printf '  aggiungerne una? [s/N] '
+            read -r risposta || risposta=n
+            case $risposta in
+                s|S|si|Si|SI|y|Y) ;;
+                *) VUOLE=no; invariato "chiave dell'amministratore: lasciate come erano" ;;
+            esac
+        fi
+    fi
+
+    if [ "$VUOLE" = si ]; then
+        if [ -z "$CHIAVE_ADMIN" ] && interattivo; then
+            printf '\nLA TUA CHIAVE PUBBLICA, per entrare quando le password saranno spente.\n'
+            printf 'Generata sulla POSTAZIONE al passo 4. Incolla la riga intera del\n'
+            printf 'file .pub, oppure indica il percorso del file.\n'
+            printf 'Riconoscila dal commento: le due chiavi hanno la stessa forma.\n'
+            printf '    ssh-ed25519 AAAA…  %s…        <- questa, la TUA\n' "$COMMENTO_ADMIN"
+            printf '    ssh-ed25519 AAAA…  %s…  <- quella del servizio, NON qui\n' "$COMMENTO_SERVIZIO"
+            suggerimento 'type "$env:USERPROFILE\.ssh\id_ed25519_${VM}_admin.pub"' \
+                         'da eseguire SULLA POSTAZIONE, nella finestra del passo 4'
+        fi
+        chiedi CHIAVE_ADMIN "  la tua chiave pubblica:" valida_chiave_admin --chiave-admin
+        printf '  riconosciuta: %s  %s\n' \
+               "$(commento_di "$CHIAVE_ADMIN")" "$(impronta "$CHIAVE_ADMIN")"
+
+        if grep -qF "$(blob_di "$CHIAVE_ADMIN")" "$AK" 2>/dev/null; then
+            invariato "chiave dell'amministratore: già presente in $AK"
+        else
+            if [ "$PROVA" = no ]; then
+                install -d -m 700 -o "$AMMINISTRATORE" -g "$GRUPPO_ADM" "$DIR_SSH_ADM"
+            fi
+            tmp=$(mktemp)
+            cat "$AK" 2>/dev/null > "$tmp" || true
+            printf '%s\n' "$CHIAVE_ADMIN" >> "$tmp"
+            installa "$tmp" "$AK" 600 \
+                     "chiave dell'amministratore: aggiunta a $AK" \
+                     "$AMMINISTRATORE" "$GRUPPO_ADM"
+        fi
+    fi
+fi
+
+# --- 3. La chiave del servizio -------------------------------------------- #
 
 ATTUALE=""
 if [ -s "$CHIAVE_SERVIZIO" ]; then
@@ -452,22 +657,20 @@ if da_compilare "La chiave del canale di servizio" "$ATTUALE"; then
     if [ -z "$CHIAVE" ] && interattivo; then
         printf '\nLA CHIAVE PUBBLICA DEL CANALE DI SERVIZIO.\n'
         printf 'È con questa che Hermes, dal tuo PC, parlerà con questo server.\n'
-        printf 'Va generata sulla POSTAZIONE, non qui, e di quella coppia serve\n'
-        printf 'solo la parte pubblica: il contenuto del file .pub.\n'
-        printf 'Puoi indicare un percorso di file oppure incollare il testo.\n'
-        printf 'Riconoscila dal COMMENTO: le due chiavi che hai generato hanno la\n'
-        printf 'stessa forma e la stessa lunghezza, e si distinguono solo da lì.\n'
-        printf '    ssh-ed25519 AAAA…  hermes-core@…   <- questa, del servizio\n'
-        printf '    ssh-ed25519 AAAA…  tuoutente@…     <- la tua, NON va qui\n'
-        suggerimento 'type $env:USERPROFILE\.ssh\id_ed25519_hermes_VM.pub' \
-                     'da eseguire SULLA POSTAZIONE, non qui (su Linux: cat ~/.ssh/....pub)'
+        printf 'Generata sulla POSTAZIONE al passo 4. Incolla la riga intera del\n'
+        printf 'file .pub, oppure indica il percorso del file.\n'
+        printf 'Riconoscila dal commento: le due chiavi hanno la stessa forma.\n'
+        printf '    ssh-ed25519 AAAA…  %s…  <- questa, del servizio\n' "$COMMENTO_SERVIZIO"
+        printf '    ssh-ed25519 AAAA…  %s…        <- la tua, NON qui\n' "$COMMENTO_ADMIN"
+        suggerimento 'type "$env:USERPROFILE\.ssh\id_ed25519_hermes_$VM.pub"' \
+                     'da eseguire SULLA POSTAZIONE, nella finestra del passo 4'
     fi
-    chiedi CHIAVE "  chiave pubblica:" valida_chiave --chiave
+    chiedi CHIAVE "  chiave pubblica del servizio:" valida_chiave_servizio --chiave
 
-    # Il commento della chiave è l'unico modo che hai di riconoscerla dopo:
-    # mostrarlo evita di installare quella sbagliata fra due simili.
-    COMMENTO=$(printf '%s' "$CHIAVE" | cut -d' ' -f3-)
-    [ -n "$COMMENTO" ] && printf '  chiave riconosciuta: %s\n' "$COMMENTO"
+    # Commento e impronta sono l'unico modo di riconoscere la chiave dopo:
+    # mostrarli evita di installare quella sbagliata fra due identiche a
+    # occhio. L'impronta si confronta con `ssh-keygen -l -f` sulla postazione.
+    printf '  riconosciuta: %s  %s\n' "$(commento_di "$CHIAVE")" "$(impronta "$CHIAVE")"
 
     if [ "$PROVA" = no ]; then
         install -d -m 755 -o root -g root "$DIR_CHIAVI"
@@ -499,7 +702,7 @@ if da_compilare "Il perimetro dei bersagli" "$ATTUALE"; then
         printf '\nQUALI MACCHINE I TOOL POTRANNO ANALIZZARE.\n'
         printf 'Si dichiarano per rete, non una per una. Tutto ciò che sta fuori\n'
         printf 'viene rifiutato, anche se qualcuno lo chiede esplicitamente.\n'
-        printf 'Esempio: 192.168.56.0/24 vale tutta la sottorete .56.\n'
+        printf 'Esempio: 192.0.2.0/24 vale tutti gli indirizzi da 192.0.2.0 a 192.0.2.255.\n'
         printf 'Più reti: separate da virgola.\n'
         suggerimento "ip -o route show scope link | awk '{print \$1}'" \
                      'le reti a cui questa macchina è attaccata: di solito una sola serve'
@@ -511,7 +714,7 @@ if da_compilare "Il perimetro dei bersagli" "$ATTUALE"; then
         printf "Servono a scrivere 'lab-web' nei comandi invece di ricordarti\n"
         printf "l'indirizzo. Non c'è nessuna risoluzione DNS: la corrispondenza\n"
         printf 'fra nome e indirizzo la decidi qui, e non cambia sotto i piedi.\n'
-        printf 'Esempio: lab-web=192.168.56.20,lab-db=192.168.56.21\n'
+        printf 'Esempio: lab-web=192.0.2.20,lab-db=192.0.2.21\n'
         printf 'Invio per non definirne nessuno.\n'
         suggerimento 'ip neigh' \
                      'le macchine che questa VM ha già visto parlare: non è un inventario'
@@ -632,7 +835,7 @@ if [ -z "$INTERFACCIA" ] && [ -z "$INDIRIZZO" ] && interattivo; then
     printf 'Invio per restare in DHCP, sapendo che cambierà.\n'
     suggerimento 'ip -br a' \
                  "l'interfaccia da cui ti raggiunge la postazione, non quella che porta internet"
-    printf '  interfaccia (per esempio enp0s8): '
+    printf '  interfaccia: '
     read -r INTERFACCIA || INTERFACCIA=""
 fi
 
@@ -669,8 +872,12 @@ fi
 
 # --- Cio' che resta ------------------------------------------------------- #
 
+NOME_VM=$(uname -n)
 promemoria "il ricarico di sshd. Questo script non lo fa di proposito: va
-      fatto DOPO aver verificato la chiave, e non prima.
+      fatto DOPO aver verificato la tua chiave da una finestra nuova, con il
+      blocco Host qui sotto già scritto sulla postazione:
+      ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no $NOME_VM
+      e solo se entra:
       sudo sshd -t && sudo systemctl reload ssh"
 promemoria "il preflight, come utente di servizio, che è il criterio di
       accettazione:
@@ -688,4 +895,30 @@ if [ -n "$RESTA" ]; then
     printf '\nVERIFICATO ORA, E MANCA:\n%s' "$RESTA"
 fi
 printf '\nQUESTO SCRIPT NON LI FA — di proposito:\n%s' "$PROMEMORIA"
+
+# Il blocco Host del passo 7, già compilato.
+#
+# Era l'ultimo punto della procedura con dei segnaposti da riempire a mano, e
+# il peggiore: nome, indirizzo e utente sono tre valori che questa macchina
+# conosce e la persona deve ricordare - e l'indirizzo, in particolare, cambia
+# a metà procedura, dal DHCP all'indirizzo fisso. Lo scrive chi sa i valori.
+FISSO=""
+if [ -n "$INDIRIZZO" ]; then
+    FISSO=${INDIRIZZO%/*}
+elif [ -f "$NETPLAN" ]; then
+    FISSO=$(sed -n 's|^ *- *\([0-9.]*\)/[0-9]*$|\1|p' "$NETPLAN" 2>/dev/null | head -1)
+fi
+printf '\nPER IL PASSO 7 — sulla POSTAZIONE, in PowerShell:\n\n'
+printf '%s\n' 'Add-Content -Path "$env:USERPROFILE\.ssh\config" -Value @'"'"
+printf '\n'
+printf 'Host %s\n' "$NOME_VM"
+printf '    HostName %s\n' "${FISSO:-INDIRIZZO-DELLA-VM}"
+printf '    User %s\n' "${AMMINISTRATORE:-UTENTE}"
+printf '    IdentityFile ~/.ssh/id_ed25519_%s_admin\n' "$NOME_VM"
+printf '    IdentitiesOnly yes\n'
+printf '%s\n' "'"'@'
+if [ -z "$FISSO" ]; then
+    printf '\nNessun indirizzo fisso configurato: al posto di INDIRIZZO-DELLA-VM\n'
+    printf 'metti quello attuale, sapendo che il DHCP può cambiarlo.\n'
+fi
 printf '========================================================================\n'
