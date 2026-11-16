@@ -697,7 +697,9 @@ compare solo al riavvio successivo.
 
 > **Misto.** Il bootstrap genera `/etc/hermes/scope.toml` dal modello con
 > le reti a `DA_COMPILARE`, che il caricatore **rifiuta**: finché restano
-> così il server non parte. Le reti vere le mette l'operatore.
+> così il server non parte. Le reti vere le mette l'operatore. I prefissi di
+> percorso nel modello sono **commentati**: servono solo a chi registra un
+> tool che punta a un file.
 
 Serve solo se almeno un tool dichiara `target_kind` diverso da `"none"`. Finché
 nessuno lo fa — come in Milestone 0 con `echo.ping` — si può saltare, e il
@@ -763,6 +765,75 @@ Due regole che il caricamento impone, e che fa fallire l'avvio se violate:
 
 Nel log restano entrambi: il nome chiesto dal modello e l'indirizzo raggiunto.
 
+### I bersagli di tipo percorso
+
+Un tool che analizza un binario non punta a un host: punta a un **file**.
+Dichiara `target_kind = "path"`, e il suo perimetro è una lista di prefissi
+nello stesso file:
+
+```toml
+reti = ["192.168.205.0/24"]
+percorsi = ["/srv/lab/campioni"]     # PRIMA di [alias]
+
+[alias]
+lab-web = "192.168.205.20"
+```
+
+> **`percorsi` va scritta prima dell'intestazione `[alias]`.** In TOML una
+> chiave scritta dopo un'intestazione appartiene a quella tabella: in fondo al
+> file verrebbe letta come un alias di nome «percorsi». Il caricatore lo
+> rifiuta e lo dice, ma è più semplice non arrivarci.
+
+La chiave è **opzionale**: un file senza `percorsi` carica come prima, e
+niente di ciò che riguarda reti e alias cambia.
+
+Le regole che il caricamento impone, ciascuna con il proprio messaggio:
+
+| Regola | Perché |
+|---|---|
+| assoluto | un prefisso relativo cambierebbe significato con la directory di lavoro di chi lo legge |
+| mai `/` | la radice come prefisso è un perimetro che non limita niente |
+| niente `..`, niente `.`, niente barre doppie | una sola forma per prefisso; si rifiuta invece di normalizzare |
+| nessuna barra finale | `/srv/lab` e `/srv/lab/` sarebbero due voci per lo stesso confine |
+| solo alfanumerici, `.`, `_`, `-` | il prefisso finisce in una direttiva di montaggio, dove spazio e `:` sono sintassi |
+| unici | una voce doppia è quasi sempre una voce sbagliata |
+
+E una che il file non può verificare ma la macchina sì: il prefisso deve
+**esistere e non essere un symlink**. Si dichiara il percorso reale. Lo
+controllano il preflight, il gate a ogni invocazione, e il wrapper prima di
+montare.
+
+**Due strati, non uno.** Per le reti la tentazione era il DNS; per i percorsi
+si chiama symlink: un percorso può dire una cosa e portare altrove.
+
+1. **Il gate risolve e confronta.** Il percorso chiesto viene risolto —
+   symlink seguiti, `..` eliminati — e si confronta **il risolto** con i
+   prefissi. Al tool arriva il risolto. Un symlink dentro il perimetro che
+   punta fuori viene rifiutato, e il motivo riporta dove portava.
+2. **Il wrapper monta solo il perimetro.** Fra il controllo e l'uso resta una
+   finestra, perché un symlink si può sostituire dopo che è stato guardato.
+   Quindi il tool parte in un'unità in cui, del filesystem, esistono soltanto
+   i prefissi dichiarati e il sistema di base (§6.2): un percorso fuori
+   perimetro lì non è vietato, **non esiste**. Lo applica il kernel, e la
+   finestra non ha niente su cui aprirsi.
+
+Il secondo strato è quello che conta, ed è il motivo per cui **senza
+`tool_runner` un tool di tipo percorso non è invocabile**: il gate rifiuta,
+invece di affidarsi alla sola risoluzione.
+
+Nel log restano entrambi: il percorso chiesto nel campo `target`, quello
+risolto nel `detail` (`percorso risolto: …`) — sempre, anche quando
+coincidono, perché una riga che lo omette non si distingue da una che non
+l'ha registrato.
+
+Tenerli stretti vale più che per le reti: ogni prefisso è un pezzo di disco
+che **ogni** tool di questo tipo può leggere. Mai una directory che contiene
+altro oltre ai campioni.
+
+Manca di proposito un `target_kind = "process"`: per un processo il confine è
+l'isolamento, non una lista — un PID è effimero e viene riciclato. Il
+ragionamento è in `docs/vocabolari-condivisi.md`.
+
 ### Cosa succede quando manca
 
 Tre casi distinti, e tenerli distinti è il punto:
@@ -772,6 +843,9 @@ Tre casi distinti, e tenerli distinti è il punto:
 | `scope_file` non configurato, nessun tool con bersaglio | Il server funziona. Avviso nel preflight, `scope_configured: false` nel catalogo |
 | `scope_file` non configurato, ma un tool dichiara un bersaglio | Quel tool **non è invocabile**: il gate rifiuta, e il preflight dà errore. L'assenza di perimetro non vale come «tutto ammesso» |
 | `scope_file` configurato e non caricabile | **Il server non parte.** Un perimetro promesso e non applicabile è peggio di uno assente, perché nessuno sa di averlo perso |
+| Un tool di tipo percorso, ma nessun prefisso in `percorsi` | Quel tool **non è invocabile**, e il preflight dà errore. L'assenza di prefissi non vale come «tutto ammesso» |
+| Un tool di tipo percorso, ma `tool_runner` non configurato | Quel tool **non è invocabile**: il confinamento dei percorsi lo applica il wrapper |
+| Un prefisso che non esiste, o è un symlink | Il gate non lo usa per ammettere nulla, e il wrapper **non avvia** nessun tool di tipo percorso finché non torna |
 
 ### Come arriva il bersaglio al tool
 
@@ -829,6 +903,54 @@ contattato.
 reale: è l'unico modo di riesercitare il perimetro dopo una modifica alla
 configurazione o un aggiornamento, e l'alternativa è ricrearlo ogni volta.
 Quando arriva un tool con un bersaglio vero, va tolto.
+
+#### Il perimetro dei percorsi
+
+Se il file dichiara `percorsi`, il referto guadagna due voci: `perimetro dei
+percorsi`, con i prefissi caricati, e `montaggio ristretto dei percorsi`, che
+è una **misura** e non un'ispezione (§6.7).
+
+Il collaudo vero, però, è uno script a parte, perché deve fare ciò che un
+preflight non fa — creare un symlink dentro il perimetro e provare a uscirne:
+
+```sh
+sudo bin/hermes-collauda-percorsi
+```
+
+Percorre la catena reale — wrapper installato, file di perimetro vero, unità
+transiente sotto `hermes-tool` — e al posto di un tool mette una sonda che
+legge un byte. Nove prove, in due gruppi, e l'ordine è il punto:
+
+| Unità | Prova | Atteso |
+|---|---|---|
+| normale | file fuori perimetro, symlink che esce, file di perimetro, scrittura | **riescono** |
+| ristretta | file dentro il perimetro | si apre |
+| ristretta | file fuori perimetro | **non si apre** |
+| ristretta | symlink dentro il perimetro che punta fuori | **non dà accesso** |
+| ristretta | il file di perimetro | **non si apre** |
+| ristretta | scrittura nel perimetro | **negata** (sola lettura) |
+
+Il primo gruppo è il controllo del controllo: un «non si apre» non prova
+niente se quel file non si aprirebbe comunque. Se i controlli non riescono lo
+script **si ferma e lo dice**, invece di contare come successo un rifiuto che
+arriva dai permessi.
+
+Crea una directory `.hermes-collaudo-<pid>` nel primo prefisso e un file in
+`/var/lib`, e li rimuove all'uscita. Non in `/tmp`: l'unità ristretta ha un
+`/tmp` privato, e un file lì sparirebbe per quel motivo e non per il
+perimetro — la prima versione dello script lo faceva, e passava anche con il
+montaggio tolto dal wrapper.
+
+Per esercitare il **gate**, e non solo il kernel, c'è `echo.percorso`: in
+`config/hermes.example.toml` è un blocco commentato accanto a
+`echo.bersaglio`, con `target_kind = "path"`.
+
+| Invocazione | Atteso |
+|---|---|
+| `echo.percorso` su un file dentro un prefisso | `ok`, `args` contiene `["--percorso", "--", "<percorso risolto>"]`, e nel log `percorso risolto: …` |
+| `echo.percorso` su `/etc/hostname` | `denied`, con `fuori dal perimetro dei percorsi` |
+| `echo.percorso` su un symlink dentro il prefisso che punta a `/etc/hostname` | `denied`, e il motivo dice `risolve in /etc/hostname` |
+| `echo.percorso` su un percorso che non esiste | `denied`, `non è risolvibile` |
 
 ---
 
@@ -919,6 +1041,60 @@ misura onesta; un tetto stretto indovinato è il primo scan ucciso a metà, con
 un sintomo — un figlio morto con un codice strano — che non punta alla causa.
 Si stringono quando c'è qualcosa da misurare: è una voce aperta in
 `docs/debito-sicurezza.md`.
+
+#### Il montaggio ristretto, per i bersagli di tipo percorso
+
+Per un tool con `target_kind = "path"` il gate aggiunge una parola,
+`--percorsi`, e il wrapper aggiunge quattro direttive:
+
+```
+hermes-tool-run <unità> <timeout> --percorsi -- <comando>
+
+    -p TemporaryFileSystem=/:ro \
+    -p BindReadOnlyPaths="/usr -/bin -/sbin -/lib -/lib64 -/etc/ld.so.cache \
+                          -/etc/alternatives <directory degli script> <prefissi…>" \
+    -p PrivateTmp=yes -p PrivateDevices=yes
+```
+
+`TemporaryFileSystem=/:ro` dà all'unità uno spazio dei nomi di mount in cui la
+radice è un tmpfs vuoto e in sola lettura; `BindReadOnlyPaths` ci rimette
+dentro, in sola lettura, solo ciò che è elencato. Tutto il resto — `/home`,
+`/var`, `/proc`, `/sys`, il resto di `/etc`, il log d'audit, lo stato del
+servizio, il perimetro stesso — per il tool **non esiste**. Un symlink che
+punta fuori non è bloccato: non risolve.
+
+**I prefissi non arrivano dal chiamante.** Dal gate parte solo `--percorsi`;
+*quali* percorsi montare il wrapper lo legge da `/etc/hermes/scope.toml`, che
+è una costante al suo interno come l'uid. Se li passasse il chiamante, sarebbe
+il chiamante a disegnare il proprio confine. Ne segue un vincolo, che il
+preflight verifica: `server.scope_file` deve essere **quel** file, altrimenti
+il gate validerebbe contro un perimetro e il kernel ne monterebbe un altro.
+
+Il wrapper ricontrolla le regole di forma anche se il server le ha già
+applicate — è il punto in cui i prefissi diventano mount, e gira da root — e
+pretende che il file sia di root e non scrivibile da altri. Qualunque cosa non
+torni, **muore prima di avviare l'unità** (esito 64, il motivo su stderr): non
+ricade sull'unità senza montaggio.
+
+Tre cose da sapere su ciò che resta visibile:
+
+* **Il sistema di base.** `/usr` e i suoi alias, `/etc/ld.so.cache`,
+  `/etc/alternatives`: senza, l'interprete non parte. Un symlink dal perimetro
+  verso `/usr` quindi risolve — ci trova, in sola lettura, ciò che il tool
+  vede comunque. L'interprete dei tool (`tool_python`) deve stare sotto
+  `/usr`: un virtualenv nel repo, nell'unità, non c'è.
+* **La directory degli script.** Il tool deve poter leggere se stesso. Dove sta
+  il repo è un fatto dell'installazione, quindi non una costante: il bootstrap
+  lo scrive in `/etc/hermes/radice-script`, di root, una riga.
+* **`/tmp` e `/dev`** sono privati dell'unità e spariscono con lei.
+
+Tre cose che **non** dà, e che arriveranno col primo tool reale: una directory
+di lavoro scrivibile (Ghidra ne ha bisogno), `/proc` (GDB e Frida ne hanno
+bisogno — ed è il motivo per cui `process` è un altro tipo di bersaglio), e
+il confinamento della rete, che resta una voce aperta del debito.
+
+I tool senza bersaglio e quelli di tipo `host` non ricevono l'opzione, e la
+loro unità è quella di prima.
 
 ### 6.3 Il privilegio concesso
 
@@ -1072,6 +1248,14 @@ consumo di picco.
 Guadagno collaterale: un processo rimasto in giro si ricollega all'invocazione
 che l'ha generato. Prima un orfano era anonimo.
 
+Due esiti in più, per i tool di tipo percorso:
+
+| Esito | Chi lo produce | Significato |
+|---|---|---|
+| `64` | il wrapper | il montaggio ristretto non è applicabile — un prefisso che non esiste o è un symlink, un perimetro non di root. Il motivo è su stderr, e il tool **non è partito** |
+| `226` | systemd | l'unità non è riuscita a costruire lo spazio dei nomi di mount. Il journal dell'unità dice quale percorso |
+| `203` | systemd | l'eseguibile non esiste **dentro l'unità**: tipicamente un interprete fuori da `/usr` |
+
 ### 6.7 Verificare
 
 ```sh
@@ -1083,6 +1267,24 @@ Cinque controlli distinti, e sono distinti di proposito: il wrapper esiste ed
 è di root; l'utente dei tool esiste e non ha shell; `sudo -n` sul wrapper
 riesce **senza password**; `hermes-tool` riesce ad aprire gli script
 registrati; log e stato restano fuori dalla portata dei tool.
+
+Se il perimetro dichiara dei `percorsi` ce n'è un sesto, `montaggio ristretto
+dei percorsi`, ed è una sonda come la terza e la quarta. Tre letture
+attraverso la catena del gate:
+
+1. il file di perimetro **senza** montaggio ristretto — deve aprirsi. Se non
+   si aprisse, il rifiuto del punto 2 arriverebbe dai permessi e non proverebbe
+   niente: in quel caso il referto dice *non verificabile*, non *verificato*;
+2. lo stesso file **con** il montaggio — non deve aprirsi. Sta fuori da ogni
+   prefisso ed è leggibile da tutti: se dall'unità non c'è, è il montaggio ad
+   averlo tolto;
+3. uno script registrato, con il montaggio — deve aprirsi, altrimenti il
+   confine c'è ma il tool non partirebbe.
+
+Prima di sondare verifica due cose leggendo il wrapper **installato**: che
+conosca il montaggio (dopo un aggiornamento del repo può essere ancora quello
+precedente, ed è lui che gira) e che legga lo stesso file di perimetro che
+carica il server.
 
 Le ultime due del primo gruppo sono sonde vere, non ispezioni.
 
@@ -1152,6 +1354,22 @@ sudo setfacl -x u:hermes-tool /opt/hermes-core
 sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml | grep -iA6 lettura
 sudo setfacl -m u:hermes-tool:--x /opt/hermes-core   # ripristino
 ```
+
+Il montaggio ristretto si esercita con lo script di collaudo (§5), che fa ciò
+che il preflight non fa: crea un symlink e prova a uscire. Per vederlo dire
+no, il modo più diretto è dichiarare come prefisso un symlink:
+
+```sh
+sudo ln -s /etc /srv/finto-lab
+# in /etc/hermes/scope.toml:  percorsi = ["/srv/finto-lab"]
+sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml | grep -iA4 percors
+sudo bin/hermes-collauda-percorsi; echo "esito $?"
+sudo rm /srv/finto-lab                 # ripristino, e rimettere il prefisso vero
+```
+
+Deve dare `perimetro dei percorsi` con `risolve in /etc`, e il wrapper che
+rifiuta di avviare l'unità: un prefisso symlink monterebbe la propria
+destinazione.
 
 ---
 

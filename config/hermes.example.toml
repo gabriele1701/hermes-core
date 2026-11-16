@@ -69,7 +69,8 @@ log_path = "../logs/hermes-audit.jsonl"
 #
 # state_dir = "/var/lib/hermes/state"
 
-# Perimetro dei bersagli ammessi: reti e alias che i tool possono toccare.
+# Perimetro dei bersagli ammessi: reti, alias e prefissi di percorso che i
+# tool possono toccare.
 # Modello in config/scope.example.toml.
 #
 # Serve ai tool che dichiarano `target_kind` diverso da "none". Senza questa
@@ -242,3 +243,28 @@ description = "Agente dummy: restituisce un risultato conforme al contratto."
 # target_kind = "host"
 # exec_args = ["--bersaglio"]
 # description = "Dummy che accetta un bersaglio: serve a verificare il perimetro."
+
+# Lo stesso dummy con un bersaglio di tipo PERCORSO: serve a esercitare il
+# perimetro dei percorsi come `echo.bersaglio` esercita quello di rete.
+#
+# target_kind = "path" richiede tre cose, e il preflight le verifica tutte:
+# almeno un prefisso in `percorsi` nel file di perimetro, `tool_runner`
+# configurato, e il wrapper installato aggiornato. Senza il wrapper il gate
+# RIFIUTA: il confinamento dei percorsi è il montaggio dell'unità in cui il
+# tool gira, e senza resterebbe solo un controllo prima dell'uso.
+#
+# Lo script riceve: --percorso -- <percorso risolto>. Non apre il file: lo
+# stampa. Per vedere il kernel dire di no a una lettura c'è
+# `sudo bin/hermes-collauda-percorsi`.
+
+# [[tool]]
+# tool_id = "echo.percorso"
+# owner_agent = "echo_dummy"
+# default_tier = "verde"
+# personal_data = false
+# requires_container = false
+# exec_path = "agents/echo_agent/run.py"
+# exec_sha256 = "<lo stesso SHA di sopra>"
+# target_kind = "path"
+# exec_args = ["--percorso"]
+# description = "Dummy che accetta un percorso: serve a verificare il perimetro dei percorsi."

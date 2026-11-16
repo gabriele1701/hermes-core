@@ -105,6 +105,7 @@ from mcp_server.contracts import (
     CallOutcome,
     OwnerAgent,
     RiskTier,
+    TargetKind,
     ToolCall,
     ToolSpec,
 )
@@ -146,6 +147,13 @@ PREFISSO_UNITA = "hermes-tool"
 #: terminare l'albero dentro il cgroup. Il timeout del gate resta la rete di
 #: riserva che scatta solo se systemd ha fallito.
 MARGINE_TEMPO_LIMITE = 5
+
+#: Opzione con cui il gate chiede al wrapper l'unità col montaggio ristretto
+#: ai prefissi del perimetro. Dal gate parte SOLO questa parola: quali
+#: prefissi montare lo legge il wrapper dal file di root, non da argv. È la
+#: regola di A1 — la policy sta nel wrapper, non negli argomenti — e un test
+#: della suite verifica che la parola sia la stessa nei due file.
+OPZIONE_PERCORSI = "--percorsi"
 
 
 # --------------------------------------------------------------------------- #
@@ -437,6 +445,20 @@ class PreparedExecution:
     #: toccato.
     target_risolto: str | None = None
 
+    @property
+    def nota_risolto(self) -> str:
+        """Coda per il ``detail`` del log: il percorso risolto, se è un percorso.
+
+        Per un bersaglio di tipo percorso la riga di audit porta il valore
+        chiesto nel campo ``target`` e quello risolto qui, sempre e non solo
+        quando differiscono: una riga che lo omette quando coincidono non si
+        distingue da una riga che non l'ha registrato. Per gli altri kind è
+        vuota — il loro ``detail`` non cambia.
+        """
+        if self.spec.target_kind is TargetKind.PATH and self.target_risolto:
+            return f"; percorso risolto: {self.target_risolto}"
+        return ""
+
 
 # --------------------------------------------------------------------------- #
 # Integrità
@@ -690,6 +712,24 @@ class ToolExecutor:
                 )
                 self._nega(spec, agent, tier, correlation_id, target, motivo)
                 raise ToolRunnerUnusable(motivo)
+        elif spec.target_kind is TargetKind.PATH:
+            # Il perimetro dei percorsi ha due strati, e quello che chiude la
+            # finestra fra controllo e uso è il montaggio dell'unità, che
+            # esiste solo col wrapper. Senza, resterebbe la sola risoluzione
+            # fatta qui sopra: un controllo in userspace che un symlink
+            # sostituito al momento giusto supera. Stessa regola del
+            # container: un confine promesso dal tipo di bersaglio e non
+            # applicabile nega, non degrada.
+            motivo = (
+                "il tool ha un bersaglio di tipo percorso, e il confinamento "
+                "dei percorsi lo applica il wrapper dei tool: "
+                "server.tool_runner non è configurato. Invocazione rifiutata, "
+                "non eseguita: senza il montaggio ristretto il perimetro "
+                "sarebbe solo un controllo prima dell'uso. Riprovare non "
+                "cambia l'esito."
+            )
+            self._nega(spec, agent, tier, correlation_id, target, motivo)
+            raise ToolRunnerUnusable(motivo)
 
         # 5. Isolamento nel container: mai degradare silenziosamente verso l'host.
         if spec.requires_container and not self._container_available:
@@ -748,6 +788,11 @@ class ToolExecutor:
                 detail=(
                     f"conferma richiesta e non fornita: tecnica="
                     f"{policy.technical}, dedicata={policy.personal}"
+                    + (
+                        f"; percorso risolto: {target_risolto}"
+                        if spec.target_kind is TargetKind.PATH and target_risolto
+                        else ""
+                    )
                 ),
             )
             raise ConfirmationRequired(
@@ -916,6 +961,14 @@ class ToolExecutor:
                 str(self._tool_runner),
                 unita,
                 str(max(1, timeout - MARGINE_TEMPO_LIMITE)),
+                # Solo per i bersagli di tipo percorso: l'unità parte con il
+                # filesystem ridotto ai prefissi del perimetro. Per ogni
+                # altro tool la riga di comando è quella di prima.
+                *(
+                    (OPZIONE_PERCORSI,)
+                    if pronta.spec.target_kind is TargetKind.PATH
+                    else ()
+                ),
                 "--",
                 *argv,
             ]
@@ -934,7 +987,7 @@ class ToolExecutor:
             # l'unità.
             self._ferma_unita(unita, correlation_id)
             return self._esito_non_riuscito(
-                pronta, f"timeout dopo {timeout}s", "timeout"
+                pronta, f"timeout dopo {timeout}s{pronta.nota_risolto}", "timeout"
             )
         except BaseException as err:
             # BaseException e non Exception: anche un KeyboardInterrupt o un
@@ -942,7 +995,8 @@ class ToolExecutor:
             # essere ri-sollevato.
             call, risultato = self._esito_non_riuscito(
                 pronta,
-                f"errore del runner dopo lo spawn: {type(err).__name__}",
+                f"errore del runner dopo lo spawn: {type(err).__name__}"
+                f"{pronta.nota_risolto}",
                 type(err).__name__,
             )
             if not isinstance(err, Exception):
@@ -957,6 +1011,7 @@ class ToolExecutor:
         detail = f"exit={esito.returncode}"
         if esito.truncated:
             detail += f"; output troncato a {self._max_output_bytes} byte per stream"
+        detail += pronta.nota_risolto
         call = self._traccia(pronta, outcome, detail)
         self._log_call(call, pronta)
         return call, esito
@@ -1026,6 +1081,7 @@ __all__ = [
     "ConcurrencyLimitReached",
     "ConfirmationRequired",
     "ContainerUnavailable",
+    "OPZIONE_PERCORSI",
     "ExecutionError",
     "IntegrityMismatch",
     "PreparedExecution",

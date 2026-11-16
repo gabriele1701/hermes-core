@@ -40,6 +40,7 @@ from mcp_server.config import (
 )
 from mcp_server.contracts import RiskTier, ToolSpec
 from mcp_server.executor import (
+    OPZIONE_PERCORSI,
     PREFISSO_UNITA,
     SUDO,
     _wrapper_inutilizzabile,
@@ -1894,6 +1895,8 @@ def _perimetro(referto: Referto, cfg: ServerConfig, percorso_config: Path) -> No
             f"dell'integrità e prima di qualunque conferma",
         )
 
+    _perimetro_dei_percorsi(referto, cfg, perimetro)
+
     # Il confine, misurato: chi usa il perimetro non deve poterlo ampliare.
     # Controllo a sé e senza uscita anticipata — il contenuto del perimetro e
     # la proprietà del file sono due fatti diversi, e chi legge il referto ha
@@ -1911,6 +1914,264 @@ def _perimetro(referto: Referto, cfg: ServerConfig, percorso_config: Path) -> No
             f"sudo chown root: {cfg.scope_file} && "
             f"sudo chmod 644 {cfg.scope_file}",
         )
+
+
+def _tool_con_percorso(cfg: ServerConfig) -> list[str]:
+    """I tool registrati il cui bersaglio è di tipo percorso."""
+    return sorted(
+        str(t.get("tool_id", "?"))
+        for t in cfg.tools
+        if str(t.get("target_kind", "none")) == "path"
+    )
+
+
+def _prefissi_non_utilizzabili(prefissi: tuple[str, ...]) -> list[str]:
+    """I prefissi che su questa macchina non delimitano ciò che dichiarano.
+
+    Il caricatore guarda la forma e non tocca il filesystem; qui si guarda la
+    macchina. Un prefisso che non esiste non ammette niente, e uno che è un
+    symlink ammetterebbe la propria destinazione: il gate non li usa e il
+    wrapper si rifiuta di montarli, quindi vanno detti prima.
+    """
+    problemi = []
+    for prefisso in prefissi:
+        try:
+            reale = os.path.realpath(prefisso, strict=True)
+        except OSError:
+            problemi.append(f"{prefisso} non esiste o non è risolvibile")
+            continue
+        if reale != prefisso:
+            problemi.append(f"{prefisso} risolve in {reale}")
+    return problemi
+
+
+def _perimetro_dei_percorsi(
+    referto: Referto, cfg: ServerConfig, perimetro: ScopeAllowlist
+) -> None:
+    """Il perimetro dei bersagli di tipo percorso, come già reti e alias.
+
+    Non aggiunge nulla al referto quando non c'è niente da dire: un perimetro
+    senza ``percorsi`` e senza tool che ne abbiano bisogno è il perimetro di
+    prima, e il suo referto resta quello di prima.
+
+    Qui sta la parte che si legge dal file e dal filesystem. La parte che si
+    **misura** — che dall'unità ristretta un percorso fuori perimetro non si
+    apra — passa dal wrapper e sta in :func:`_montaggio_dei_percorsi`.
+    """
+    con_percorso = _tool_con_percorso(cfg)
+    if not perimetro.percorsi and not con_percorso:
+        return
+
+    if not perimetro.percorsi:
+        referto.aggiungi(
+            "perimetro dei percorsi",
+            Esito.ERRORE,
+            f"{cfg.scope_file} non dichiara nessun prefisso in 'percorsi', ma "
+            f"{len(con_percorso)} tool hanno un bersaglio di tipo percorso "
+            f"({', '.join(con_percorso)}): non sono invocabili",
+            "Dichiarare i prefissi ammessi (vedere config/scope.example.toml).\n"
+            "             La chiave va scritta PRIMA dell'intestazione [alias].\n"
+            "             L'assenza di prefissi non vale come «tutto ammesso».",
+        )
+    else:
+        problemi = _prefissi_non_utilizzabili(perimetro.percorsi)
+        if problemi:
+            referto.aggiungi(
+                "perimetro dei percorsi",
+                # Senza tool che lo usino è un file da correggere, non un
+                # servizio che non funziona.
+                Esito.ERRORE if con_percorso else Esito.AVVISO,
+                f"prefissi dichiarati e non utilizzabili su questa macchina: "
+                f"{'; '.join(problemi)}",
+                "Un prefisso deve esistere e non essere un symlink: va "
+                "dichiarato il percorso reale.\n"
+                "             Finché uno solo non torna, il wrapper non avvia "
+                "nessun tool con bersaglio di tipo percorso.",
+            )
+        else:
+            referto.aggiungi(
+                "perimetro dei percorsi",
+                Esito.OK,
+                f"prefissi: {', '.join(perimetro.percorsi)} · due strati: il "
+                f"gate risolve e confronta, il wrapper monta solo questi",
+            )
+
+    if con_percorso and cfg.tool_runner is None:
+        referto.aggiungi(
+            "tool con bersaglio di tipo percorso",
+            Esito.ERRORE,
+            f"{', '.join(con_percorso)}: non invocabili, perché "
+            f"server.tool_runner non è configurato e il confinamento dei "
+            f"percorsi lo applica il wrapper",
+            "Senza il montaggio ristretto il perimetro dei percorsi sarebbe "
+            "solo un controllo prima dell'uso: il gate rifiuta.\n"
+            "             Configurare [server] tool_runner — procedura in "
+            "docs/setup-vm-hermes.md §6.",
+        )
+
+
+def _costante_del_wrapper(percorso: Path, nome: str) -> str | None:
+    """Il valore di ``NOME=valore`` nel wrapper installato, o ``None``.
+
+    Si legge il wrapper **installato**, non quello del repo e non una
+    costante di questo modulo: dopo un aggiornamento del repo quello
+    installato può essere ancora il precedente, ed è lui che gira.
+    """
+    try:
+        testo = percorso.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for riga in testo.splitlines():
+        if riga.startswith(f"{nome}="):
+            return riga.split("=", 1)[1].strip()
+    return None
+
+
+def _montaggio_dei_percorsi(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica, leggendo, che il montaggio ristretto confini davvero.
+
+    Chiamata solo dopo che ``sudo`` sul wrapper è riuscito, e solo se il
+    perimetro dichiara dei prefissi: prima non c'è niente da misurare.
+
+    Tre letture attraverso la stessa catena del gate, e la prima è quella che
+    dà senso alle altre:
+
+    1. il file di perimetro **senza** montaggio ristretto → deve aprirsi.
+       È il controllo del controllo: se non si aprisse già così, il rifiuto
+       del punto 2 non proverebbe niente, perché arriverebbe dai permessi.
+    2. lo stesso file **con** il montaggio → non deve aprirsi. Il perimetro
+       sta fuori da ogni prefisso, ed è leggibile da tutti: se da dentro
+       l'unità non c'è, è il montaggio ad averlo tolto.
+    3. uno script registrato, con il montaggio → deve aprirsi, altrimenti il
+       confine c'è ma il tool non partirebbe.
+    """
+    if cfg.scope_file is None or cfg.tool_runner is None:
+        return
+    try:
+        perimetro = ScopeAllowlist.carica(cfg.scope_file)
+    except ScopeError:
+        return  # già riportato da _perimetro, con il suo rimedio
+    if not perimetro.percorsi:
+        return
+
+    nome = "montaggio ristretto dei percorsi"
+    reinstalla = (
+        f"sudo install -m 755 -o root -g root bin/hermes-tool-run "
+        f"{cfg.tool_runner}\n"
+        f"             oppure rieseguire bin/hermes-bootstrap, che lo fa."
+    )
+
+    # -- il wrapper installato conosce il montaggio, e legge lo stesso file -- #
+
+    del_wrapper = _costante_del_wrapper(cfg.tool_runner, "SCOPE_FILE")
+    if del_wrapper is None:
+        referto.aggiungi(
+            nome,
+            Esito.ERRORE,
+            f"{cfg.tool_runner} non conosce il montaggio ristretto: è una "
+            f"versione precedente a quella del repo",
+            reinstalla,
+        )
+        return
+    if Path(del_wrapper) != cfg.scope_file:
+        referto.aggiungi(
+            nome,
+            Esito.ERRORE,
+            f"il server valida contro {cfg.scope_file}, il wrapper monta i "
+            f"prefissi di {del_wrapper}: due file, quindi due perimetri",
+            f"In [server]: scope_file = \"{del_wrapper}\"\n"
+            "             Il percorso nel wrapper è una costante di proposito: "
+            "non è un valore che il chiamante possa scegliere.",
+        )
+        return
+
+    # -- l'interprete deve esistere anche dentro l'unità -------------------- #
+
+    try:
+        interprete = Path(cfg.tool_python).resolve(strict=True)
+    except OSError:
+        interprete = Path(cfg.tool_python)
+    if not interprete.is_relative_to("/usr"):
+        referto.aggiungi(
+            nome,
+            Esito.ERRORE,
+            f"l'interprete dei tool ({interprete}) sta fuori da /usr: "
+            f"nell'unità ristretta non esiste, e il tool non partirebbe",
+            "Nell'unità sono montati /usr, la directory degli script e i "
+            "prefissi del perimetro, nient'altro.\n"
+            "             Usare un interprete di sistema in [server] "
+            "tool_python.",
+        )
+        return
+
+    # -- le tre letture ------------------------------------------------------ #
+
+    esito, motivo = _prova_lettura(cfg, cfg.scope_file)
+    if esito != 0:
+        referto.aggiungi(
+            nome,
+            Esito.AVVISO,
+            f"non verificabile leggendo: {UTENTE_TOOL} non apre "
+            f"{cfg.scope_file} nemmeno senza montaggio ristretto (esito "
+            f"{esito}, {motivo or 'nessun messaggio'}), quindi un rifiuto "
+            f"dall'unità ristretta non proverebbe nulla",
+            f"Il perimetro è pensato leggibile da tutti e scrivibile solo da "
+            f"root: sudo chmod 644 {cfg.scope_file}\n"
+            f"             In alternativa collaudare a mano con "
+            f"bin/hermes-collauda-percorsi.",
+        )
+        return
+
+    esito, motivo = _prova_lettura(cfg, cfg.scope_file, ristretto=True)
+    if esito == 0:
+        referto.aggiungi(
+            nome,
+            Esito.ERRORE,
+            f"dall'unità ristretta {cfg.scope_file} SI APRE: il montaggio "
+            f"non confina, oppure un prefisso del perimetro contiene il "
+            f"perimetro stesso",
+            f"Verificare che nessun prefisso in 'percorsi' contenga "
+            f"{cfg.scope_file.parent}, poi:\n"
+            f"             sudo bin/hermes-collauda-percorsi",
+        )
+        return
+    if esito != ESITO_SONDA_NON_LEGGIBILE:
+        referto.aggiungi(
+            nome,
+            Esito.ERRORE,
+            f"l'unità ristretta non è partita (esito {esito}): "
+            f"{motivo or 'nessun messaggio'}",
+            "Il motivo qui sopra viene dal wrapper. Un esito 226 è systemd "
+            "che non riesce a costruire il montaggio.\n"
+            "             Per vedere ogni passo: sudo bin/hermes-collauda-percorsi",
+        )
+        return
+
+    scripts = sorted(_script_dei_tool(cfg))
+    if scripts:
+        esito, motivo = _prova_lettura(cfg, scripts[0], ristretto=True)
+        if esito != 0:
+            radice = _costante_del_wrapper(cfg.tool_runner, "RADICE_SCRIPT_FILE")
+            referto.aggiungi(
+                nome,
+                Esito.ERRORE,
+                f"il confine c'è, ma dall'unità ristretta lo script "
+                f"{scripts[0]} non si apre (esito {esito}, "
+                f"{motivo or 'nessun messaggio'}): un tool con bersaglio di "
+                f"tipo percorso non partirebbe",
+                f"La directory degli script montata nell'unità è quella "
+                f"scritta in {radice or '/etc/hermes/radice-script'}: deve "
+                f"contenere gli script registrati.\n"
+                f"             La scrive bin/hermes-bootstrap.",
+            )
+            return
+
+    referto.aggiungi(
+        nome,
+        Esito.OK,
+        f"dall'unità ristretta {cfg.scope_file} non si apre, e senza "
+        f"montaggio sì: un byte chiesto davvero, non una direttiva letta",
+    )
 
 
 #: Utente sotto cui girano i tool. **Deve coincidere con `TOOL_UID` nel
@@ -2069,6 +2330,7 @@ def _isolamento_dei_tool(referto: Referto, cfg: ServerConfig) -> None:
             # riportata qui sopra, e un secondo errore sulla stessa causa
             # manda a cercare due guasti dove ce n'è uno.
             _accesso_agli_script(referto, cfg)
+            _montaggio_dei_percorsi(referto, cfg)
         else:
             motivo = (esito.stderr or "").strip().splitlines()
             referto.aggiungi(
@@ -2221,8 +2483,14 @@ def _accesso_agli_script(referto: Referto, cfg: ServerConfig) -> None:
     )
 
 
-def _prova_lettura(cfg: ServerConfig, script: Path) -> tuple[int, str]:
+def _prova_lettura(
+    cfg: ServerConfig, script: Path, *, ristretto: bool = False
+) -> tuple[int, str]:
     """``(esito, motivo)`` dell'apertura di ``script`` come utente dei tool.
+
+    Con ``ristretto`` la sonda parte nell'unità col montaggio ridotto ai
+    prefissi del perimetro, cioè come partirebbe un tool con bersaglio di
+    tipo percorso.
 
     L'unità porta un UUID generato e non ``UNITA_SONDA``: quello è riservato
     alla sonda di autorizzazione, e riusarlo farebbe collidere due preflight
@@ -2234,6 +2502,7 @@ def _prova_lettura(cfg: ServerConfig, script: Path) -> tuple[int, str]:
         str(cfg.tool_runner),
         f"{PREFISSO_UNITA}-{uuid.uuid4()}",
         str(_TEMPO_SONDA_LETTURA),
+        *((OPZIONE_PERCORSI,) if ristretto else ()),
         "--",
         str(cfg.tool_python),
         *cfg.tool_python_flags,

@@ -32,6 +32,48 @@ reti = [
     "DA_COMPILARE",
 ]
 
+# Prefissi di percorso su cui i tool possono agire. OPZIONALE.
+#
+# Serve ai tool che non puntano a un host ma a un FILE: un binario da
+# analizzare, una directory di campioni. Chi non ne registra può lasciare
+# tutto commentato, e il perimetro resta quello di reti e alias.
+#
+# Va scritta QUI, prima dell'intestazione [alias]: in TOML una chiave scritta
+# dopo un'intestazione appartiene a quella tabella, e 'percorsi' in fondo al
+# file verrebbe letta come un alias di nome «percorsi». Il caricatore lo
+# rifiuta e lo dice, ma è più semplice non arrivarci.
+#
+# Le regole, tutte verificate al caricamento, ciascuna col suo motivo:
+#
+#   - assoluto, e mai "/": la radice come prefisso non limita niente;
+#   - in forma canonica: niente "..", niente ".", niente barre doppie;
+#   - nessuna barra finale: "/srv/lab" sì, "/srv/lab/" no;
+#   - solo alfanumerici, ".", "_" e "-": il prefisso finisce in una direttiva
+#     di montaggio, dove lo spazio e i due punti sono sintassi;
+#   - unici.
+#
+# E una che il file non può verificare ma la macchina sì: il prefisso deve
+# ESISTERE e non essere un symlink. Si dichiara il percorso reale. Lo
+# controllano il preflight e il wrapper.
+#
+# Il perimetro dei percorsi ha due strati. Il gate risolve il percorso
+# chiesto — symlink compresi — e confronta il risolto con questi prefissi; e
+# il wrapper avvia il tool in un'unità in cui, del filesystem, esistono SOLO
+# questi prefissi e il sistema di base. Un percorso fuori da qui, per il
+# tool, non è vietato: non c'è. Quindi ogni prefisso in più è un pezzo di
+# disco in più che ogni tool di questo tipo può leggere: tenerli stretti, e
+# mai una directory che contiene altro oltre ai campioni.
+#
+# Nel log restano entrambi — il percorso chiesto e quello risolto.
+#
+# Il valore qui sotto è un segnaposto e DEVE sembrarlo: tolto il commento
+# senza sostituirlo, il caricatore lo rifiuta. Un percorso vero in un file
+# versionato sarebbe il perimetro della macchina di qualcun altro.
+#
+# percorsi = [
+#     "DA_COMPILARE",
+# ]
+
 # Nomi, per non ricordare gli indirizzi a memoria.
 #
 # Qui NON c'è DNS, ed è una scelta: un alias si risolve leggendo questo file,
