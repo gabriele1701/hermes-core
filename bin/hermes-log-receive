@@ -17,7 +17,7 @@
 #
 # Una copia del log fuori dall'host è l'unica cosa che renda una
 # manomissione locale rilevabile invece che solo scomoda: chi prende root su
-# `hermesmcp` può togliere `chattr +a` e riscrivere il log, ma non può
+# il server può togliere `chattr +a` e riscrivere il log, ma non può
 # raggiungere ciò che è già uscito.
 #
 # «Già uscito» è il punto, ed è la ragione per cui si spinge invece di

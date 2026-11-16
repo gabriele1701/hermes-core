@@ -109,6 +109,14 @@ registri**, e da qui in avanti lo registrano la configurazione ssh e, più
 tardi, Hermes. Se preferisci restare in DHCP, salta questo passo, sapendo che
 l'indirizzo cambierà.
 
+Se `ssh` risponde `REMOTE HOST IDENTIFICATION HAS CHANGED`, la postazione
+conosce già quell'indirizzo per un'altra macchina. **Non cancellare la voce
+alla cieca**: confronta l'impronta stampata dall'avviso con quella letta
+dalla console della VM, `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
+Se l'indirizzo è ancora usato dall'altra macchina, è un conflitto: scegline
+un altro e lascia la voce dov'è. Dettagli in
+[§1](docs/setup-vm-hermes.md#se-ssh-dice-che-lidentità-è-cambiata).
+
 **7. Lega la chiave alla VM**, sulla postazione: incolla in PowerShell il
 blocco che il passo 5 ha stampato in fondo, già compilato con il nome,
 l'indirizzo e l'utente di questa macchina. Se l'hai perso, rilancia

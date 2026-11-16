@@ -70,12 +70,14 @@ usata interattivamente, e ogni pacchetto in meno è superficie in meno.
 container dell'agente di pentest serviranno più margine — conviene creare il
 disco già da 40 GB per non doverlo allargare dopo.
 
-**Rete:** sulla stessa rete VMware delle VM di laboratorio, perché dovrà
-raggiungerle, e raggiungibile dalla postazione. Con la **NAT** di VMware la
-postazione arriva alla VM attraverso l'adattatore VMnet8 e le VM sulla stessa
-VMnet sono raggiungibili; **bridged** è l'alternativa più semplice se la VM
-deve essere visibile a tutta la rete; **host-only** la isola dalla rete fisica,
-quindi va scelta solo se i bersagli stanno tutti lì.
+**Rete:** sulla stessa rete dei bersagli, perché dovrà raggiungerli, e
+raggiungibile dalla postazione. I nomi cambiano da un hypervisor all'altro, i
+tre modi no: **NAT** dà internet alla VM ma la postazione la raggiunge solo se
+l'hypervisor lo prevede; **bridged** è l'alternativa più semplice se la VM
+deve essere visibile a tutta la rete; **host-only** la isola dalla rete
+fisica, quindi va scelta solo se i bersagli stanno tutti lì. NAT più
+host-only, su due schede, è un assetto frequente: internet dalla prima, la
+postazione dalla seconda.
 
 ```sh
 sudo apt update && sudo apt upgrade -y
@@ -108,11 +110,12 @@ ip route                                  # gateway: la riga "default via X"
 resolvectl status | grep -i "DNS Servers"
 ```
 
-Con la NAT di VMware il gateway è tipicamente `.2` e il pool DHCP parte da
-`.128`: un indirizzo sotto il pool, come `.10`, è libero. Con una rete
-*bridged* dipende dal router, e vale la pena guardare la sua configurazione —
-oppure usare una **riserva DHCP**, che ha il vantaggio di sopravvivere a una
-reinstallazione della VM.
+Gateway e pool DHCP dipendono dalla rete: su una rete virtuale si leggono
+nelle impostazioni dell'hypervisor, su una *bridged* in quelle del router. Si
+guardano, non si suppongono — ogni prodotto ha i suoi default, e un indirizzo
+«che di solito è libero» è esattamente quello che il riquadro qui sotto
+sconsiglia. In alternativa, una **riserva DHCP** ha il vantaggio di
+sopravvivere a una reinstallazione della VM.
 
 > **Fuori dal pool, non solo «libero adesso».** Congelare come statico un
 > indirizzo che il DHCP può ancora assegnare funziona il primo giorno e si
@@ -131,15 +134,15 @@ network:
   version: 2
   renderer: networkd
   ethernets:
-    ens33:                        # il nome della tua interfaccia
+    INTERFACCIA:                  # il nome che mostra ip -br a
       dhcp4: false
       addresses:
-        - 192.168.205.10/24       # indirizzo scelto, fuori dal pool DHCP
+        - 192.0.2.10/24           # indirizzo scelto, fuori dal pool DHCP
       routes:
         - to: default
-          via: 192.168.205.2      # il tuo gateway
+          via: 192.0.2.1          # il tuo gateway (ip route)
       nameservers:
-        addresses: [192.168.205.2, 1.1.1.1]
+        addresses: [192.0.2.1]    # i tuoi DNS (resolvectl status)
 NETPLAN
 sudo chmod 600 /etc/netplan/99-hermes-static.yaml
 sudo netplan try
@@ -147,22 +150,26 @@ sudo netplan try
 
 > **Con due schede, togli `routes` e `nameservers`.** Il blocco qui sopra
 > vale per una macchina con una sola interfaccia, che quindi porta sia
-> internet sia te. Una VM con NAT *più* host-only — assetto ordinario, e il
-> default di VirtualBox — ha già la rotta di default e i resolver
+> internet sia te. Una VM con NAT *più* host-only — l'assetto frequente
+> descritto sopra — ha già la rotta di default e i resolver
 > sull'interfaccia NAT: aggiungerne una seconda su quella host-only crea due
 > rotte di default, vince la statica, e **l'uscita verso internet muore**
 > (osservato: `100% packet loss`, con la NAT perfettamente funzionante a
 > un'interfaccia di distanza). Il blocco giusto in quel caso è soltanto:
 >
 > ```yaml
->     enp0s8:                       # la scheda da cui ti raggiunge la postazione
+>     INTERFACCIA:                  # la scheda da cui ti raggiunge la postazione
 >       dhcp4: false
 >       addresses:
->         - 192.168.56.10/24
+>         - 192.0.2.10/24
 > ```
 >
 > Niente `routes`, niente `nameservers`: quelli restano dove c'è una rete che
 > va davvero da qualche parte.
+
+Gli indirizzi `192.0.2.x` qui e nel resto del documento sono **di
+documentazione** (RFC 5737): non esistono su nessuna rete reale, e vanno
+sostituiti con i tuoi. Copiati così non funzionano — ed è voluto.
 
 Due dettagli che fanno la differenza:
 
@@ -184,6 +191,49 @@ Infine, perché cloud-init non rimetta mano alla rete a un aggiornamento:
 echo 'network: {config: disabled}' | \
     sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
 ```
+
+### Se `ssh` dice che l'identità è cambiata
+
+Riconnettendoti al nuovo indirizzo puoi trovare:
+
+```
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+```
+
+Vuol dire che la postazione ha già in `known_hosts` **quell'indirizzo**
+legato a una chiave diversa. Su un laboratorio succede di continuo — una VM
+reinstallata, o una nuova che prende l'indirizzo di un'altra — ma è anche,
+alla lettera, l'avviso che si vede quando qualcuno si mette in mezzo. Quindi
+**non si toglie la voce per far sparire l'errore**: si verifica.
+
+1. **Dalla console della VM**, non via rete, leggi l'impronta vera:
+
+   ```sh
+   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+   ```
+
+2. Confrontala con quella stampata dall'avviso (`SHA256:…`). Se **non
+   coincide**, fermati: la chiave che ti risponde non è quella della VM.
+
+3. Se coincide, chiediti di chi era la voce vecchia. Se quell'indirizzo è
+   **ancora in uso** da un'altra macchina, non è un cambio di chiave: sono
+   due host con lo stesso IP. Scegli un altro indirizzo per questa VM e
+   **lascia la voce dov'è** — sta proteggendo l'altra macchina.
+
+4. Solo se l'altra macchina non usa più quell'indirizzo:
+
+   ```sh
+   ssh-keygen -R INDIRIZZO-DELLA-VM
+   ```
+
+   e alla connessione successiva accetti la chiave nuova, che hai già
+   verificato al punto 2.
+
+Se `ssh-keygen -R` risponde `not found` ma l'avviso persiste, la voce c'è
+sotto un'altra forma — un nome, `[indirizzo]:porta`, una riga hashata.
+Cercala con `ssh-keygen -F INDIRIZZO-DELLA-VM`, che usa la stessa logica di
+`ssh`; il numero di riga indicato dall'avviso, contato con un altro
+strumento, può non corrispondere.
 
 ---
 
@@ -369,7 +419,7 @@ log lo dicesse. La restrizione era custodita da chi dovrebbe subirla.
 Su **Windows**, da PowerShell:
 
 ```powershell
-ssh-keygen -t ed25519 -C "hermes-core@windows" -f $env:USERPROFILE\.ssh\id_ed25519_hermes_<NOME-VM>
+ssh-keygen -t ed25519 -C "hermes-core@postazione" -f $env:USERPROFILE\.ssh\id_ed25519_hermes_<NOME-VM>
 type $env:USERPROFILE\.ssh\id_ed25519_hermes_<NOME-VM>.pub
 ```
 
@@ -689,10 +739,10 @@ Leggibile da tutti va bene: il perimetro non è un segreto, è un vincolo.
 ### Niente DNS, e alias al suo posto
 
 ```toml
-reti = ["192.168.205.0/24"]
+reti = ["198.51.100.0/24"]
 
 [alias]
-lab-web = "192.168.205.20"
+web = "198.51.100.20"
 ```
 
 Il `target` di un'invocazione deve essere un **indirizzo IP** dentro una delle
@@ -704,8 +754,8 @@ non si avvelena e non cambia sotto il controllo.
 
 Due regole che il caricamento impone, e che fa fallire l'avvio se violate:
 
-* le reti vanno in **forma canonica** — `192.168.205.0/24` sì,
-  `192.168.205.10/24` no. Il secondo verrebbe interpretato come l'intera `/24`,
+* le reti vanno in **forma canonica** — `198.51.100.0/24` sì,
+  `198.51.100.10/24` no. Il secondo verrebbe interpretato come l'intera `/24`,
   cioè un perimetro più largo di quello inteso;
 * un alias deve puntare a un indirizzo **dentro** le reti dichiarate, perché
   altrimenti il file direbbe nello stesso momento che quell'indirizzo è
@@ -1265,7 +1315,7 @@ devono comparire le righe della catena sotto un unico `correlation_id`.
 
 ## 10. Spedizione del log a una seconda macchina (A5)
 
-> **Misto, e qui la divisione conta.** Su `hermesmcp` il bootstrap installa
+> **Misto, e qui la divisione conta.** Sul server il bootstrap installa
 > mittente e unità e genera la configurazione. **Tutto il collector resta
 > all'operatore**, insieme alle chiavi e al timer: tre passi richiedono una
 > decisione umana, e la verifica dell'impronta **deve** restare fuori
@@ -1285,7 +1335,7 @@ nulla di rotto. *Assente* è diverso da *rotto*.
 Quando il collector è pronto, si accende togliendo un `#`:
 
 ```sh
-# su hermesmcp, in config/hermes.toml, sezione [server]
+# sul server, in config/hermes.toml, sezione [server]
 log_shipping = "/etc/hermes/log-shipping.conf"
 ```
 
@@ -1348,8 +1398,8 @@ dice dove si esegue.
 
 | | Chi è | Cosa ci sta |
 |---|---|---|
-| **`hermesmcp`** · 192.168.205.10 | la macchina sorvegliata | il repo in `/opt/hermes-core`, il log, il mittente |
-| **collector** · 192.168.205.50 | la macchina che conserva | la copia. **Niente repo**, ed è voluto |
+| **server** | la macchina sorvegliata | il repo in `/opt/hermes-core`, il log, il mittente |
+| **collector** | la macchina che conserva | la copia. **Niente repo**, ed è voluto |
 
 **La porta SSH del collector non è per forza la 22.** Un'installazione può
 ascoltare altrove, e il mittente lo prevede (`COLLECTOR_PORTA`). Si guarda
@@ -1368,21 +1418,33 @@ diversa, va cambiata in tutti e quattro i posti: una sola dimenticata dà un
 Il collector non ha il repo e non deve averlo: conserva prove, non esegue il
 progetto. I file che gli servono ci arrivano copiati.
 
-Serve il tuo account sul collector — **non è detto che si chiami come
-quello qui**. Si imposta una volta per sessione di shell:
+Servono due valori, uno per macchina, e si impostano una volta per
+sessione di shell. Sul server, il tuo account sul collector — **non è detto
+che si chiami come quello qui** — e l'indirizzo del collector:
 
 ```sh
-# su hermesmcp
-COLLECTOR=iltuoutente@192.168.205.50
+# sul server
+COLLECTOR=TUOUTENTE@INDIRIZZO-DEL-COLLECTOR     # prova: ip -br a, sul collector
 ```
 
-Se apri una shell nuova va reimpostato: senza, gli `scp` qui sotto falliscono
-subito invece di fare la cosa sbagliata.
+Sul collector, il nome della **sorgente**: la directory in cui finisce la
+copia e l'argomento del `ForceCommand`. Minuscole, cifre e trattini,
+iniziale una lettera; di solito il nome del server:
+
+```sh
+# sul collector
+SORGENTE=NOME-DEL-SERVER                        # prova: uname -n, sul server
+```
+
+Se apri una shell nuova vanno reimpostati. I comandi li usano come
+`${SORGENTE:?}`, che senza valore ferma la riga con un errore invece di
+lavorare su `/var/log/hermes-remoto/` — e il valore lasciato in maiuscolo
+lo rifiuta il ricevente stesso.
 
 ### 10.1 Il collector
 
 ```sh
-# su hermesmcp, dalla radice del repo
+# sul server, dalla radice del repo
 scp bin/hermes-log-receive config/sshd/20-hermes-collect.conf "$COLLECTOR":~/
 ```
 
@@ -1390,7 +1452,7 @@ Su una porta diversa dalla 22, `scp` vuole `-P` **maiuscola** (`ssh` usa
 `-p` minuscola, e scambiarle è un classico):
 
 ```sh
-# su hermesmcp, se il collector ascolta sulla 2222
+# sul server, se il collector ascolta sulla 2222
 scp -P 2222 bin/hermes-log-receive config/sshd/20-hermes-collect.conf "$COLLECTOR":~/
 ```
 
@@ -1415,10 +1477,13 @@ sudo useradd --system --create-home --home-dir /var/lib/hermes-collect \
 sudo passwd -l hermes-collect      # nessun accesso con password
 sudo install -d -m 755 -o root -g root /var/log/hermes-remoto
 sudo install -d -m 700 -o hermes-collect -g hermes-collect \
-     /var/log/hermes-remoto/hermesmcp
+     "/var/log/hermes-remoto/${SORGENTE:?}"
 sudo install -m 755 -o root -g root \
      ~/hermes-log-receive /usr/local/sbin/hermes-log-receive
 sudo install -d -m 755 -o root -g root /etc/ssh/authorized_keys.d
+sed -i "s/hermes-log-receive DA_COMPILARE\$/hermes-log-receive ${SORGENTE:?}/" \
+     ~/20-hermes-collect.conf
+grep '^ *ForceCommand' ~/20-hermes-collect.conf # deve dire il nome scelto
 sudo install -m 644 -o root -g root \
      ~/20-hermes-collect.conf /etc/ssh/sshd_config.d/
 ```
@@ -1431,7 +1496,7 @@ Il perimetro di rete, e un tetto sul disco:
 
 ```sh
 # sul collector
-sudo ufw allow from 192.168.205.10 to any port 22 proto tcp
+sudo ufw allow from INDIRIZZO-DEL-SERVER to any port 22 proto tcp
 ```
 
 > **Attenzione prima di attivare `ufw` qui.** Questa regola apre la 22 al solo
@@ -1443,10 +1508,11 @@ sudo ufw allow from 192.168.205.10 to any port 22 proto tcp
 >
 > ```sh
 > # sul collector
-> sudo ufw allow from 192.168.205.1 to any port 22 proto tcp
+> sudo ufw allow from INDIRIZZO-DELLA-POSTAZIONE to any port 22 proto tcp
+> # prova: echo "$SSH_CONNECTION" | cut -d" " -f1, nella sessione che usi
 > ```
 >
-> È lo stesso ragionamento di `hermesmcp`, dove la regola nomina un solo
+> È lo stesso ragionamento del server, dove la regola nomina un solo
 > indirizzo — ma lì quell'indirizzo è la postazione, e qui no.
 >
 > E se la porta non è la 22, le regole vanno scritte su quella: una regola
@@ -1458,16 +1524,16 @@ quota su `/var/log/hermes-remoto`, non con la configurazione di SSH.
 
 ### 10.2 L'identità che spedisce
 
-Su `hermesmcp`. **Non** è l'utente di servizio: `hermes` compromesso non deve
+Sul server. **Non** è l'utente di servizio: `hermes` compromesso non deve
 poter fermare la spedizione né prendersi la chiave che la autorizza.
 
 ```sh
-# su hermesmcp
+# sul server
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin hermes-ship
 sudo install -d -m 750 -o hermes-ship -g hermes-ship /var/lib/hermes-ship
 sudo install -d -m 755 -o hermes-ship -g hermes-ship /var/lib/hermes-ship/stato
 sudo -u hermes-ship ssh-keygen -t ed25519 -N "" \
-     -f /var/lib/hermes-ship/id_ed25519 -C hermes-ship@hermesmcp
+     -f /var/lib/hermes-ship/id_ed25519 -C "hermes-ship@$(uname -n)"
 ```
 
 Senza passphrase, per la stessa ragione documentata in 4.4: il timer gira
@@ -1485,7 +1551,7 @@ preflight non arriva al file — e un preflight che non arriva a un dato non
 può dire niente su quel presidio:
 
 ```sh
-# su hermesmcp
+# sul server
 sudo setfacl -m u:hermes:--x /var/lib/hermes-ship
 ```
 
@@ -1502,7 +1568,7 @@ non ci entra, quindi lo `scp` diretto fallisce. La chiave **pubblica** si
 appoggia un momento in chiaro — è pubblica, non è un segreto:
 
 ```sh
-# su hermesmcp
+# sul server
 sudo install -m 644 -o root -g root \
      /var/lib/hermes-ship/id_ed25519.pub /tmp/hermes-ship.pub
 scp /tmp/hermes-ship.pub "$COLLECTOR":~/
@@ -1522,13 +1588,13 @@ sudo sshd -t && sudo systemctl reload ssh
 **Il ricarico va fatto qui e non prima**: `20-hermes-collect.conf` attiva un
 `ForceCommand` per `hermes-collect`, e ricaricare `sshd` quando la chiave non
 c'è ancora lascerebbe un canale che nessuno può usare, con un sintomo che non
-punta alla causa. È la stessa ragione per cui il bootstrap di `hermesmcp` non
+punta alla causa. È la stessa ragione per cui il bootstrap del server non
 ricarica `sshd` da solo.
 
 ### 10.3 Conoscere il collector per chiave, non per fiducia
 
 Con la verifica dell'host disattivata, chi riesce a prendere il posto del
-collector riceve il log e lo fa sparire — e da `hermesmcp` ogni spedizione
+collector riceve il log e lo fa sparire — e dal server ogni spedizione
 risulterebbe riuscita. Il mittente usa `StrictHostKeyChecking=yes` e un
 `known_hosts` che non può riscrivere.
 
@@ -1539,18 +1605,18 @@ collector, che è il pezzo che rende l'operazione sicura:
 # sul collector, dalla sua console
 sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 
-# su hermesmcp
-sudo sh -c 'ssh-keyscan -t ed25519 192.168.205.50 > /var/lib/hermes-ship/known_hosts'
+# sul server — l'indirizzo è quello di $COLLECTOR, senza l'utente
+ssh-keyscan -t ed25519 "${COLLECTOR#*@}" | sudo tee /var/lib/hermes-ship/known_hosts >/dev/null
 ssh-keygen -lf /var/lib/hermes-ship/known_hosts
 ```
 
 Su una porta diversa dalla 22 serve `-p`, e la voce che ne esce ha una forma
-diversa — `[192.168.205.50]:2222` invece del solo indirizzo. È `ssh-keyscan`
+diversa — `[192.0.2.50]:2222` invece del solo `192.0.2.50`. È `ssh-keyscan`
 a scriverla giusta, purché gli si dica la porta:
 
 ```sh
-# su hermesmcp, se il collector ascolta sulla 2222
-sudo sh -c 'ssh-keyscan -p 2222 -t ed25519 192.168.205.50 > /var/lib/hermes-ship/known_hosts'
+# sul server, se il collector ascolta sulla 2222
+ssh-keyscan -p 2222 -t ed25519 "${COLLECTOR#*@}" | sudo tee /var/lib/hermes-ship/known_hosts >/dev/null
 ```
 
 Le due impronte devono coincidere. **Se non coincidono non si prosegue**: è
@@ -1564,7 +1630,7 @@ root — `hermes-ship` deve leggerlo, non riscriverlo.
 una finestra con `-a` tolto.
 
 ```sh
-# su hermesmcp
+# sul server
 sudo setfacl -m u:hermes-ship:--x /var/log/hermes
 sudo chattr -a /var/log/hermes/audit.jsonl
 sudo setfacl -m u:hermes-ship:r  /var/log/hermes/audit.jsonl
@@ -1596,22 +1662,21 @@ Due cose, per non ripetere errori già fatti:
 ### 10.5 La configurazione, il mittente, il timer
 
 ```sh
-# su hermesmcp
-sudo install -d -m 755 -o root -g root /etc/hermes
-sudo install -m 644 -o root -g root \
-     config/log-shipping.example.conf /etc/hermes/log-shipping.conf
+# sul server
 sudo editor /etc/hermes/log-shipping.conf
 ```
 
+Il file l'ha già generato il bootstrap, con `COLLECTOR_HOST=DA_COMPILARE`:
+si compila, non si reinstalla dal modello — una reinstallazione cancellerebbe
+quello che hai già scritto. Il mittente rifiuta il segnaposto, quindi un file
+dimenticato fallisce con un messaggio che nomina la causa.
+
 Il file è di root perché se `hermes-ship` potesse riscrivere la propria
 destinazione, un mittente compromesso spedirebbe le prove a sé stesso e da
-qui sembrerebbe tutto a posto. **Gli indirizzi nel modello sono quelli di
-questo laboratorio**: su un'altra installazione sono plausibili e sbagliati,
-e un valore plausibile passa i controlli dando una destinazione che non è la
-tua.
+qui sembrerebbe tutto a posto.
 
 ```sh
-# su hermesmcp
+# sul server
 sudo install -m 755 -o root -g root \
      bin/hermes-log-ship /usr/local/sbin/hermes-log-ship
 sudo install -m 644 -o root -g root \
@@ -1640,7 +1705,7 @@ log_shipping = "/etc/hermes/log-shipping.conf"
 Un giro a mano, e cosa dice:
 
 ```sh
-# su hermesmcp
+# sul server
 sudo systemctl start hermes-log-ship.service
 journalctl -u hermes-log-ship.service -n 20 --no-pager
 cat /var/lib/hermes-ship/stato/audit.stato
@@ -1649,7 +1714,7 @@ cat /var/lib/hermes-ship/stato/audit.stato
 Dal preflight, che è il posto in cui questa verifica vive:
 
 ```sh
-# su hermesmcp
+# sul server
 sudo -u hermes .venv/bin/python -m mcp_server.doctor config/hermes.toml
 ```
 
@@ -1661,8 +1726,8 @@ parola non sia riscrivibile da chi manomette questa:
 
 ```sh
 # sul collector
-ls -l /var/log/hermes-remoto/hermesmcp/
-sudo tail -n 3 /var/log/hermes-remoto/hermesmcp/audit.jsonl
+ls -l "/var/log/hermes-remoto/${SORGENTE:?}/"
+sudo tail -n 3 "/var/log/hermes-remoto/${SORGENTE:?}/audit.jsonl"
 ```
 
 E il confronto integrale, che è la verifica vera e si fa quando serve — non
@@ -1670,10 +1735,10 @@ ogni cinque minuti:
 
 ```sh
 # sul collector
-sudo stat -c %s /var/log/hermes-remoto/hermesmcp/audit.jsonl
-sudo sha256sum /var/log/hermes-remoto/hermesmcp/audit.jsonl
+sudo stat -c %s "/var/log/hermes-remoto/${SORGENTE:?}/audit.jsonl"
+sudo sha256sum "/var/log/hermes-remoto/${SORGENTE:?}/audit.jsonl"
 
-# su hermesmcp `read` chiede il numero letto sopra, e lo si incolla.
+# sul server `read` chiede il numero letto sopra, e lo si incolla.
 read -r BYTE
 sudo head -c "$BYTE" /var/log/hermes/audit.jsonl | sha256sum
 ```
@@ -1695,8 +1760,8 @@ Quando la copia esiste ed è confermata, va resa non riscrivibile anche lì:
 
 ```sh
 # sul collector, dopo il primo giro riuscito
-sudo chattr +a /var/log/hermes-remoto/hermesmcp/audit.jsonl
-sudo chattr +a /var/log/hermes-remoto/hermesmcp/overrides.jsonl
+sudo chattr +a "/var/log/hermes-remoto/${SORGENTE:?}/audit.jsonl"
+sudo chattr +a "/var/log/hermes-remoto/${SORGENTE:?}/overrides.jsonl"
 ```
 
 ### 10.7 Quando scatta una divergenza
@@ -1710,9 +1775,9 @@ credere, e la domanda è *cosa manca*:
 
 ```sh
 # sul collector: fin dove arriva la copia
-sudo stat -c %s /var/log/hermes-remoto/hermesmcp/audit.jsonl
+sudo stat -c %s "/var/log/hermes-remoto/${SORGENTE:?}/audit.jsonl"
 
-# su hermesmcp quanto è lungo adesso l'originale
+# sul server quanto è lungo adesso l'originale
 sudo stat -c %s /var/log/hermes/audit.jsonl
 ```
 
@@ -1728,9 +1793,9 @@ un'intrusione:
 
 ```sh
 # sul collector
-sudo chattr -a /var/log/hermes-remoto/hermesmcp/audit.jsonl
-sudo mv /var/log/hermes-remoto/hermesmcp/audit.jsonl \
-        /var/log/hermes-remoto/hermesmcp/audit.jsonl.divergente
+sudo chattr -a "/var/log/hermes-remoto/${SORGENTE:?}/audit.jsonl"
+sudo mv "/var/log/hermes-remoto/${SORGENTE:?}/audit.jsonl" \
+        "/var/log/hermes-remoto/${SORGENTE:?}/audit.jsonl.divergente"
 ```
 
 Al giro successivo la copia riparte da zero e torna allineata. Fuori dal

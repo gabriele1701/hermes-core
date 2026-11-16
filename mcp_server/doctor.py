@@ -2553,7 +2553,7 @@ def main(argv: list[str] | None = None) -> int:
 # Spedizione del log a una seconda macchina (A5)
 #
 # Questo blocco ha un limite che va detto prima di leggerlo: gira su
-# `hermesmcp`, e la copia remota non sta qui. Può dire che il mittente è
+# il server sorvegliato, e la copia remota non sta qui. Può dire che il mittente è
 # installato, che punta al file giusto, che l'identità che spedisce riesce a
 # leggerlo e com'è andato l'ultimo giro. NON può dire che la copia esista —
 # per quello serve guardare dal collector, ed è l'unica macchina la cui
