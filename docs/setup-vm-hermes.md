@@ -772,11 +772,11 @@ Dichiara `target_kind = "path"`, e il suo perimetro è una lista di prefissi
 nello stesso file:
 
 ```toml
-reti = ["192.168.205.0/24"]
+reti = ["198.51.100.0/24"]
 percorsi = ["/srv/lab/campioni"]     # PRIMA di [alias]
 
 [alias]
-lab-web = "192.168.205.20"
+lab-web = "198.51.100.20"
 ```
 
 > **`percorsi` va scritta prima dell'intestazione `[alias]`.** In TOML una
