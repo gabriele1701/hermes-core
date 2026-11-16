@@ -137,7 +137,7 @@ class ScopeAllowlist:
         reti = []
         for voce in grezze:
             try:
-                # strict=False accetta 192.168.1.5/24 come la sua rete; qui si
+                # strict=False accetta 198.51.100.5/24 come la sua rete; qui si
                 # pretende la forma canonica, perché un /24 scritto a partire
                 # da un host è quasi sempre un errore di chi lo scrive, e un
                 # perimetro più largo di quello inteso è il difetto che questo

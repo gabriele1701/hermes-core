@@ -501,17 +501,44 @@ def test_ogni_valore_dice_da_dove_ricavarlo():
     assert script.count("suggerimento ") >= 8
 
 
-def test_lo_script_non_contiene_riferimenti_a_un_laboratorio_specifico():
+SPECIFICI_DI_LABORATORIO = (
+    "192.168.", "10.0.2.", "enp0s", "ens33", "VMnet", "hermesmcp", "@windows",
+)
+
+
+def _distribuiti():
+    """Ciò che arriva a chi installa: tutto tranne i test e git.
+
+    I test restano fuori di proposito: lì un indirizzo privato è un dato di
+    prova, non un esempio che qualcuno copierà in una configurazione.
+    """
+    for percorso in sorted(RADICE.rglob("*")):
+        relativo = percorso.relative_to(RADICE)
+        if not percorso.is_file() or relativo.parts[0] in {
+            ".git", "tests", ".venv", ".pytest_cache",
+        } or "__pycache__" in relativo.parts:
+            continue
+        try:
+            yield relativo, percorso.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+
+
+def test_il_repo_non_contiene_riferimenti_a_un_laboratorio_specifico():
     """Una cassetta degli attrezzi portabile non porta il nome di chi l'ha fatta.
 
-    Gli esempi stanno in 192.0.2.0/24, riservata alla documentazione: un
+    Gli esempi stanno nelle reti riservate alla documentazione (RFC 5737): un
     esempio copiato per sbaglio in un perimetro non autorizza niente di reale.
     Una rete di laboratorio vera, invece, sì — ed è già successo, con il
-    modello del perimetro.
+    modello del perimetro, e di nuovo con il collector della spedizione.
     """
-    script = SCRIPT.read_text(encoding="utf-8")
-    for specifico in ("192.168.", "10.0.2.", "enp0s", "ens33"):
-        assert specifico not in script, specifico
+    trovati = [
+        f"{relativo}: {specifico}"
+        for relativo, testo in _distribuiti()
+        for specifico in SPECIFICI_DI_LABORATORIO
+        if specifico in testo
+    ]
+    assert not trovati, "\n".join(trovati)
 
 
 def test_i_percorsi_coincidono_con_quelli_del_bootstrap():

@@ -444,13 +444,53 @@ def test_l_unita_lancia_il_mittente_dove_viene_installato():
 # --------------------------------------------------------------------------- #
 
 
-def test_il_modello_del_repo_e_valido():
-    """Un modello che non si lascia leggere è un modello che nessuno proverà."""
-    sped = leggi_spedizione(
-        (RADICE / "config" / "log-shipping.example.conf").read_text(encoding="utf-8")
+def test_il_modello_del_repo_e_valido_una_volta_compilato():
+    """Un modello che non si lascia leggere è un modello che nessuno proverà.
+
+    Lo si compila come farebbe l'operatore: l'unica cosa che deve mancare
+    sono i segnaposti, non la forma.
+    """
+    testo = (RADICE / "config" / "log-shipping.example.conf").read_text(
+        encoding="utf-8"
     )
+    compilato = re.sub(
+        r"^COLLECTOR_HOST=DA_COMPILARE$", "COLLECTOR_HOST=192.0.2.50", testo,
+        flags=re.MULTILINE,
+    )
+    assert compilato != testo, "il modello non ha più il segnaposto"
+    sped = leggi_spedizione(compilato)
     assert isinstance(sped, Spedizione)
     assert dict(sped.canali).keys() == {"audit", "overrides"}
+
+
+def test_il_modello_del_repo_non_compilato_viene_rifiutato():
+    """Nessun indirizzo plausibile nel modello: un segnaposto, e rifiutato."""
+    with pytest.raises(SpedizioneError):
+        leggi_spedizione(
+            (RADICE / "config" / "log-shipping.example.conf").read_text(
+                encoding="utf-8"
+            )
+        )
+
+
+def test_il_drop_in_del_collector_non_nomina_una_sorgente():
+    """Il nome della sorgente lo sceglie chi installa, e il ricevente lo valida.
+
+    `DA_COMPILARE` non rispetta la forma richiesta dal ricevente: un drop-in
+    installato senza compilarlo fallisce al primo invio, nominando la causa,
+    invece di scrivere sotto il nome di un'altra installazione.
+    """
+    dropin = (RADICE / "config" / "sshd" / "20-hermes-collect.conf").read_text(
+        encoding="utf-8"
+    )
+    riga = [r for r in dropin.splitlines() if r.strip().startswith("ForceCommand")]
+    assert riga == ["    ForceCommand /usr/local/sbin/hermes-log-receive DA_COMPILARE"]
+    esito = subprocess.run(
+        [str(RADICE / "bin" / "hermes-log-receive"), "DA_COMPILARE"],
+        input=b"", capture_output=True, timeout=10,
+    )
+    assert esito.returncode != 0
+    assert "sorgente non valido" in esito.stderr.decode()
 
 
 @pytest.mark.parametrize(
