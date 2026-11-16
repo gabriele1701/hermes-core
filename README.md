@@ -50,62 +50,49 @@ sudo bin/hermes-bootstrap --dev
 → Atteso **`NON PRONTO`**: i valori di questa macchina sono ancora
 `DA_COMPILARE`, e li compila il passo 4.
 
-**4. Le due chiavi**, generate sulla **postazione** — non sulla VM. Servono
-adesso: il passo 5 chiede quella del servizio, e il passo 9 disattiva le
-password, quindi senza la tua resti fuori.
+**4. Le due chiavi**, sulla **postazione**, non sulla VM. Una è **tua**, per
+entrare quando il passo 9 avrà spento le password; l'altra è del
+**servizio**, per Hermes. Il passo 5 le installa entrambe.
 
-Sulla **postazione**, in PowerShell. Sostituisci `NOME-VM` con il nome di
-questa macchina, e `UTENTE@INDIRIZZO` con i tuoi:
-
-```powershell
-ssh-keygen -t ed25519 -C "hermes-core@postazione" -f $env:USERPROFILE\.ssh\id_ed25519_hermes_NOME-VM
-ssh-keygen -t ed25519 -C "UTENTE@NOME-VM"         -f $env:USERPROFILE\.ssh\id_ed25519_NOME-VM_admin
-```
-
-Il nome del file porti il nome della VM: con un nome fisso, la seconda VM
-servita dalla stessa postazione fa chiedere *«already exists. Overwrite?»*, e
-un sì distratto cancella la chiave della prima.
-
-Ora le due chiavi vanno sulla VM, **senza copiarle e incollarle**. Le password
-funzionano ancora — il ricarico di `sshd` è al passo 9 — quindi passano da lì:
+In PowerShell. L'unica cosa da sostituire è `NOME-VM` nella prima riga: il
+nome che la VM stampa con `hostname`.
 
 ```powershell
-# la TUA chiave, diretta in authorized_keys
-type $env:USERPROFILE\.ssh\id_ed25519_NOME-VM_admin.pub | ssh UTENTE@INDIRIZZO "mkdir -p ~/.ssh && chmod 700 ~/.ssh && tr -d '\r' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
-
-# quella del SERVIZIO, come file: la installa il passo 5
-scp $env:USERPROFILE\.ssh\id_ed25519_hermes_NOME-VM.pub UTENTE@INDIRIZZO:/tmp/
+$VM = "NOME-VM"
+ssh-keygen -t ed25519 -C "admin@$VM"              -f "$env:USERPROFILE\.ssh\id_ed25519_${VM}_admin"
+ssh-keygen -t ed25519 -C "hermes-core@postazione" -f "$env:USERPROFILE\.ssh\id_ed25519_hermes_$VM"
+type "$env:USERPROFILE\.ssh\id_ed25519_${VM}_admin.pub"
+type "$env:USERPROFILE\.ssh\id_ed25519_hermes_$VM.pub"
 ```
 
-Niente incollate, e non è pigrizia: **una chiave incollata che si spezza su
-due righe `sshd` non la legge**, e l'errore che ricevi al passo 8 è `Permission
-denied (publickey)`, che non nomina la causa. Lo stesso vale per lo scambio
-fra le due, che hanno la stessa forma e la stessa lunghezza e si distinguono
-solo dal commento finale: passandole per nome di file, lo scambio si vede
-mentre si scrive il comando.
+Alla domanda sulla passphrase: per la chiave del **servizio** lascia vuoto,
+perché Hermes si collega senza nessuno davanti a digitarla; per la tua,
+decidi tu. Lascia aperta la finestra: le due righe stampate servono al passo 5.
 
-`tr -d '\r'` al posto di `cat` c'è perché PowerShell manda le righe con il
-fine-riga di Windows, e un `\r` in coda alla chiave finisce dentro il
-commento — innocuo nove volte su dieci, e la decima si cerca per mezz'ora.
+Il nome della VM nel nome del file non è decorazione. Con un nome fisso, la
+seconda VM servita dalla stessa postazione fa chiedere *«already exists.
+Overwrite?»*, e un sì distratto cancella la chiave della prima. E dev'essere
+proprio quello di `hostname`, perché il passo 5 lo usa per scriverti il
+blocco del passo 7.
 
-Se qualcosa non torna, i due comandi che lo dicono sulla VM sono
-`cut -d' ' -f1,3- ~/.ssh/authorized_keys`, che stampa tipo e commento di ogni
-chiave installata, e `sudo journalctl -u ssh`.
-
-**5. I valori di questa macchina:** utente ammesso da SSH, chiave del servizio
-(quella stampata al passo 4), perimetro dei bersagli, regola `ufw`, e il file
-dell'indirizzo fisso. Chiede, valida, scrive. Non ricarica `sshd` e non
-applica la rete — quelle restano tue, e sono le due da cui non si torna
-indietro.
+**5. I valori di questa macchina:** chi può entrare, le due chiavi, il
+perimetro dei bersagli, la regola `ufw`, il file dell'indirizzo fisso.
+Chiede, valida, scrive, e per ogni domanda mostra il comando da cui ricavare
+la risposta.
 
 ```sh
-sudo bin/hermes-configura --chiave /tmp/id_ed25519_hermes_NOME-VM.pub
+sudo bin/hermes-configura
 ```
 
-`--chiave` indica il file arrivato col passo 4, così quella risposta non si
-incolla. Tutto il resto lo chiede, e per ogni domanda suggerisce il comando
-che mostra da dove ricavare la risposta. `--prova` valida tutto e non scrive
-niente.
+Le chiavi si incollano: copia la riga intera stampata al passo 4. Una chiave
+spezzata dall'incollata, o le due chiavi scambiate, vengono rifiutate con il
+motivo. Sono gli errori più facili di tutta la procedura, e senza questo
+controllo arrivano al passo 8 come un `Permission denied` che non dice
+perché.
+
+Non ricarica `sshd` e non applica la rete: sono le due azioni da cui non si
+torna indietro, e restano tue. In fondo stampa il blocco del passo 7 già
+compilato. `--prova` valida tutto e non scrive niente.
 
 **6. L'indirizzo fisso**, applicato **dalla console della VM** e non da SSH:
 cambiando indirizzo la sessione cade, non puoi confermare, e `netplan`
@@ -116,34 +103,23 @@ passo 5.
 sudo netplan try
 ```
 
-Poi riconnettiti al nuovo indirizzo — le password funzionano ancora, il passo
-9 non è stato fatto. **Viene prima dei passi che seguono per una ragione:
-l'indirizzo va fissato prima che qualcosa lo registri**, e da qui in avanti lo
-registrano la configurazione ssh, e più tardi Hermes. Se preferisci restare in
-DHCP, salta questo passo e usa l'indirizzo corrente, sapendo che cambierà.
+Poi riconnettiti al nuovo indirizzo: le password funzionano ancora, il passo
+9 non è stato fatto. **L'indirizzo va fissato prima che qualcosa lo
+registri**, e da qui in avanti lo registrano la configurazione ssh e, più
+tardi, Hermes. Se preferisci restare in DHCP, salta questo passo, sapendo che
+l'indirizzo cambierà.
 
-**7. Lega la chiave alla VM**, sulla postazione. Il nome del file non è fra
-quelli che `ssh` prova da sé, quindi senza questo ogni comando va passato con
-`-i` — e dimenticarlo dà `Permission denied (publickey)`, che non dice perché.
+**7. Lega la chiave alla VM**, sulla postazione: incolla in PowerShell il
+blocco che il passo 5 ha stampato in fondo, già compilato con il nome,
+l'indirizzo e l'utente di questa macchina. Se l'hai perso, rilancia
+`sudo bin/hermes-configura --prova` e rispondi `N` alle domande: non scrive
+niente, e lo ristampa.
 
-```powershell
-Add-Content -Path $env:USERPROFILE\.ssh\config -Value @'
-
-Host NOME-VM
-    HostName INDIRIZZO
-    User UTENTE
-    IdentityFile ~/.ssh/id_ed25519_NOME-VM_admin
-    IdentitiesOnly yes
-'@
-```
-
-`NOME-VM` è il nome con cui chiamerai la VM nei comandi `ssh`: scegli il nome
-della macchina, non la parola `VM`.
-
-Su Linux lo stesso blocco in `~/.ssh/config`. `IdentitiesOnly yes` non è di
-contorno: senza, `ssh` offre anche le altre chiavi che trova, e su una
-postazione che serve più di una VM la prima che offre può non essere quella
-giusta — lo stesso errore del passo 4, dal lato del client.
+Serve perché il nome del file della chiave non è fra quelli che `ssh` prova
+da sé: senza questo blocco ogni comando va passato con `-i`, e dimenticarlo
+dà `Permission denied (publickey)`. `IdentitiesOnly yes` impedisce a `ssh` di
+offrire prima altre chiavi, che su una postazione con più VM possono essere
+quelle sbagliate. Su Linux, lo stesso blocco va in `~/.ssh/config`.
 
 **8. Verifica la tua chiave da una finestra nuova**, senza chiudere quella
 aperta. Senza le due opzioni `ssh` ricade sulla password senza dirlo, e
@@ -155,6 +131,10 @@ ssh -o PreferredAuthentications=publickey -o PasswordAuthentication=no NOME-VM
 
 Qui `NOME-VM` è il nome del blocco `Host` scritto al passo 7, non l'indirizzo:
 è quel blocco a dire quale chiave offrire.
+
+Se non entra, la causa si legge sulla VM: `cut -d' ' -f1,3- ~/.ssh/authorized_keys`
+stampa tipo e commento di ogni chiave installata, e `sudo journalctl -u ssh`
+dice perché `sshd` l'ha rifiutata.
 
 **9. Il ricarico di `sshd`**, solo dopo che il passo 8 è entrato.
 

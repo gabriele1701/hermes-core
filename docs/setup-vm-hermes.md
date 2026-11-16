@@ -384,11 +384,14 @@ type $env:USERPROFILE\.ssh\id_ed25519_hermes_<NOME-VM>.pub
 Sulla **VM**, la chiave pubblica va in una directory di **root**, non nella home
 del servizio, preceduta dalle restrizioni e tutto su una riga.
 
-Normalmente la installa `bin/hermes-configura`, a cui si passa il file invece
-di incollarne il contenuto — `--chiave /tmp/chiave.pub`, dopo averlo portato
-sulla VM con `scp`. Non è una scorciatoia: una chiave incollata che si spezza
-su due righe non viene letta, e il sintomo è un `Permission denied
-(publickey)` che non nomina la causa.
+Normalmente la installa `bin/hermes-configura`, insieme a quella
+dell'amministratore. Le chiavi si incollano, e lo script le passa a
+`ssh-keygen -l` prima di scriverle: una chiave spezzata dall'incollata — il
+terminale consegna solo la prima riga — o con un carattere in meno viene
+rifiutata, invece di finire in `authorized_keys` e manifestarsi come un
+`Permission denied (publickey)` che non nomina la causa. Rifiuta anche le due
+chiavi scambiate, riconoscendole dal commento, e la stessa chiave data due
+volte.
 
 A mano, se lo script non è utilizzabile:
 

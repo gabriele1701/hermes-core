@@ -10,12 +10,18 @@ il valore di questo script è che un valore sbagliato non arrivi su disco,
 perché ognuno di quei valori sbagliati passa i controlli a valle e si
 manifesta come una macchina irraggiungibile o un perimetro che non è quello
 che l'operatore crede di aver scritto.
+
+Gli indirizzi sono quelli che la RFC 5737 riserva alla documentazione:
+192.0.2.0/24 per i valori buoni, 198.51.100.0/24 per quelli «altrove».
 """
 
 from __future__ import annotations
 
 import os
+import platform
+import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -23,19 +29,52 @@ import pytest
 RADICE = Path(__file__).resolve().parent.parent
 SCRIPT = RADICE / "bin" / "hermes-configura"
 
-CHIAVE_VALIDA = (
-    "ssh-ed25519 "
-    "AAAAC3NzaC1lZDI1NTE5AAAAIIAsLQ8jYqi5BWJihh6tL7ypJsFM1VtyR2SHYo670oDg "
-    "hermes-core@windows"
+# Lo script valida le chiavi con `ssh-keygen -l`, e senza non parte. Qui non
+# si può imporre la sua presenza, quindi lo si dice invece di fallire per una
+# ragione che non è il codice sotto test.
+pytestmark = pytest.mark.skipif(
+    shutil.which("ssh-keygen") is None,
+    reason="manca ssh-keygen (openssh-client): è il validatore delle chiavi",
 )
+
+
+@dataclass(frozen=True)
+class Chiavi:
+    admin_file: Path
+    servizio_file: Path
+
+    @property
+    def admin(self) -> str:
+        return self.admin_file.read_text(encoding="utf-8").strip()
+
+    @property
+    def servizio(self) -> str:
+        return self.servizio_file.read_text(encoding="utf-8").strip()
+
+
+@pytest.fixture(scope="session")
+def chiavi(tmp_path_factory: pytest.TempPathFactory) -> Chiavi:
+    """Due chiavi vere, con i commenti che la procedura fa dare.
+
+    Vere perché lo script le passa a `ssh-keygen -l`: una stringa che ne ha
+    solo la forma oggi viene rifiutata, ed è il punto.
+    """
+    cartella = tmp_path_factory.mktemp("chiavi")
+    for nome, commento in (("admin", "admin@vm-di-prova"),
+                           ("servizio", "hermes-core@postazione")):
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", commento,
+             "-f", str(cartella / nome)],
+            check=True,
+        )
+    return Chiavi(cartella / "admin.pub", cartella / "servizio.pub")
 
 
 @pytest.fixture
 def radice_finta(tmp_path: Path) -> Path:
     """Gli artefatti che il bootstrap genera, con i segnaposti dentro."""
-    (tmp_path / "sshd").mkdir()
-    (tmp_path / "hermes").mkdir()
-    (tmp_path / "chiavi").mkdir()
+    for cartella in ("sshd", "hermes", "chiavi", "home"):
+        (tmp_path / cartella).mkdir()
     (tmp_path / "sshd" / "09-hermes-allowusers.conf").write_text(
         "# generato dal bootstrap\nAllowUsers DA_COMPILARE hermes\n",
         encoding="utf-8",
@@ -53,6 +92,7 @@ def esegui(radice: Path, *argomenti: str) -> subprocess.CompletedProcess[str]:
         HERMES_DIR_SSHD=str(radice / "sshd"),
         HERMES_DIR_CHIAVI=str(radice / "chiavi"),
         HERMES_NETPLAN=str(radice / "99-hermes-static.yaml"),
+        HERMES_HOME_AMMINISTRATORE=str(radice / "home"),
     )
     return subprocess.run(
         [str(SCRIPT), "--prova", *argomenti],
@@ -65,48 +105,49 @@ def esegui(radice: Path, *argomenti: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def completo(**sostituzioni: str) -> list[str]:
+def completo(chiavi: Chiavi, **sostituzioni: str) -> list[str]:
     base = {
         "--utente": "root",
-        "--chiave": CHIAVE_VALIDA,
-        "--reti": "192.168.56.0/24",
-        "--alias": "lab-web=192.168.56.20",
-        "--postazione": "192.168.56.1",
+        "--chiave-admin": str(chiavi.admin_file),
+        "--chiave": str(chiavi.servizio_file),
+        "--reti": "192.0.2.0/24",
+        "--alias": "lab-web=192.0.2.20",
+        "--postazione": "192.0.2.1",
     }
     base.update(sostituzioni)
     return [p for coppia in base.items() for p in coppia]
 
 
+def uscita(esito: subprocess.CompletedProcess[str]) -> str:
+    return esito.stdout + esito.stderr
+
+
 # --- Il caso che riesce ---------------------------------------------------- #
 
 
-def test_una_configurazione_valida_arriva_in_fondo(radice_finta: Path):
-    esito = esegui(radice_finta, *completo())
+def test_una_configurazione_valida_arriva_in_fondo(radice_finta: Path, chiavi: Chiavi):
+    esito = esegui(radice_finta, *completo(chiavi))
     assert esito.returncode == 0, esito.stderr
     assert "tutto validato, niente scritto" in esito.stdout
     assert "AllowUsers root hermes" in esito.stdout
 
 
-def test_la_prova_non_scrive_niente(radice_finta: Path):
+def test_la_prova_non_scrive_niente(radice_finta: Path, chiavi: Chiavi):
     """`--prova` è una proprietà dello script, non di chi si ricorda.
 
     Ogni scrittura passa da una funzione sola, così la modalità di prova non
     dipende dal fatto che ogni ramo controlli una variabile.
     """
-    prima = {
-        p: p.read_bytes()
-        for p in radice_finta.rglob("*")
-        if p.is_file()
-    }
+    prima = {p: p.read_bytes() for p in radice_finta.rglob("*") if p.is_file()}
 
-    assert esegui(radice_finta, *completo()).returncode == 0
+    assert esegui(radice_finta, *completo(chiavi)).returncode == 0
 
     dopo = {p: p.read_bytes() for p in radice_finta.rglob("*") if p.is_file()}
     assert dopo == prima
 
 
 def test_un_valore_gia_compilato_non_viene_sovrascritto_da_sola(
-    radice_finta: Path,
+    radice_finta: Path, chiavi: Chiavi
 ):
     """Senza terminale non c'è nessuno a cui chiedere, quindi non si tocca.
 
@@ -114,72 +155,189 @@ def test_un_valore_gia_compilato_non_viene_sovrascritto_da_sola(
     stato rilanciato è la regola di idempotenza del bootstrap al contrario.
     """
     (radice_finta / "sshd" / "09-hermes-allowusers.conf").write_text(
-        "AllowUsers gabri hermes\n", encoding="utf-8"
+        "AllowUsers nobody hermes\n", encoding="utf-8"
     )
-    esito = esegui(radice_finta, *completo())
+    esito = esegui(radice_finta, *completo(chiavi))
     assert esito.returncode == 0, esito.stderr
-    assert "già compilato (gabri hermes)" in esito.stdout
+    assert "già compilato (nobody hermes)" in esito.stdout
 
 
-def test_con_forza_un_valore_gia_compilato_viene_sostituito(radice_finta: Path):
+def test_con_forza_un_valore_gia_compilato_viene_sostituito(
+    radice_finta: Path, chiavi: Chiavi
+):
     """`--forza` è la risposta «sì» data in anticipo.
 
     Serve dove la domanda non si può fare: senza terminale, e nei test.
     """
     (radice_finta / "sshd" / "09-hermes-allowusers.conf").write_text(
-        "AllowUsers gabri hermes\n", encoding="utf-8"
+        "AllowUsers nobody hermes\n", encoding="utf-8"
     )
-    esito = esegui(radice_finta, "--forza", *completo())
+    esito = esegui(radice_finta, "--forza", *completo(chiavi))
     assert esito.returncode == 0, esito.stderr
     assert "AllowUsers root hermes" in esito.stdout
 
 
-def test_il_perimetro_generato_passa_il_caricatore_vero(radice_finta: Path):
+def test_il_perimetro_generato_passa_il_caricatore_vero(
+    radice_finta: Path, chiavi: Chiavi
+):
     """Non si riscrivono le regole delle reti: si usa il caricatore.
 
     Due verità divergono col tempo, e quella sbagliata sarebbe la prima che
     l'operatore vede. Lo script scrive il perimetro in un file temporaneo e
-    lo installa solo se `ScopeAllowlist.carica` lo accetta; questo test
-    verifica che un caso buono arrivi fino a quel punto.
+    lo installa solo se `ScopeAllowlist.carica` lo accetta.
     """
-    esito = esegui(radice_finta, *completo(**{"--reti": "192.168.56.0/255.255.255.0"}))
+    esito = esegui(radice_finta, *completo(chiavi, **{"--reti": "192.0.2.0/255.255.255.0"}))
     assert esito.returncode == 0, esito.stderr
-    # Forma canonica, non quella battuta: il file deve contenere ciò che il
-    # caricatore confronterà.
-    assert "192.168.56.0/24" in esito.stdout
+    # Forma canonica, non quella battuta.
+    assert "192.0.2.0/24" in esito.stdout
 
 
-# --- I rifiuti, che sono il punto ----------------------------------------- #
+# --- Le chiavi ------------------------------------------------------------- #
 
 
-def test_un_utente_inesistente_viene_rifiutato(radice_finta: Path):
-    """Un refuso nel nome passa `sshd -t`, passa il preflight, e chiude fuori.
+def test_la_chiave_dellamministratore_va_nella_sua_authorized_keys(
+    radice_finta: Path, chiavi: Chiavi
+):
+    """Va messa prima del ricarico di sshd, o l'amministratore resta fuori.
 
-    È l'unico valore di tutta la procedura il cui errore non si ripara in
-    SSH, perché toglie proprio l'SSH.
+    E il file deve essere del suo utente con modo 600: con un altro
+    proprietario StrictModes lo ignora in silenzio, e il sintomo è lo stesso
+    `Permission denied` di una chiave rotta.
     """
-    esito = esegui(radice_finta, *completo(**{"--utente": "nessun-utente-cosi"}))
-    assert esito.returncode != 0
-    assert "non esiste su questa macchina" in esito.stdout + esito.stderr
+    esito = esegui(radice_finta, *completo(chiavi))
+    assert esito.returncode == 0, esito.stderr
+    ak = radice_finta / "home" / ".ssh" / "authorized_keys"
+    assert f"{ak} (modo 600, di root:" in esito.stdout
+    assert chiavi.admin in esito.stdout
 
 
-def test_un_utente_di_servizio_viene_rifiutato(radice_finta: Path):
-    """`hermes` è già in elenco: qui va l'amministratore, non il servizio."""
-    esito = esegui(radice_finta, *completo(**{"--utente": "hermes"}))
+def test_le_chiavi_gia_presenti_non_si_toccano(radice_finta: Path, chiavi: Chiavi):
+    """Si aggiunge, non si sostituisce.
+
+    Una authorized_keys può contenere chiavi che servono ad altro: cancellarle
+    per installare la nostra chiuderebbe fuori qualcun altro, o noi stessi da
+    un'altra postazione.
+    """
+    ssh = radice_finta / "home" / ".ssh"
+    ssh.mkdir()
+    preesistente = "ssh-ed25519 AAAApreesistente chiave@altra-postazione"
+    (ssh / "authorized_keys").write_text(preesistente + "\n", encoding="utf-8")
+
+    esito = esegui(radice_finta, *completo(chiavi))
+    assert esito.returncode == 0, esito.stderr
+    assert preesistente in esito.stdout
+    assert chiavi.admin in esito.stdout
+
+
+def test_una_chiave_gia_presente_non_si_aggiunge_due_volte(
+    radice_finta: Path, chiavi: Chiavi
+):
+    ssh = radice_finta / "home" / ".ssh"
+    ssh.mkdir()
+    (ssh / "authorized_keys").write_text(chiavi.admin + "\n", encoding="utf-8")
+
+    esito = esegui(radice_finta, *completo(chiavi))
+    assert esito.returncode == 0, esito.stderr
+    assert "già presente" in esito.stdout
+
+
+def test_una_chiave_spezzata_dallincollata_viene_rifiutata(
+    radice_finta: Path, chiavi: Chiavi
+):
+    """Il guasto del collaudo: il terminale consegna solo la prima riga.
+
+    Il validatore di prima la accettava — una riga sola, inizia con
+    `ssh-ed25519` — e finiva in authorized_keys. Al passo di verifica arrivava
+    un `Permission denied (publickey)` che non nominava la causa, e ci sono
+    volute quattro diagnosi per trovarla. `ssh-keygen -l` la rifiuta.
+    """
+    spezzata = chiavi.admin[:50]
+    esito = esegui(radice_finta, *completo(chiavi, **{"--chiave-admin": spezzata}))
     assert esito.returncode != 0
-    assert "utente di servizio" in esito.stdout + esito.stderr
+    assert "spezzata o incompleta" in uscita(esito)
+
+
+def test_una_chiave_con_un_carattere_in_meno_viene_rifiutata(
+    radice_finta: Path, chiavi: Chiavi
+):
+    tipo, blob, commento = chiavi.servizio.split(" ", 2)
+    mutila = f"{tipo} {blob[:-1]} {commento}"
+    esito = esegui(radice_finta, *completo(chiavi, **{"--chiave": mutila}))
+    assert esito.returncode != 0
+    assert "spezzata o incompleta" in uscita(esito)
+
+
+def test_le_chiavi_scambiate_vengono_rifiutate(radice_finta: Path, chiavi: Chiavi):
+    """Stessa forma, stessa lunghezza: l'unico appiglio è il commento.
+
+    Con le chiavi scambiate, la chiave del servizio — quella con il comando
+    vincolato — finirebbe nella authorized_keys dell'amministratore, e la sua
+    nel canale del servizio.
+    """
+    esito = esegui(
+        radice_finta,
+        *completo(chiavi, **{"--chiave-admin": str(chiavi.servizio_file),
+                             "--chiave": str(chiavi.admin_file)}),
+    )
+    assert esito.returncode != 0
+    assert "è la chiave del SERVIZIO" in uscita(esito)
+
+
+def test_la_stessa_chiave_due_volte_viene_rifiutata(
+    radice_finta: Path, chiavi: Chiavi, tmp_path: Path
+):
+    """Anche quando il commento non aiuta, il blob sì."""
+    neutra = tmp_path / "neutra.pub"
+    tipo, blob, _ = chiavi.admin.split(" ", 2)
+    neutra.write_text(f"{tipo} {blob} senza-indizi\n", encoding="utf-8")
+
+    esito = esegui(
+        radice_finta,
+        *completo(chiavi, **{"--chiave-admin": str(neutra), "--chiave": str(neutra)}),
+    )
+    assert esito.returncode != 0
+    assert "devono essere diverse" in uscita(esito)
+
+
+def test_un_ssh_che_e_un_link_simbolico_viene_rifiutato(
+    radice_finta: Path, chiavi: Chiavi, tmp_path: Path
+):
+    """Da root, seguire il link vorrebbe dire scrivere dove punta.
+
+    Cioè dove ha deciso chi l'ha creato. Lo script scrive nella home di un
+    altro utente con i privilegi di root: un link al posto di ~/.ssh è
+    esattamente il modo di dirottare quella scrittura.
+    """
+    altrove = tmp_path / "altrove"
+    altrove.mkdir()
+    (radice_finta / "home" / ".ssh").symlink_to(altrove)
+
+    esito = esegui(radice_finta, *completo(chiavi))
+    assert esito.returncode != 0
+    assert "link simbolico" in uscita(esito)
+
+
+def test_un_allowusers_con_un_utente_inesistente_lo_dice_adesso(
+    radice_finta: Path, chiavi: Chiavi
+):
+    """Meglio scoprirlo qui che al ricarico di sshd.
+
+    Un AllowUsers compilato a mano prima che questo script lo validasse può
+    nominare un utente che sulla macchina non c'è: con le password spente,
+    quello è un lockout.
+    """
+    (radice_finta / "sshd" / "09-hermes-allowusers.conf").write_text(
+        "AllowUsers nessun-utente-cosi hermes\n", encoding="utf-8"
+    )
+    esito = esegui(radice_finta, *completo(chiavi))
+    assert esito.returncode != 0
+    assert "non esiste su questa macchina" in uscita(esito)
 
 
 def test_una_chiave_privata_incollata_per_sbaglio_viene_rifiutata(
-    radice_finta: Path, tmp_path: Path
+    radice_finta: Path, chiavi: Chiavi, tmp_path: Path
 ):
-    """Il refuso più caro: la privata al posto della pubblica.
-
-    Finirebbe in `authorized_keys`, dove non autentica nessuno, e la
-    copia leggibile da `sshd` di una chiave privata è un problema di suo. Si
-    riconosce dal numero di righe, che è l'unica differenza robusta fra le
-    due senza interpretarne il contenuto.
-    """
+    """Il refuso più caro: la privata al posto della pubblica."""
     privata = tmp_path / "finta_privata"
     privata.write_text(
         "-----BEGIN OPENSSH PRIVATE KEY-----\n"
@@ -187,92 +345,127 @@ def test_una_chiave_privata_incollata_per_sbaglio_viene_rifiutata(
         "-----END OPENSSH PRIVATE KEY-----\n",
         encoding="utf-8",
     )
-    esito = esegui(radice_finta, *completo(**{"--chiave": str(privata)}))
+    esito = esegui(radice_finta, *completo(chiavi, **{"--chiave": str(privata)}))
     assert esito.returncode != 0
-    assert "una riga sola" in esito.stdout + esito.stderr
+    assert "una riga sola" in uscita(esito)
 
 
-def test_una_chiave_senza_forma_di_chiave_viene_rifiutata(radice_finta: Path):
-    esito = esegui(radice_finta, *completo(**{"--chiave": "questa non è una chiave"}))
+def test_una_chiave_senza_forma_di_chiave_viene_rifiutata(
+    radice_finta: Path, chiavi: Chiavi
+):
+    esito = esegui(radice_finta, *completo(chiavi, **{"--chiave": "questa non è una chiave"}))
     assert esito.returncode != 0
-    assert "forma di una chiave pubblica" in esito.stdout + esito.stderr
+    assert "forma di una chiave pubblica" in uscita(esito)
 
 
-def test_un_host_al_posto_di_una_rete_viene_rifiutato(radice_finta: Path):
-    """`192.168.56.1/24` non è una rete: è un host dentro una rete.
+# --- Gli altri rifiuti ----------------------------------------------------- #
+
+
+def test_un_utente_inesistente_viene_rifiutato(radice_finta: Path, chiavi: Chiavi):
+    """Un refuso nel nome passa `sshd -t`, passa il preflight, e chiude fuori."""
+    esito = esegui(radice_finta, *completo(chiavi, **{"--utente": "nessun-utente-cosi"}))
+    assert esito.returncode != 0
+    assert "non esiste su questa macchina" in uscita(esito)
+
+
+def test_un_utente_di_servizio_viene_rifiutato(radice_finta: Path, chiavi: Chiavi):
+    """`hermes` è già in elenco: qui va l'amministratore, non il servizio."""
+    esito = esegui(radice_finta, *completo(chiavi, **{"--utente": "hermes"}))
+    assert esito.returncode != 0
+    assert "utente di servizio" in uscita(esito)
+
+
+def test_un_host_al_posto_di_una_rete_viene_rifiutato(radice_finta: Path, chiavi: Chiavi):
+    """`192.0.2.1/24` non è una rete: è un host dentro una rete.
 
     Accettarlo e correggerlo in silenzio darebbe un perimetro diverso da
-    quello che l'operatore crede di aver scritto — e in un verso che allarga,
-    non restringe.
+    quello che l'operatore crede di aver scritto — e in un verso che allarga.
     """
-    esito = esegui(radice_finta, *completo(**{"--reti": "192.168.56.1/24"}))
+    esito = esegui(radice_finta, *completo(chiavi, **{"--reti": "192.0.2.1/24"}))
     assert esito.returncode != 0
-    assert "host bits set" in (esito.stdout + esito.stderr).lower()
+    assert "host bits set" in uscita(esito).lower()
 
 
-def test_un_alias_fuori_dalle_reti_viene_rifiutato(radice_finta: Path):
+def test_un_alias_fuori_dalle_reti_viene_rifiutato(radice_finta: Path, chiavi: Chiavi):
     """Un bersaglio che il gate rifiuterebbe, dichiarato come ammesso."""
-    esito = esegui(radice_finta, *completo(**{"--alias": "altrove=10.0.2.15"}))
+    esito = esegui(radice_finta, *completo(chiavi, **{"--alias": "altrove=198.51.100.15"}))
     assert esito.returncode != 0
-    assert "non è in nessuna delle reti" in esito.stdout + esito.stderr
+    assert "non è in nessuna delle reti" in uscita(esito)
 
 
-def test_una_interfaccia_inesistente_viene_rifiutata(radice_finta: Path):
-    """Un nome sbagliato produce un netplan valido che non configura niente.
+def test_una_interfaccia_inesistente_viene_rifiutata(radice_finta: Path, chiavi: Chiavi):
+    """Un nome sbagliato produce un netplan valido che non configura niente."""
+    esito = esegui(
+        radice_finta, *completo(chiavi),
+        "--interfaccia", "inesistente0", "--indirizzo", "192.0.2.10/24",
+    )
+    assert esito.returncode != 0
+    assert "non esiste" in uscita(esito)
 
-    E lo scopri applicandolo, cioè quando l'indirizzo vecchio è già sparito.
+
+def test_un_indirizzo_senza_prefisso_viene_rifiutato(radice_finta: Path, chiavi: Chiavi):
+    esito = esegui(
+        radice_finta, *completo(chiavi), "--interfaccia", "lo", "--indirizzo", "192.0.2.10"
+    )
+    assert esito.returncode != 0
+    assert "lunghezza del prefisso" in uscita(esito)
+
+
+# --- Il blocco Host del passo 7 ------------------------------------------- #
+
+
+def test_il_blocco_host_esce_compilato_con_i_valori_veri(
+    radice_finta: Path, chiavi: Chiavi
+):
+    """L'ultimo segnaposto della procedura lo scrive chi conosce i valori.
+
+    Nome, indirizzo e utente sono tre valori che la macchina sa e la persona
+    deve ricordare — e l'indirizzo cambia a metà procedura, dal DHCP a quello
+    fisso. Nel collaudo un segnaposto `INDIRIZZO` usato per entrambi ha
+    confuso chi installava.
     """
     esito = esegui(
-        radice_finta,
-        *completo(),
-        "--interfaccia",
-        "enp0s99",
-        "--indirizzo",
-        "192.168.56.10/24",
+        radice_finta, *completo(chiavi), "--interfaccia", "lo", "--indirizzo", "192.0.2.10/24"
     )
-    assert esito.returncode != 0
-    assert "non esiste" in esito.stdout + esito.stderr
+    assert esito.returncode == 0, esito.stderr
+    nome = platform.node()
+    assert f"Host {nome}" in esito.stdout
+    assert "HostName 192.0.2.10" in esito.stdout
+    assert "User root" in esito.stdout
+    assert f"IdentityFile ~/.ssh/id_ed25519_{nome}_admin" in esito.stdout
+    assert "IdentitiesOnly yes" in esito.stdout
 
 
-def test_un_indirizzo_senza_prefisso_viene_rifiutato(radice_finta: Path):
-    esito = esegui(
-        radice_finta, *completo(), "--interfaccia", "lo", "--indirizzo", "192.168.56.10"
-    )
-    assert esito.returncode != 0
-    assert "lunghezza del prefisso" in esito.stdout + esito.stderr
+def test_senza_indirizzo_fisso_il_blocco_host_lo_dice(radice_finta: Path, chiavi: Chiavi):
+    """Un segnaposto, ma uno che si dichiara tale e dice cosa metterci."""
+    esito = esegui(radice_finta, *completo(chiavi))
+    assert esito.returncode == 0, esito.stderr
+    assert "HostName INDIRIZZO-DELLA-VM" in esito.stdout
+    assert "Nessun indirizzo fisso configurato" in esito.stdout
 
 
 # --- Non interattivo ------------------------------------------------------- #
 
 
 def test_senza_terminale_un_valore_mancante_nomina_la_sua_opzione(
-    radice_finta: Path,
+    radice_finta: Path, chiavi: Chiavi
 ):
-    """Non si aspetta un umano che non c'è.
-
-    Senza terminale lo script non può chiedere: deve dire quale opzione
-    manca e uscire, invece di leggere una riga vuota e proseguire con un
-    valore che nessuno ha scelto.
-    """
-    esito = esegui(radice_finta, "--chiave", CHIAVE_VALIDA)
+    """Non si aspetta un umano che non c'è."""
+    esito = esegui(radice_finta, "--chiave", str(chiavi.servizio_file))
     assert esito.returncode != 0
-    assert "--utente" in esito.stdout + esito.stderr
+    assert "--utente" in uscita(esito)
 
 
-# --- Invarianti di sicurezza ---------------------------------------------- #
+# --- Invarianti ------------------------------------------------------------ #
 
 
 def test_non_ricarica_sshd_e_non_tocca_le_regole_aperte():
-    """Le due azioni irreversibili restano all'operatore.
+    """Le azioni irreversibili restano all'operatore.
 
     Ricaricare `sshd` con un AllowUsers sbagliato, o cancellare la regola
     aperta della 22 con un indirizzo sbagliato, producono lo stesso esito: una
-    macchina remota che non si raggiunge più, con il sintomo alla prossima
-    connessione e non adesso. Durante il test di accettazione è successo due
-    volte in un giorno, entrambe seguendo la procedura.
-
-    Si guarda che non vengano ESEGUITE: le stesse parole compaiono di
-    proposito nei promemoria, che è il modo giusto di nominarle.
+    macchina remota che non si raggiunge più. Si guarda che non vengano
+    ESEGUITE: le stesse parole compaiono di proposito nei promemoria.
     """
     righe = SCRIPT.read_text(encoding="utf-8").splitlines()
     eseguite = [
@@ -285,50 +478,47 @@ def test_non_ricarica_sshd_e_non_tocca_le_regole_aperte():
 
 
 def test_ogni_valore_dice_da_dove_ricavarlo():
-    """Sei domande, sei comandi per andare a guardare.
+    """Ogni domanda ha il suo comando per andare a guardare, come «prova».
 
-    Presentati come «prova», non come risposta: il comando mostra dove
-    guardare e la scelta resta di chi installa. `$SUDO_USER` è vuoto se si è
-    entrati come root, l'ARP conosce solo chi ha parlato di recente, e fra due
-    reti attaccate quale serva non lo dice `ip route`. Un comando presentato
-    come definitivo diventa un valore incollato senza riletture — che è
-    esattamente come `monika` e `192.168.205.0/24` sono arrivati dove sono
-    arrivati.
+    Un comando presentato come definitivo diventa un valore incollato senza
+    riletture: il nome utente in AllowUsers e la rete nel modello del
+    perimetro sono arrivati dove sono arrivati esattamente così.
     """
     script = SCRIPT.read_text(encoding="utf-8")
 
     assert "prova:" in script
     for comando in (
-        "$SUDO_USER",          # utente amministrativo
-        "id_ed25519_hermes",   # chiave del servizio, sulla postazione
-        "route show scope link",  # reti del perimetro
-        "ip neigh",            # candidati per gli alias
-        "$SSH_CONNECTION",     # indirizzo della postazione
-        "ip -br a",            # interfaccia e indirizzo
+        "$SUDO_USER",               # utente amministrativo
+        "id_ed25519_${VM}_admin",   # la sua chiave, sulla postazione
+        "id_ed25519_hermes_$VM",    # quella del servizio
+        "route show scope link",    # reti del perimetro
+        "ip neigh",                 # candidati per gli alias
+        "$SSH_CONNECTION",          # indirizzo della postazione
+        "ip -br a",                 # interfaccia e indirizzo
     ):
         assert comando in script, comando
 
-    # Tanti suggerimenti quante sono le domande: se se ne aggiunge una senza
-    # il suo, questo conteggio lo dice.
-    assert script.count("suggerimento ") >= 7
+    assert script.count("suggerimento ") >= 8
+
+
+def test_lo_script_non_contiene_riferimenti_a_un_laboratorio_specifico():
+    """Una cassetta degli attrezzi portabile non porta il nome di chi l'ha fatta.
+
+    Gli esempi stanno in 192.0.2.0/24, riservata alla documentazione: un
+    esempio copiato per sbaglio in un perimetro non autorizza niente di reale.
+    Una rete di laboratorio vera, invece, sì — ed è già successo, con il
+    modello del perimetro.
+    """
+    script = SCRIPT.read_text(encoding="utf-8")
+    for specifico in ("192.168.", "10.0.2.", "enp0s", "ens33"):
+        assert specifico not in script, specifico
 
 
 def test_i_percorsi_coincidono_con_quelli_del_bootstrap():
-    """Dove la copia è inevitabile, la coincidenza va verificata.
-
-    I due script scrivono negli stessi file. Se un percorso cambia in uno
-    solo, `configura` compila un file che nessuno legge — e il preflight
-    continua a segnalare il segnaposto nel file vero, mandando a cercare un
-    guasto che non c'è.
-    """
+    """Dove la copia è inevitabile, la coincidenza va verificata."""
     configura = SCRIPT.read_text(encoding="utf-8")
     bootstrap = (RADICE / "bin" / "hermes-bootstrap").read_text(encoding="utf-8")
 
-    for atteso in (
-        "09-hermes-allowusers.conf",
-        "10-hermes.conf",
-        "scope.toml",
-        "DA_COMPILARE",
-    ):
+    for atteso in ("09-hermes-allowusers.conf", "10-hermes.conf", "scope.toml", "DA_COMPILARE"):
         assert atteso in configura, atteso
         assert atteso in bootstrap, atteso
