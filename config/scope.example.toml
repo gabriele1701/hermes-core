@@ -87,8 +87,9 @@ reti = [
 # delle reti dichiarate sopra, altrimenti il file direbbe nello stesso momento
 # che quell'indirizzo è ammesso e che non lo è.
 #
-# Nel log restano entrambi — il nome chiesto dal modello e l'indirizzo
-# raggiunto — così la traccia dice cosa è stato toccato davvero.
+# Nel log restano entrambi — il nome chiesto dal modello nel campo `target`,
+# l'indirizzo raggiunto nel `detail` — così la traccia dice cosa è stato
+# toccato davvero.
 [alias]
 # Esempio, con indirizzi di documentazione (RFC 5737) da sostituire:
 # web = "198.51.100.20"

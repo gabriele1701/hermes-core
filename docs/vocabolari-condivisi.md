@@ -24,7 +24,8 @@ Ogni voce ha uno di tre stati:
 
 Confronto fatto il 15 novembre 2026 leggendo gli enum nel codice, non la
 documentazione: `hermes-core` dopo l'aggiunta dei bersagli di tipo percorso,
-il pannello a `6558313`.
+il pannello a `6558313`. Le due righe sui caratteri del prefisso sono state
+aggiornate il 17 novembre, dopo la migrazione 0005 del pannello.
 
 **La colonna del server è verificata da un test** (`tests/test_vocabolari.py`):
 se un enum cambia e questa tabella no, la suite cade. **La colonna del
@@ -185,8 +186,8 @@ policy che non si applica**.
 | prefisso: assoluto, mai `/`, senza barra finale, senza `//` | sì | sì | allineato |
 | prefisso: lunghezza massima | 256 | 256 | allineato |
 | prefisso: `..` | vietato come **segmento** | vietato come **sottostringa** | divergente per scelta |
-| prefisso: caratteri ammessi | solo alfanumerici, `.`, `_`, `-` | tutto tranne `\`, caratteri di controllo e spazi esterni | **divergente da chiudere** |
-| prefisso: segmento `.` | vietato | non verificato | **divergente da chiudere** |
+| prefisso: caratteri ammessi | solo alfanumerici, `.`, `_`, `-` | gli stessi, dalla migrazione 0005 | allineato |
+| prefisso: segmento `.` | vietato | vietato, dalla migrazione 0005 | allineato |
 | prefisso: deve esistere e non essere un symlink | sì, sulla macchina | non verificabile | divergente per scelta |
 
 **Nome di un alias, e `..`.** Il pannello è più stretto: niente maiuscole e
@@ -194,21 +195,25 @@ niente `_` negli alias, e rifiuta `/srv/lab..vecchio` che il server
 accetterebbe. Direzione innocua. Non vale la pena allargare il pannello né
 stringere il server.
 
-**Caratteri del prefisso — da chiudere.** È l'unica divergenza che oggi
-romperebbe qualcosa. Il pannello accetta `/srv/campioni lab` e
-`/srv/a:b`; il server li rifiuta, perché un prefisso finisce in una direttiva
-di montaggio di systemd dove lo spazio separa due percorsi e `:` separa
-sorgente e destinazione. Un prefisso così, dichiarato nel pannello e portato
-sul server, farebbe **fallire il caricamento dell'intero perimetro** — reti
-comprese, perché il file è uno solo.
+**Caratteri del prefisso e segmento `.` — chiuse.** Erano le due sole
+divergenze che avrebbero rotto qualcosa. Il pannello accettava
+`/srv/campioni lab`, `/srv/a:b` e `/srv/./lab`; il server li rifiuta, perché
+un prefisso finisce in una direttiva di montaggio di systemd dove lo spazio
+separa due percorsi e `:` separa sorgente e destinazione. Un prefisso così,
+dichiarato nel pannello e portato sul server, avrebbe fatto **fallire il
+caricamento dell'intero perimetro** — reti comprese, perché il file è uno
+solo.
 
-Va chiusa nel pannello, con un `CHECK` in più su `scope_paths` e lo stesso
-messaggio. Non sul server: allargare lì vorrebbe dire dover fare l'escape di
-un percorso dentro una direttiva, cioè reintrodurre la classe di difetto che
-la regola esiste per escludere.
+Sono state chiuse nel pannello, con la migrazione `0005_prefissi_montabili`:
+due `CHECK` in più su `scope_paths`, ciascuno con la sua spiegazione. Non sul
+server: allargare lì avrebbe voluto dire fare l'escape di un percorso dentro
+una direttiva, cioè reintrodurre la classe di difetto che la regola esiste
+per escludere.
 
-**Segmento `.` — da chiudere**, insieme alla precedente: `/srv/./lab` passa
-i vincoli del pannello e non quelli del server.
+Per il pannello ha voluto dire rovesciare una scelta scritta nei suoi test:
+lo spazio interno era ammesso di proposito, perché è un nome di directory
+legittimo. Resta vero per il filesystem; non lo è per un prefisso che deve
+diventare un mount.
 
 **Esistenza del prefisso.** Il pannello non gira sulla macchina dei tool e
 non può sapere se `/srv/lab` esiste lì. Lo verificano il preflight, il gate e
@@ -216,12 +221,12 @@ il wrapper. Resta così.
 
 ## Cosa manca perché l'integrazione sia un collegamento
 
-In ordine, e nessuno dei tre è in questo repo oggi:
+Le due voci «da chiudere» sui prefissi di percorso sono chiuse, quindi oggi
+**nessuna divergenza romperebbe l'integrazione**. Restano due cose, e nessuna
+è in questo repo:
 
-1. **Chiudere le due voci «da chiudere»** sui prefissi di percorso, nel
-   pannello. È l'unico lavoro che questo documento rende necessario.
-2. **Rifare la fotografia del pannello** contro il codice del momento. La
+1. **Rifare la fotografia del pannello** contro il codice del momento. La
    colonna di destra invecchia senza che niente lo dica.
-3. **Scrivere la mappa dei nomi di campo una volta sola**, nell'ingestione, e
+2. **Scrivere la mappa dei nomi di campo una volta sola**, nell'ingestione, e
    farla fallire su un valore che non conosce invece di scartarlo: una riga
    persa in silenzio è il difetto che questo documento esiste per prevenire.

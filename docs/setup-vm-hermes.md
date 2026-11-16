@@ -763,7 +763,9 @@ Due regole che il caricamento impone, e che fa fallire l'avvio se violate:
   altrimenti il file direbbe nello stesso momento che quell'indirizzo è
   ammesso e che non lo è.
 
-Nel log restano entrambi: il nome chiesto dal modello e l'indirizzo raggiunto.
+Nel log restano entrambi: il nome chiesto dal modello nel campo `target`,
+l'indirizzo raggiunto nel `detail` (`indirizzo risolto: …`) — sempre, anche
+quando il modello ha passato direttamente un indirizzo.
 
 ### I bersagli di tipo percorso
 
@@ -886,7 +888,7 @@ Tre invocazioni, che insieme coprono ciò che il perimetro promette:
 
 | Invocazione | Atteso |
 |---|---|
-| `echo.bersaglio` su un alias dichiarato | `ok`, e nell'output `args` contiene `["--bersaglio", "--", "<indirizzo>"]` — l'alias risolto dal file, non dal DNS |
+| `echo.bersaglio` su un alias dichiarato | `ok`, e nell'output `args` contiene `["--bersaglio", "--", "<indirizzo>"]` — l'alias risolto dal file, non dal DNS. Nel log la riga ha l'alias in `target` e `indirizzo risolto: <indirizzo>` nel `detail` |
 | `echo.bersaglio` su un indirizzo fuori perimetro (es. `192.0.2.1`, che non è instradabile) | `denied`, con `fuori dal perimetro` nel motivo e il bersaglio tentato nella riga di log |
 | `echo.ping` con un bersaglio | `denied`: dichiara `target_kind = "none"`, quindi un bersaglio è un rifiuto e non un valore ignorato |
 
