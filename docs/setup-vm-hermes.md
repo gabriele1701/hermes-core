@@ -921,16 +921,18 @@ sudo bin/hermes-collauda-percorsi
 
 Percorre la catena reale — wrapper installato, file di perimetro vero, unità
 transiente sotto `hermes-tool` — e al posto di un tool mette una sonda che
-legge un byte. Nove prove, in due gruppi, e l'ordine è il punto:
+legge un byte. Undici prove, in due gruppi, e l'ordine è il punto:
 
 | Unità | Prova | Atteso |
 |---|---|---|
 | normale | file fuori perimetro, symlink che esce, file di perimetro, scrittura | **riescono** |
+| normale | un'interfaccia di rete oltre alla loopback | **c'è** |
 | ristretta | file dentro il perimetro | si apre |
 | ristretta | file fuori perimetro | **non si apre** |
 | ristretta | symlink dentro il perimetro che punta fuori | **non dà accesso** |
 | ristretta | il file di perimetro | **non si apre** |
 | ristretta | scrittura nel perimetro | **negata** (sola lettura) |
+| ristretta | interfacce di rete oltre alla loopback | **nessuna** |
 
 Il primo gruppo è il controllo del controllo: un «non si apre» non prova
 niente se quel file non si aprirebbe comunque. Se i controlli non riescono lo
@@ -1047,7 +1049,7 @@ Si stringono quando c'è qualcosa da misurare: è una voce aperta in
 #### Il montaggio ristretto, per i bersagli di tipo percorso
 
 Per un tool con `target_kind = "path"` il gate aggiunge una parola,
-`--percorsi`, e il wrapper aggiunge quattro direttive:
+`--percorsi`, e il wrapper aggiunge cinque direttive:
 
 ```
 hermes-tool-run <unità> <timeout> --percorsi -- <comando>
@@ -1055,7 +1057,7 @@ hermes-tool-run <unità> <timeout> --percorsi -- <comando>
     -p TemporaryFileSystem=/:ro \
     -p BindReadOnlyPaths="/usr -/bin -/sbin -/lib -/lib64 -/etc/ld.so.cache \
                           -/etc/alternatives <directory degli script> <prefissi…>" \
-    -p PrivateTmp=yes -p PrivateDevices=yes
+    -p PrivateTmp=yes -p PrivateDevices=yes -p PrivateNetwork=yes
 ```
 
 `TemporaryFileSystem=/:ro` dà all'unità uno spazio dei nomi di mount in cui la
@@ -1089,11 +1091,14 @@ Tre cose da sapere su ciò che resta visibile:
   il repo è un fatto dell'installazione, quindi non una costante: il bootstrap
   lo scrive in `/etc/hermes/radice-script`, di root, una riga.
 * **`/tmp` e `/dev`** sono privati dell'unità e spariscono con lei.
+* **La rete non c'è.** `PrivateNetwork=yes` dà all'unità la sola interfaccia
+  di loopback: un tool che lavora su un file non ha niente da raggiungere, e
+  non c'è niente da filtrare perché non c'è da dove uscire.
 
-Tre cose che **non** dà, e che arriveranno col primo tool reale: una directory
-di lavoro scrivibile (Ghidra ne ha bisogno), `/proc` (GDB e Frida ne hanno
-bisogno — ed è il motivo per cui `process` è un altro tipo di bersaglio), e
-il confinamento della rete, che resta una voce aperta del debito.
+Due cose che **non** dà, e che arriveranno col primo tool reale: una
+directory di lavoro scrivibile (Ghidra ne ha bisogno) e `/proc` (GDB e Frida
+ne hanno bisogno — ed è il motivo per cui `process` è un altro tipo di
+bersaglio).
 
 I tool senza bersaglio e quelli di tipo `host` non ricevono l'opzione, e la
 loro unità è quella di prima.

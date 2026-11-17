@@ -61,6 +61,18 @@ except OSError as err:
     raise SystemExit(3)
 '
 
+# Esito 0 se l'unità vede la sola interfaccia di loopback, 3 se ne vede
+# altre. Si contano le interfacce e non si prova a connettersi: una
+# connessione che fallisce può fallire per mille ragioni fuori da qui — un
+# host spento, un firewall — e un rifiuto per la ragione sbagliata non prova
+# niente. Un'interfaccia che non c'è, invece, è il confine.
+SONDA_RETE='import socket, sys
+altre = [nome for _, nome in socket.if_nameindex() if nome != "lo"]
+if altre:
+    print("interfacce: " + ", ".join(altre), file=sys.stderr)
+    raise SystemExit(3)
+'
+
 GUASTI=0
 
 fermati() {
@@ -163,12 +175,16 @@ prova 0 no "$SONDA_LETTURA" "$SCOPE" \
     "unità normale: il file di perimetro si apre" || CONTROLLI=no
 prova 0 no "$SONDA_SCRITTURA" "$DENTRO/scritto-senza" \
     "unità normale: nel perimetro si scrive" || CONTROLLI=no
+prova "$NON_APRIBILE" no "$SONDA_RETE" - \
+    "unità normale: c'è un'interfaccia di rete oltre alla loopback" || CONTROLLI=no
 
 if [ "$CONTROLLI" = no ]; then
     fermati "i controlli non riescono: l'utente dei tool non arriva a questi file
           nemmeno senza montaggio, quindi un rifiuto dall'unità ristretta non
           proverebbe niente. Causa tipica: hermes-tool non attraversa
           $PREFISSO (manca il bit x o un'ACL su una directory del percorso).
+          Se manca solo l'interfaccia di rete, la macchina non ne ha una:
+          l'assenza di rete nell'unità ristretta non si può distinguere.
           Collaudo NON eseguito."
 fi
 
@@ -183,6 +199,8 @@ prova "$NON_APRIBILE" si "$SONDA_LETTURA" "$SCOPE" \
     "il file di perimetro NON si apre" || true
 prova "$NON_APRIBILE" si "$SONDA_SCRITTURA" "$DENTRO/scritto-con" \
     "nel perimetro NON si scrive (sola lettura)" || true
+prova 0 si "$SONDA_RETE" - \
+    "nessuna interfaccia di rete oltre alla loopback" || true
 
 printf '\n'
 if [ "$GUASTI" -eq 0 ]; then
@@ -191,6 +209,6 @@ if [ "$GUASTI" -eq 0 ]; then
 fi
 printf 'Collaudo FALLITO: %s prove non hanno dato l'"'"'esito atteso.\n' "$GUASTI"
 printf 'Un esito 64 è il wrapper che rifiuta (il motivo è sulla riga); 226 è\n'
-printf 'systemd che non costruisce il montaggio; 0 dove era atteso %s è il\n' "$NON_APRIBILE"
-printf 'confine che non tiene.\n'
+printf 'systemd che non costruisce il montaggio. Su una prova «NON», o su quella\n'
+printf 'della rete, un altro esito è il confine che non tiene.\n'
 exit 1

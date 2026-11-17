@@ -697,6 +697,22 @@ def test_un_perimetro_non_di_root_ferma_il_wrapper_prima_di_systemd(wrapper):
     assert not wrapper.avviato, "systemd-run non deve partire"
 
 
+def test_il_motivo_del_rifiuto_sta_sulla_riga_che_il_preflight_legge(wrapper):
+    """Il preflight riporta l'ultima riga di stderr, e lì deve esserci il perché.
+
+    Prima il motivo usciva su una riga sua e la conclusione su un'altra: al
+    primo preflight dopo il collaudo, sulla VM, il referto diceva solo
+    «montaggio ristretto non applicabile», e la causa era una riga più su.
+    """
+    wrapper.scope.chmod(0o666)
+    esito = wrapper.esegui("--percorsi", "--", "/bin/echo", "ciao")
+    assert esito.returncode == 64
+    ultima = esito.stderr.strip().splitlines()[-1]
+    assert "montaggio ristretto non applicabile" in ultima
+    assert "deve essere di root e non scrivibile da altri" in ultima
+    assert "tool non avviato" in ultima
+
+
 def test_l_opzione_dopo_il_separatore_e_un_argomento_del_tool(wrapper):
     """`--percorsi` vale solo nella posizione del wrapper: dopo il `--` è
     roba del tool, e non accende niente."""
@@ -720,6 +736,8 @@ def test_con_l_opzione_il_wrapper_monta_solo_base_script_e_prefissi(wrapper):
     assert wrapper.proprieta("TemporaryFileSystem") == ["/:ro"]
     assert wrapper.proprieta("PrivateTmp") == ["yes"]
     assert wrapper.proprieta("PrivateDevices") == ["yes"]
+    # Decisione dell'operatore: chi lavora su un file non ha rete.
+    assert wrapper.proprieta("PrivateNetwork") == ["yes"]
 
     (montaggi,) = wrapper.proprieta("BindReadOnlyPaths")
     voci = montaggi.split()
@@ -859,6 +877,13 @@ def test_il_collaudo_e_uno_script_valido_ed_eseguibile():
     )
     assert esito.returncode == 0, esito.stderr
     assert collaudo.stat().st_mode & 0o111, "manca il bit di esecuzione"
+
+
+def test_il_collaudo_prova_la_rete_in_entrambe_le_unita():
+    """Il rifiuto sulla rete ha il suo controllo, come quelli sui file."""
+    collaudo = (RADICE / "bin" / "hermes-collauda-percorsi").read_text(encoding="utf-8")
+    prove = re.findall(r'^prova (\S+) (si|no) "\$SONDA_RETE"', collaudo, re.MULTILINE)
+    assert sorted(prove) == [('"$NON_APRIBILE"', "no"), ("0", "si")]
 
 
 def test_il_collaudo_non_mette_il_file_esterno_in_una_directory_privata():
@@ -1134,6 +1159,30 @@ def test_gate_e_wrapper_su_due_file_sono_due_perimetri(
     assert controllo.esito is Esito.ERRORE
     assert "due perimetri" in controllo.messaggio
     assert 'scope_file = "/etc/hermes/scope.toml"' in controllo.rimedio
+
+
+def test_un_prefisso_inutilizzabile_non_diventa_un_secondo_errore(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Il caso visto sulla VM: il prefisso di prova tolto dal disco e non dal file.
+
+    Senza tool di tipo percorso è un avviso, e il server deve restare
+    PRONTO. Prima il controllo del montaggio provava comunque l'unità
+    ristretta, il wrapper si rifiutava per la stessa causa, e l'avviso
+    diventava un errore — senza nemmeno il motivo.
+    """
+    scope = _scope_con_percorsi(tmp_path, str(tmp_path.resolve() / "rimosso"))
+    registro: list[list[str]] = []
+    _sonde_percorsi(monkeypatch, scope, registro=registro)
+    referto = esegui(
+        scrivi_config(
+            tmp_path, radice, scope_file=scope, tool_runner=WRAPPER_FINTO_DOCTOR
+        )
+    )
+    assert _controllo(referto, "perimetro dei percorsi").esito is Esito.AVVISO
+    assert not [n for n in _nomi(referto) if n.startswith("montaggio")]
+    assert not [a for a in registro if OPZIONE_PERCORSI in a]
+    assert not [c for c in referto.controlli if "percors" in c.nome and c.esito is Esito.ERRORE]
 
 
 def test_senza_percorsi_dichiarati_il_montaggio_non_si_prova(
