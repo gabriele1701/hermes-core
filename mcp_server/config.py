@@ -100,6 +100,13 @@ class ServerConfig:
     agent: OwnerAgent
     repo_root: Path
     log_path: Path
+    #: **Non ha più effetto.** Era la dichiarazione dell'operatore che un
+    #: runtime isolato esistesse; nessuno la verificava, e messa a true
+    #: lasciava girare un tool «isolato» nell'unità di tutti gli altri.
+    #: L'isolamento ora è l'unità ristretta del wrapper (`tool_runner`), che
+    #: o c'è o nega. La chiave resta accettata perché le configurazioni
+    #: esistenti la contengono, e rifiutarla fermerebbe un server che non ha
+    #: niente di rotto; il preflight avvisa se dice true.
     container_available: bool = False
     #: Directory dello stato che deve sopravvivere alla connessione — oggi lo
     #: store degli override di tier. ``None`` significa **non configurata**, e

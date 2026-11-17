@@ -75,6 +75,7 @@ from mcp_server.executor import (
     ExecutionError,
     IntegrityMismatch,
     SharedSlotsUnusable,
+    TIMEOUT_DEFAULT,
     TargetOutOfScope,
     ToolExecutor,
     ToolRunnerUnusable,
@@ -173,7 +174,6 @@ class HermesServer:
             self._registry,
             self._audit,
             repo_root=config.repo_root,
-            container_available=config.container_available,
             tool_python=config.tool_python,
             tool_python_flags=config.tool_python_flags,
             max_output_bytes=config.max_output_bytes,
@@ -331,7 +331,10 @@ class HermesServer:
             "agent": self._config.agent.value,
             "vault_backend": self._vault.nome_backend,
             "vault_is_stub": self._vault.e_stub,
-            "container_available": self._config.container_available,
+            # Prima `container_available`: un booleano che scriveva
+            # l'operatore e nessuno verificava. Ora l'isolamento è l'unità
+            # ristretta del wrapper, e c'è se il wrapper c'è.
+            "isolamento_disponibile": self._executor.isolamento_disponibile,
             # Come gli altri due: un presidio che non c'è va dichiarato dove
             # lo si legge, non solo nel preflight. False significa che il
             # tetto sulle esecuzioni vale per questo processo, e l'host ne
@@ -511,6 +514,9 @@ class HermesServer:
             "effective_tier": self._registry.effective_tier(tool_id).value,
             "personal_data": spec.personal_data,
             "requires_container": spec.requires_container,
+            # Quanto il gate concede a un'invocazione. Un modello che sa che
+            # un'analisi può durare mezz'ora non la scambia per un blocco.
+            "timeout_s": spec.timeout_s or TIMEOUT_DEFAULT,
             "confirmation": {
                 "technical": policy.technical.value,
                 "personal_data": policy.personal.value,
@@ -537,7 +543,9 @@ class HermesServer:
         return base
 
     def _bersaglio_praticabile(self, spec: ToolSpec) -> bool:
-        """Se il perimetro necessario a questo tool è disponibile."""
+        """Se il perimetro e l'isolamento necessari a questo tool ci sono."""
+        if spec.requires_container and not self._executor.isolamento_disponibile:
+            return False
         return (
             spec.target_kind is TargetKind.NONE
             or self._executor.perimetro_configurato

@@ -74,6 +74,7 @@ if altre:
 '
 
 GUASTI=0
+MODO_PROVA=--percorsi
 
 fermati() {
     printf '\n[ FERMO ] %s\n' "$1" >&2
@@ -84,6 +85,10 @@ fermati() {
 [ -x "$WRAPPER" ] || fermati "$WRAPPER non c'è: eseguire prima bin/hermes-bootstrap"
 
 SCOPE=$(sed -n 's/^SCOPE_FILE=//p' "$WRAPPER")
+ESITI=$(sed -n 's/^ESITI_DIR=//p' "$WRAPPER")
+[ -n "$ESITI" ] || fermati "$WRAPPER non conosce la directory degli esiti: è una versione
+          precedente. Reinstallarlo: sudo bin/hermes-bootstrap"
+[ -d "$ESITI" ] || fermati "la directory degli esiti $ESITI non c'è: la crea sudo bin/hermes-bootstrap"
 [ -n "$SCOPE" ] || fermati "$WRAPPER non conosce il montaggio ristretto: è una versione
           precedente. Reinstallarlo: sudo install -m 755 -o root -g root bin/hermes-tool-run $WRAPPER"
 [ -f "$SCOPE" ] || fermati "il perimetro $SCOPE non c'è"
@@ -109,9 +114,11 @@ DENTRO="$PREFISSO/.hermes-collaudo-$$"
 # passare. Un collaudo che passa anche col confine rimosso non collauda.
 FUORI=$(mktemp /var/lib/hermes-collaudo-fuori.XXXXXX)
 
+ID_ESITI=""
 pulisci() {
     rm -rf "$DENTRO"
     rm -f "$FUORI"
+    [ -z "$ID_ESITI" ] || rm -rf "${ESITI:?}/$ID_ESITI"
 }
 trap pulisci EXIT INT TERM
 
@@ -148,7 +155,7 @@ prova() {
     UNITA="hermes-tool-$(cat /proc/sys/kernel/random/uuid)"
     set +e
     if [ "$RISTRETTO" = si ]; then
-        MOTIVO=$("$WRAPPER" "$UNITA" 20 --percorsi -- "$PYTHON" -I -S -c "$SONDA" "$BERSAGLIO" 2>&1 >/dev/null)
+        MOTIVO=$("$WRAPPER" "$UNITA" 20 "$MODO_PROVA" -- "$PYTHON" -I -S -c "$SONDA" "$BERSAGLIO" 2>&1 >/dev/null)
     else
         MOTIVO=$("$WRAPPER" "$UNITA" 20 -- "$PYTHON" -I -S -c "$SONDA" "$BERSAGLIO" 2>&1 >/dev/null)
     fi
@@ -201,6 +208,57 @@ prova "$NON_APRIBILE" si "$SONDA_SCRITTURA" "$DENTRO/scritto-con" \
     "nel perimetro NON si scrive (sola lettura)" || true
 prova 0 si "$SONDA_RETE" - \
     "nessuna interfaccia di rete oltre alla loopback" || true
+
+printf -- '\n-- l'"'"'unità isolata: filesystem ristretto, rete presente\n'
+MODO_PROVA=--isolato
+prova "$NON_APRIBILE" si "$SONDA_LETTURA" "$FUORI" \
+    "un file fuori NON si apre" || true
+prova "$NON_APRIBILE" si "$SONDA_LETTURA" "$DENTRO/dentro.txt" \
+    "nemmeno un file del perimetro: i prefissi sono solo per --percorsi" || true
+prova "$NON_APRIBILE" si "$SONDA_RETE" - \
+    "la rete c'è: un tool di rete isolato resta un tool di rete" || true
+MODO_PROVA=--percorsi
+
+printf -- '\n-- gli esiti: scritti dal tool, sigillati dal wrapper\n'
+# Il tool scrive un file, e lascia un link verso un file di root della
+# macchina. Il sigillo gira da root: se seguisse il link, cambierebbe il
+# proprietario di quel file. Si guarda il file prima e dopo.
+PRIMA=$(stat -c '%U:%G %a' "$FUORI")
+UNITA="hermes-tool-$(cat /proc/sys/kernel/random/uuid)"
+ID_ESITI=${UNITA#hermes-tool-}
+set +e
+MOTIVO=$("$WRAPPER" "$UNITA" 20 --isolato -- "$PYTHON" -I -S -c '
+import os, sys
+with open("/esiti/rapporto.txt", "w") as fh:
+    fh.write("esito\n")
+os.symlink(sys.argv[1], "/esiti/trappola")
+' "$FUORI" 2>&1 >/dev/null)
+ESITO=$?
+set -e
+D="$ESITI/$ID_ESITI"
+controlla() { # descrizione, poi la condizione come comando
+    COSA=$1; shift
+    if "$@"; then
+        printf '[   ok   ] %s\n' "$COSA"
+    else
+        GUASTI=$((GUASTI + 1))
+        printf '[ GUASTO ] %s\n' "$COSA"
+    fi
+}
+controlla "il tool scrive in /esiti (esito $ESITO${MOTIVO:+: $MOTIVO})" [ "$ESITO" -eq 0 ]
+controlla "la directory resta dopo l'unità: $D" [ -d "$D" ]
+controlla "sigillata: di root, del gruppo del servizio, 750" \
+    [ "$(stat -c '%U:%G %a' "$D" 2>/dev/null)" = "root:$(sed -n 's/^SERVICE_GID=//p' "$WRAPPER") 750" ]
+controlla "il file del tool: di root, 640, contenuto intatto" \
+    sh -c '[ "$(stat -c "%U %a" "$1")" = "root 640" ] && [ "$(cat "$1")" = esito ]' sh "$D/rapporto.txt"
+controlla "il link lasciato dal tool è ancora un link" [ -L "$D/trappola" ]
+controlla "il file a cui punta NON è cambiato ($PRIMA)" \
+    [ "$(stat -c '%U:%G %a' "$FUORI")" = "$PRIMA" ]
+rm -rf "${ESITI:?}/$ID_ESITI"
+UNITA="hermes-tool-$(cat /proc/sys/kernel/random/uuid)"
+"$WRAPPER" "$UNITA" 20 --isolato -- "$PYTHON" -I -S -c 'pass' >/dev/null 2>&1 || true
+controlla "un'invocazione che non scrive niente non lascia directory" \
+    [ ! -e "$ESITI/${UNITA#hermes-tool-}" ]
 
 printf '\n'
 if [ "$GUASTI" -eq 0 ]; then

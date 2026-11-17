@@ -1,0 +1,160 @@
+#!/bin/sh
+# Porta via gli esiti di un'invocazione, e verifica che siano quelli.
+#
+#   sudo bin/hermes-esiti                       elenca le invocazioni con esiti
+#   sudo bin/hermes-esiti <correlation_id> [dir]  archivio .tar.gz in dir
+#
+# Perché esiste questo file
+# -------------------------
+#
+# Un tool isolato scrive solo in /esiti, che sulla macchina è
+# /var/lib/hermes-tool/esiti/<correlation_id>: la directory resta quando
+# l'unità finisce, e il wrapper la sigilla. Per portarla sul proprio computer
+# basterebbe una copia. Questo script aggiunge l'unica cosa che una copia non
+# dice: se ciò che si porta via è ciò che il tool ha lasciato.
+#
+# A fine esecuzione il gate ha scritto nella riga di audit il manifesto della
+# directory — ogni file con il suo SHA-256, e lo SHA-256 dell'elenco. Qui il
+# manifesto si ricalcola, con lo STESSO codice (mcp_server/esiti.py), e si
+# confronta con quello del log. Se differiscono, qualcosa è cambiato dopo
+# l'esecuzione, e l'archivio si fa lo stesso ma lo si dice: è un'informazione,
+# non una ragione per perdere i file.
+#
+# L'archivio contiene la directory e il manifesto ricalcolato. Lo si copia
+# sul computer con scp, col proprio utente amministrativo:
+#
+#   scp <utente>@<indirizzo-della-vm>:<archivio> .
+#
+# Perché non un database
+# ----------------------
+#
+# È stata la prima idea, ed è stata scartata per tre ragioni. Il pannello di
+# controllo non deve essere raggiungibile da niente che stia dal lato dei
+# tool, ed è il vincolo da cui dipendono tutti gli altri. Un progetto Ghidra
+# pesa centinaia di MB, e in PostgreSQL appesantirebbe il database che
+# custodisce la policy. E il collegamento fra server e pannello non esiste
+# ancora. Il pannello potrà mostrare l'ELENCO degli esiti, letto dal log;
+# i byte restano qui finché qualcuno non li porta via.
+
+set -eu
+
+ESITI=${HERMES_DIR_ESITI:-/var/lib/hermes-tool/esiti}
+LOG=${HERMES_LOG:-/var/log/hermes/audit.jsonl}
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+
+if [ -x "$REPO/.venv/bin/python" ]; then
+    PY=$REPO/.venv/bin/python
+else
+    PY=$(command -v python3)
+fi
+
+fermati() {
+    printf 'hermes-esiti: %s\n' "$1" >&2
+    exit 2
+}
+
+[ -d "$ESITI" ] || fermati "$ESITI non esiste: la crea bin/hermes-bootstrap"
+ls "$ESITI" >/dev/null 2>&1 || fermati "$ESITI non leggibile: lanciare con sudo"
+
+# --- Senza argomenti: l'elenco --------------------------------------------- #
+
+if [ $# -eq 0 ]; then
+    TROVATI=no
+    for D in "$ESITI"/*/; do
+        [ -d "$D" ] || continue
+        TROVATI=si
+        ID=$(basename "$D")
+        printf '%s  %s  %s\n' "$(du -sh "$D" | cut -f1)" \
+            "$(date -r "$D" '+%Y-%m-%d %H:%M')" "$ID"
+    done
+    [ "$TROVATI" = si ] || printf 'Nessuna invocazione ha lasciato esiti.\n'
+    exit 0
+fi
+
+# --- Un'invocazione --------------------------------------------------------- #
+
+ID=$1
+DEST=${2:-.}
+printf '%s' "$ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || \
+    fermati "«$ID» non è un correlation_id: lo si legge nel log d'audit, o con: sudo $0"
+[ -d "$DEST" ] || fermati "la destinazione $DEST non è una directory"
+
+DIR="$ESITI/$ID"
+if [ ! -d "$DIR" ]; then
+    printf "Nessun esito per %s: o il tool non ha scritto niente in /esiti, o\n" "$ID"
+    printf "l'invocazione non era isolata. Nel log la riga dice quale dei due.\n"
+    exit 0
+fi
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# Il manifesto, con il codice del gate. -I: niente moduli dalla directory
+# corrente né dall'ambiente; il repo si aggiunge esplicitamente.
+"$PY" -I - "$REPO" "$DIR" "$LOG" "$ID" "$TMP/MANIFESTO" > "$TMP/esito" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from mcp_server.esiti import manifesto  # noqa: E402
+
+cartella, log, cid, uscita = Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], Path(sys.argv[5])
+m = manifesto(cartella)
+uscita.write_text(m.testo, encoding="ascii")
+
+nel_log = None
+try:
+    with log.open(encoding="utf-8") as fh:
+        for riga in fh:
+            if cid not in riga:
+                continue
+            try:
+                record = json.loads(riga)
+            except ValueError:
+                continue
+            dettaglio = record.get("detail") or ""
+            if record.get("correlation_id") == cid and "manifesto sha256:" in dettaglio:
+                nel_log = dettaglio.split("manifesto sha256:", 1)[1][:64]
+except OSError as err:
+    nel_log = f"illeggibile: {err.strerror or err}"
+
+print(m.sha256)
+print(m.file)
+print(m.byte)
+print(nel_log or "")
+PYEOF
+
+SHA=$(sed -n 1p "$TMP/esito")
+NFILE=$(sed -n 2p "$TMP/esito")
+NBYTE=$(sed -n 3p "$TMP/esito")
+NEL_LOG=$(sed -n 4p "$TMP/esito")
+
+ARCHIVIO="$DEST/hermes-esiti-$ID.tar.gz"
+tar -czf "$ARCHIVIO" -C "$ESITI" "$ID" -C "$TMP" MANIFESTO
+if [ -n "${SUDO_USER:-}" ]; then
+    chown "$SUDO_USER:" "$ARCHIVIO"
+fi
+
+printf 'archivio:    %s\n' "$(cd "$DEST" && pwd)/$(basename "$ARCHIVIO")"
+printf 'contenuto:   %s file, %s byte\n' "$NFILE" "$NBYTE"
+printf 'manifesto:   sha256:%s\n' "$SHA"
+
+case "$NEL_LOG" in
+    "$SHA")
+        printf 'nel log:     coincide — sono gli esiti che il tool ha lasciato\n'
+        ;;
+    "")
+        printf "nel log:     nessun manifesto per questa invocazione in %s\n" "$LOG"
+        printf "             (log ruotato, o invocazione precedente agli esiti)\n"
+        ;;
+    illeggibile*)
+        printf 'nel log:     %s: lanciare con sudo per il confronto\n' "$NEL_LOG"
+        ;;
+    *)
+        printf 'nel log:     DIFFERISCE — il log dice sha256:%s\n' "$NEL_LOG"
+        printf '             la directory è cambiata dopo l'"'"'esecuzione. Archivio creato\n'
+        printf '             comunque: è un'"'"'informazione, non una ragione per perdere i file.\n'
+        exit 3
+        ;;
+esac

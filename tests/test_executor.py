@@ -220,30 +220,101 @@ def test_script_mancante_negato_e_loggato(repo, registry, audit):
 
 
 def test_container_richiesto_e_assente_nega(repo, registry, audit):
-    """La degradazione silenziosa verso l'host è il guasto da impedire."""
+    """La degradazione silenziosa verso l'host è il guasto da impedire.
+
+    «Assente» ora vuol dire senza wrapper: l'isolamento è l'unità ristretta,
+    e senza wrapper non c'è. Prima era il booleano `container_available`,
+    che scriveva l'operatore e nessuno verificava.
+    """
     registry.register(_spec(repo, requires_container=True))
     runner = RunnerFinto()
-    ex = _executor(registry, audit, repo, container_available=False, runner=runner)
+    ex = _executor(registry, audit, repo, runner=runner)
+    assert ex.isolamento_disponibile is False
 
     with pytest.raises(ContainerUnavailable):
         ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
 
     assert runner.chiamate == []
-    assert "container isolato" in _negati(audit)[-1].detail
+    negata = _negati(audit)[-1].detail
+    assert "requires_container" in negata
+    assert "tool_runner non è configurato" in negata
 
 
 def test_container_richiesto_e_presente_procede(repo, registry, audit):
+    """Con il wrapper procede, e nell'unità ristretta: `--isolato`."""
     registry.register(_spec(repo, requires_container=True))
-    ex = _executor(registry, audit, repo, container_available=True)
+    ex = _executor(registry, audit, repo, tool_runner=WRAPPER_FINTO)
+    assert ex.isolamento_disponibile is True
     call, _ = ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
     assert call.outcome is CallOutcome.OK
+    argv = ex._runner.chiamate[0]["argv"]
+    assert argv[argv.index("--") - 1] == "--isolato"
 
 
 def test_container_non_richiesto_indifferente(repo, registry, audit):
     registry.register(_spec(repo, requires_container=False))
-    ex = _executor(registry, audit, repo, container_available=False)
+    ex = _executor(registry, audit, repo, tool_runner=WRAPPER_FINTO)
     call, _ = ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
     assert call.outcome is CallOutcome.OK
+    argv = ex._runner.chiamate[0]["argv"]
+    assert "--isolato" not in argv and "--percorsi" not in argv
+
+
+def test_il_tempo_concesso_lo_dichiara_il_tool(repo, registry, audit):
+    """`timeout_s` dal contratto, al runner e al wrapper (meno il margine)."""
+    registry.register(_spec(repo, timeout_s=1500))
+    ex = _executor(registry, audit, repo, tool_runner=WRAPPER_FINTO)
+    ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+    chiamata = ex._runner.chiamate[0]
+    assert chiamata["timeout"] == 1500
+    argv = chiamata["argv"]
+    assert argv[argv.index(str(WRAPPER_FINTO)) + 2] == str(1500 - MARGINE_TEMPO_LIMITE)
+
+
+def test_senza_timeout_dichiarato_vale_il_predefinito(repo, registry, audit):
+    from mcp_server.executor import TIMEOUT_DEFAULT
+
+    registry.register(_spec(repo))
+    ex = _executor(registry, audit, repo)
+    ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+    assert ex._runner.chiamate[0]["timeout"] == TIMEOUT_DEFAULT
+
+
+def test_gli_esiti_finiscono_nella_riga_di_audit(repo, registry, audit, tmp_path, monkeypatch):
+    """Il manifesto lega gli esiti all'invocazione che li ha prodotti."""
+    from mcp_server import executor as mod
+    from mcp_server.esiti import manifesto
+
+    radice = tmp_path / "esiti"
+    monkeypatch.setattr(mod, "DIR_ESITI", radice)
+    registry.register(_spec(repo, requires_container=True))
+    cid = uuid.uuid4()
+    (radice / str(cid)).mkdir(parents=True)
+    (radice / str(cid) / "rapporto.txt").write_text("trovato niente\n", encoding="utf-8")
+
+    ex = _executor(registry, audit, repo, tool_runner=WRAPPER_FINTO)
+    call, _ = ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=cid)
+    atteso = manifesto(radice / str(cid)).sha256
+    assert f"esiti: 1 file, 15 byte, manifesto sha256:{atteso}" in call.detail
+    riga = [r for r in audit.read_all() if r.outcome is CallOutcome.OK][-1]
+    assert riga.detail == call.detail
+
+
+def test_un_tool_isolato_che_non_scrive_niente_lo_dice(repo, registry, audit, tmp_path, monkeypatch):
+    from mcp_server import executor as mod
+
+    monkeypatch.setattr(mod, "DIR_ESITI", tmp_path / "esiti")
+    registry.register(_spec(repo, requires_container=True))
+    ex = _executor(registry, audit, repo, tool_runner=WRAPPER_FINTO)
+    call, _ = ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+    assert call.detail == "exit=0; esiti: nessuno"
+
+
+def test_un_tool_non_isolato_non_ha_esiti_nel_log(repo, registry, audit):
+    registry.register(_spec(repo))
+    ex = _executor(registry, audit, repo, tool_runner=WRAPPER_FINTO)
+    call, _ = ex.execute("echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4())
+    assert call.detail == "exit=0"
 
 
 # --------------------------------------------------------------------------- #

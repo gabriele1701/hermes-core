@@ -921,7 +921,8 @@ sudo bin/hermes-collauda-percorsi
 
 Percorre la catena reale — wrapper installato, file di perimetro vero, unità
 transiente sotto `hermes-tool` — e al posto di un tool mette una sonda che
-legge un byte. Undici prove, in due gruppi, e l'ordine è il punto:
+legge un byte. Ventuno prove, in quattro gruppi, e l'ordine del primo è il
+punto:
 
 | Unità | Prova | Atteso |
 |---|---|---|
@@ -933,14 +934,20 @@ legge un byte. Undici prove, in due gruppi, e l'ordine è il punto:
 | ristretta | il file di perimetro | **non si apre** |
 | ristretta | scrittura nel perimetro | **negata** (sola lettura) |
 | ristretta | interfacce di rete oltre alla loopback | **nessuna** |
+| isolata | file fuori, file del perimetro | **non si aprono** |
+| isolata | interfacce di rete oltre alla loopback | **ci sono** |
+| esiti | il tool scrive in `/esiti`, e la directory resta | sì |
+| esiti | sigillo: `root:hermes 750`, file `640`, contenuto intatto | sì |
+| esiti | un link lasciato dal tool verso un file di root | resta un link, il file **non cambia** |
+| esiti | un'invocazione che non scrive niente | **nessuna directory** |
 
 Il primo gruppo è il controllo del controllo: un «non si apre» non prova
 niente se quel file non si aprirebbe comunque. Se i controlli non riescono lo
 script **si ferma e lo dice**, invece di contare come successo un rifiuto che
 arriva dai permessi.
 
-Crea una directory `.hermes-collaudo-<pid>` nel primo prefisso e un file in
-`/var/lib`, e li rimuove all'uscita. Non in `/tmp`: l'unità ristretta ha un
+Crea una directory `.hermes-collaudo-<pid>` nel primo prefisso, un file in
+`/var/lib` e una directory di esiti, e li rimuove all'uscita. Non in `/tmp`: l'unità ristretta ha un
 `/tmp` privato, e un file lì sparirebbe per quel motivo e non per il
 perimetro — la prima versione dello script lo faceva, e passava anche con il
 montaggio tolto dal wrapper.
@@ -1046,10 +1053,28 @@ un sintomo — un figlio morto con un codice strano — che non punta alla causa
 Si stringono quando c'è qualcosa da misurare: è una voce aperta in
 `docs/debito-sicurezza.md`.
 
-#### Il montaggio ristretto, per i bersagli di tipo percorso
+#### L'unità ristretta: cosa significa `requires_container`
 
-Per un tool con `target_kind = "path"` il gate aggiunge una parola,
-`--percorsi`, e il wrapper aggiunge cinque direttive:
+L'unità ha tre modi, e chi sceglie quale è il contratto del tool, non chi lo
+invoca:
+
+| Il tool dichiara | Opzione | Filesystem | Rete | `/esiti` |
+|---|---|---|---|---|
+| niente | — | quello della macchina | sì | no |
+| `requires_container = true` | `--isolato` | ristretto | **sì** | sì |
+| `target_kind = "path"` (che impone anche `requires_container`) | `--percorsi` | ristretto, più i prefissi del perimetro | **no** | sì |
+
+`requires_container` significava «gira nel container isolato», e il gate lo
+confrontava con `container_available`, un booleano che scriveva l'operatore e
+nessuno verificava. Ora significa l'unità ristretta, che o parte con il suo
+montaggio o non parte. Senza wrapper non c'è, e il gate **nega**.
+`container_available` non ha più effetto; il preflight avvisa se dice `true`.
+
+Un tool di rete isolato tiene la rete: un tool di rete senza rete non è un
+tool. Il confine sulla rete dei tool di rete resta da fare (nftables con
+`meta skuid`, voce aperta del debito).
+
+Le direttive, per `--percorsi`:
 
 ```
 hermes-tool-run <unità> <timeout> --percorsi -- <comando>
@@ -1057,8 +1082,12 @@ hermes-tool-run <unità> <timeout> --percorsi -- <comando>
     -p TemporaryFileSystem=/:ro \
     -p BindReadOnlyPaths="/usr -/bin -/sbin -/lib -/lib64 -/etc/ld.so.cache \
                           -/etc/alternatives <directory degli script> <prefissi…>" \
-    -p PrivateTmp=yes -p PrivateDevices=yes -p PrivateNetwork=yes
+    -p BindPaths="/var/lib/hermes-tool/esiti/<correlation_id>:/esiti" \
+    -p PrivateTmp=yes -p PrivateDevices=yes -E HERMES_ESITI=/esiti \
+    -p PrivateNetwork=yes
 ```
+
+`--isolato` è lo stesso senza i prefissi e senza `PrivateNetwork`.
 
 `TemporaryFileSystem=/:ro` dà all'unità uno spazio dei nomi di mount in cui la
 radice è un tmpfs vuoto e in sola lettura; `BindReadOnlyPaths` ci rimette
@@ -1095,13 +1124,83 @@ Tre cose da sapere su ciò che resta visibile:
   di loopback: un tool che lavora su un file non ha niente da raggiungere, e
   non c'è niente da filtrare perché non c'è da dove uscire.
 
-Due cose che **non** dà, e che arriveranno col primo tool reale: una
-directory di lavoro scrivibile (Ghidra ne ha bisogno) e `/proc` (GDB e Frida
-ne hanno bisogno — ed è il motivo per cui `process` è un altro tipo di
-bersaglio).
+Una cosa che **non** dà: `/proc`. GDB e Frida ne hanno bisogno, ed è il
+motivo per cui `process` è un altro tipo di bersaglio.
 
-I tool senza bersaglio e quelli di tipo `host` non ricevono l'opzione, e la
-loro unità è quella di prima.
+#### La directory degli esiti
+
+Nei due modi ristretti l'unica cosa scrivibile è `/esiti`: sulla macchina è
+`/var/lib/hermes-tool/esiti/<correlation_id>`, creata dal wrapper per quella
+sola invocazione. Il tool non vede le directory delle altre invocazioni, e
+le trova anche nella variabile `HERMES_ESITI`.
+
+Quando l'unità finisce — anche se uccisa dal tempo limite — la directory
+**resta**, e il wrapper la sigilla: di root, del gruppo `hermes`, `750` per
+le directory e `640` per i file. Nessun tool può più cambiarla. Il sigillo
+gira da root su contenuto scritto dal tool, quindi non segue mai un link:
+un link lasciato dal tool verso un file della macchina resta un link, e quel
+file non cambia proprietario. Il collaudo lo esercita (§5).
+
+Se il tool non ha scritto niente, la directory viene tolta.
+
+A fine esecuzione il gate calcola il **manifesto** — ogni file con il suo
+SHA-256, e lo SHA-256 dell'elenco — e lo scrive nella riga di audit:
+
+```
+exit=0; esiti: 3 file, 48211 byte, manifesto sha256:036f…ad9
+```
+
+Per portare gli esiti sul proprio computer:
+
+```sh
+sudo bin/hermes-esiti                                  # elenco
+sudo bin/hermes-esiti <correlation_id> ~               # archivio .tar.gz
+scp <utente>@<indirizzo-vm>:~/hermes-esiti-<id>.tar.gz .   # dal computer
+```
+
+`hermes-esiti` ricalcola il manifesto con lo stesso codice del gate e lo
+confronta con quello del log: se coincide, sono gli esiti che il tool ha
+lasciato; se differisce, l'archivio si fa comunque e lo dice, con esito 3.
+Poi, se non servono più, si rimuovono con `sudo rm -r` sulla directory.
+
+Non stanno nel database del pannello, di proposito: il pannello non deve
+essere raggiungibile da niente che stia dal lato dei tool, e un progetto
+Ghidra pesa centinaia di MB.
+
+**Un filesystem dedicato.** Il bootstrap crea la directory sul filesystem di
+sistema. Per tenere gli esiti separati dal resto — ordine, e un tetto
+naturale allo spazio — si monta lì sopra un filesystem a sé. Con un file
+immagine, senza ripartizionare (la dimensione è una scelta: 20 GiB qui):
+
+```sh
+sudo fallocate -l 20G /var/lib/hermes-tool/esiti.img
+sudo mkfs.ext4 -q /var/lib/hermes-tool/esiti.img
+echo '/var/lib/hermes-tool/esiti.img /var/lib/hermes-tool/esiti ext4 loop,nodev,nosuid,noexec 0 2' | sudo tee -a /etc/fstab
+sudo mount /var/lib/hermes-tool/esiti
+sudo bin/hermes-bootstrap
+```
+
+`noexec`, `nosuid`, `nodev`: gli esiti sono dati, e niente di ciò che un tool
+lascia lì deve poter diventare un eseguibile. L'ultimo comando serve: un
+filesystem appena creato ha la radice di `root:root 755`, e il bootstrap
+riporta la directory a `root:hermes 750` — il wrapper rifiuta di crearci
+directory altrimenti.
+
+Il preflight mostra sempre lo spazio, in numeri, e avvisa sotto un decimo
+libero o sotto 1 GiB; avvisa anche se la directory non è un filesystem
+dedicato.
+
+#### Il tempo concesso
+
+Ogni tool può dichiarare `timeout_s`, fino a 3600: è il tetto del wrapper
+(`RUNTIME_MAX_CEILING`), e un valore oltre non è registrabile. Senza, valgono
+300 s. Il preflight avvisa oltre i 300 s, perché Hermes per default smette di
+aspettare prima, e oltre i 30 minuti. La configurazione di Hermes per i tempi
+lunghi è in `docs/integrazione-hermes.md`.
+
+I tool senza bersaglio, quelli di tipo `host` non isolati, e quelli che non
+dichiarano niente non ricevono nessuna opzione, e la loro unità è quella di
+prima.
 
 ### 6.3 Il privilegio concesso
 
@@ -2042,10 +2141,11 @@ collector**, mai oltre. La voce di debito corrispondente resta aperta.
 
 ## 11. Cosa resta per le milestone successive
 
-**Container runtime** (Docker o Podman) sulla VM, per l'agente di pentest: è
-la ragione per cui il disco è stato dimensionato con margine. Finché
-`container_available = false`, i tool che lo richiedono vengono negati invece
-di ricadere sull'host — comportamento voluto.
+**Un isolamento più forte dell'unità ristretta**, se un tool lo richiederà:
+oggi `requires_container` significa l'unità ristretta del wrapper (§6.2), che
+confina il filesystem e, per i tool di tipo percorso, la rete. Un container
+vero (Docker o Podman) confinerebbe anche `/proc` e le chiamate di sistema.
+`container_available` non ha più effetto.
 
 **Backend reale del vault** (`pass`), al posto dello stub. Dentro ci andranno
 solo le credenziali delle VM di laboratorio.

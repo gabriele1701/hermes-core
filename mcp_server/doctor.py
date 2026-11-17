@@ -39,7 +39,9 @@ from mcp_server.config import (
     risolvi_percorso,
 )
 from mcp_server.contracts import RiskTier, ToolSpec
+from mcp_server.esiti import DIR_ESITI
 from mcp_server.executor import (
+    OPZIONE_ISOLATO,
     OPZIONE_PERCORSI,
     PREFISSO_UNITA,
     SUDO,
@@ -1466,26 +1468,311 @@ def _vault(referto: Referto, cfg: ServerConfig) -> None:
         )
 
 
-def _container(referto: Referto, cfg: ServerConfig) -> None:
-    richiedenti = [
-        str(t.get("tool_id"))
+def _tool_isolati(cfg: ServerConfig) -> list[str]:
+    """I tool che dichiarano l'isolamento, cioè l'unità ristretta."""
+    return sorted(
+        str(t.get("tool_id", "?"))
         for t in cfg.tools
         if t.get("requires_container") is True
-    ]
-    if richiedenti and not cfg.container_available:
+    )
+
+
+def _isolamento_richiesto(referto: Referto, cfg: ServerConfig) -> None:
+    """``requires_container``: chi lo dichiara gira nell'unità ristretta, o no.
+
+    Prima questo controllo confrontava la dichiarazione dei tool con un'altra
+    dichiarazione, ``container_available``, scritta dall'operatore e mai
+    verificata: due promesse che si davano ragione a vicenda. Ora
+    l'isolamento è l'unità ristretta del wrapper, e la domanda è se il
+    wrapper c'è. Se c'è, che confini davvero lo misura ``_montaggio_isolato``
+    leggendo un byte.
+    """
+    isolati = _tool_isolati(cfg)
+    if cfg.container_available:
         referto.aggiungi(
-            "container",
+            "container_available",
             Esito.AVVISO,
-            f"non disponibile, ma richiesto da: {', '.join(richiedenti)} "
-            "— quei tool verranno negati, non eseguiti sull'host",
-            "Comportamento voluto. Per abilitarli serve il runtime isolato.",
+            "server.container_available = true non ha più effetto: "
+            "l'isolamento è l'unità ristretta del wrapper, che c'è o nega, "
+            "e non una dichiarazione",
+            "Togliere la riga da [server] in hermes.toml.",
+        )
+    if not isolati:
+        return
+    if cfg.tool_runner is None:
+        referto.aggiungi(
+            "isolamento richiesto",
+            Esito.ERRORE,
+            f"{', '.join(isolati)} dichiarano requires_container, e "
+            f"server.tool_runner non è configurato: senza il wrapper l'unità "
+            f"ristretta non c'è, e il gate li nega",
+            "Configurare [server] tool_runner — procedura in "
+            "docs/setup-vm-hermes.md §6.",
+        )
+        return
+    referto.aggiungi(
+        "isolamento richiesto",
+        Esito.OK,
+        f"{', '.join(isolati)}: nell'unità ristretta del wrapper",
+    )
+
+
+def _montaggio_isolato(referto: Referto, cfg: ServerConfig) -> None:
+    """Verifica, leggendo, l'unità ristretta dei tool isolati che non puntano a file.
+
+    È ``--isolato``, il ramo del wrapper che non legge il perimetro: lo prova
+    ``_montaggio_dei_percorsi`` solo se ci sono prefissi, e un tool isolato di
+    rete non ne ha bisogno. Stesse tre letture, con ``/etc/hostname`` come
+    file esterno: leggibile da tutti, e fuori da ciò che l'unità monta.
+    """
+    if cfg.tool_runner is None:
+        return
+    isolati = [
+        str(t.get("tool_id", "?"))
+        for t in cfg.tools
+        if t.get("requires_container") is True
+        and str(t.get("target_kind", "none")) != "path"
+    ]
+    if not isolati:
+        return
+
+    nome = "unità ristretta dei tool isolati"
+    if _costante_del_wrapper(cfg.tool_runner, "ESITI_DIR") is None:
+        referto.aggiungi(
+            nome,
+            Esito.ERRORE,
+            f"{cfg.tool_runner} non conosce l'unità ristretta: è una versione "
+            f"precedente a quella del repo, e {', '.join(isolati)} verrebbero "
+            f"rifiutati dal wrapper",
+            f"sudo install -m 755 -o root -g root bin/hermes-tool-run "
+            f"{cfg.tool_runner}\n"
+            f"             oppure rieseguire bin/hermes-bootstrap, che lo fa.",
+        )
+        return
+
+    fuori = Path("/etc/hostname")
+    esito, motivo = _prova_lettura(cfg, fuori)
+    if esito != 0:
+        referto.aggiungi(
+            nome,
+            Esito.AVVISO,
+            f"non verificabile leggendo: {UTENTE_TOOL} non apre {fuori} "
+            f"nemmeno nell'unità normale (esito {esito}, "
+            f"{motivo or 'nessun messaggio'})",
+        )
+        return
+    esito, motivo = _prova_lettura(cfg, fuori, ristretto=True, opzione=OPZIONE_ISOLATO)
+    if esito == 0:
+        referto.aggiungi(
+            nome,
+            Esito.ERRORE,
+            f"dall'unità ristretta {fuori} SI APRE: il montaggio non confina",
+        )
+        return
+    if esito != ESITO_SONDA_NON_LEGGIBILE:
+        referto.aggiungi(
+            nome,
+            Esito.ERRORE,
+            f"l'unità ristretta non è partita (esito {esito}): "
+            f"{motivo or 'nessun messaggio'}",
+            "Il motivo qui sopra viene dal wrapper.",
+        )
+        return
+    scripts = sorted(_script_dei_tool(cfg))
+    if scripts:
+        esito, motivo = _prova_lettura(
+            cfg, scripts[0], ristretto=True, opzione=OPZIONE_ISOLATO
+        )
+        if esito != 0:
+            referto.aggiungi(
+                nome,
+                Esito.ERRORE,
+                f"il confine c'è, ma dall'unità ristretta lo script "
+                f"{scripts[0]} non si apre (esito {esito}, "
+                f"{motivo or 'nessun messaggio'})",
+                "La directory degli script montata è quella scritta in "
+                "/etc/hermes/radice-script; la scrive bin/hermes-bootstrap.",
+            )
+            return
+    referto.aggiungi(
+        nome,
+        Esito.OK,
+        f"dall'unità ristretta {fuori} non si apre, e senza sì "
+        f"({', '.join(isolati)})",
+    )
+
+
+#: Proprietario atteso della directory degli esiti. Una costante e non uno
+#: 0 scritto nel controllo, perché i test girano senza root e devono poter
+#: dire «il proprietario atteso è chi sta girando».
+_PROPRIETARIO_ESITI = 0
+
+#: Sotto queste soglie lo spazio degli esiti è un avviso: o meno di un
+#: decimo del filesystem, o meno di un GiB, quale arriva prima.
+_ESITI_LIBERO_MIN_FRAZIONE = 0.10
+_ESITI_LIBERO_MIN_BYTE = 1024**3
+
+
+def _gib(byte: int) -> str:
+    return f"{byte / 1024**3:.1f} GiB"
+
+
+def _esiti(referto: Referto, cfg: ServerConfig) -> None:
+    """La directory degli esiti: chi la possiede, dove sta, quanto spazio ha.
+
+    Tre fatti distinti. Il proprietario e i permessi decidono se il wrapper
+    accetta di crearci directory (da root) e se un tool non isolato può
+    leggere gli esiti altrui. Il filesystem dedicato è ordine — gli esiti
+    separati dal resto della macchina — e un tetto naturale allo spazio. Lo
+    spazio libero lo si mostra sempre, in numeri: è ciò che si guarda prima
+    di lanciare un'analisi lunga.
+    """
+    if cfg.tool_runner is None:
+        return
+    servono = bool(_tool_isolati(cfg)) or bool(_tool_con_percorso(cfg))
+    st = _stat(DIR_ESITI)
+    if st is None:
+        if servono:
+            referto.aggiungi(
+                "esiti",
+                Esito.ERRORE,
+                f"{DIR_ESITI} non esiste: il wrapper rifiuterà ogni tool "
+                f"isolato, perché non ha dove creare la sua directory",
+                "La crea bin/hermes-bootstrap.",
+            )
+        return
+
+    modo = stat.S_IMODE(st.st_mode)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != _PROPRIETARIO_ESITI or modo & 0o022:
+        referto.aggiungi(
+            "esiti",
+            Esito.ERRORE,
+            f"{DIR_ESITI} è di {_utente(st.st_uid)} con permessi {modo:04o}: il "
+            f"wrapper ci crea directory da root, e la rifiuta se non è di root "
+            f"e non scrivibile da altri",
+            f"sudo chown root:hermes {DIR_ESITI} && sudo chmod 750 {DIR_ESITI}",
+        )
+        return
+    if modo & 0o005:
+        referto.aggiungi(
+            "esiti",
+            Esito.AVVISO,
+            f"{DIR_ESITI} ha permessi {modo:04o}: chiunque sulla macchina, un "
+            f"tool non isolato compreso, può leggere gli esiti delle altre "
+            f"invocazioni",
+            f"sudo chmod 750 {DIR_ESITI}",
+        )
+
+    if not os.path.ismount(DIR_ESITI):
+        referto.aggiungi(
+            "esiti · filesystem",
+            Esito.AVVISO,
+            f"{DIR_ESITI} non è un filesystem dedicato: gli esiti stanno "
+            f"insieme al resto della macchina, e un'analisi che scrive molto "
+            f"consuma lo spazio di tutti",
+            "Procedura in docs/setup-vm-hermes.md §6, «La directory degli "
+            "esiti».",
         )
     else:
         referto.aggiungi(
-            "container",
-            Esito.OK,
-            "disponibile" if cfg.container_available else "non richiesto da alcun tool",
+            "esiti · filesystem", Esito.OK, f"{DIR_ESITI} è un filesystem dedicato"
         )
+
+    try:
+        fs = os.statvfs(DIR_ESITI)
+    except OSError as err:
+        referto.aggiungi("esiti · spazio", Esito.AVVISO, f"non misurabile: {err}")
+        return
+    totale = fs.f_blocks * fs.f_frsize
+    libero = fs.f_bavail * fs.f_frsize
+    usato = (fs.f_blocks - fs.f_bfree) * fs.f_frsize
+    misura = (
+        f"usati {_gib(usato)} di {_gib(totale)}, liberi {_gib(libero)}"
+    )
+    poco = libero < _ESITI_LIBERO_MIN_BYTE or (
+        totale and libero / totale < _ESITI_LIBERO_MIN_FRAZIONE
+    )
+    referto.aggiungi(
+        "esiti · spazio",
+        Esito.AVVISO if poco else Esito.OK,
+        misura + (
+            ": sotto la soglia (un decimo del filesystem, o 1 GiB)" if poco else ""
+        ),
+        "Portare via gli esiti delle invocazioni concluse con "
+        "bin/hermes-esiti, poi rimuoverli." if poco else "",
+    )
+
+
+#: Quanto aspetta Hermes una risposta MCP, se non configurato diversamente.
+#: Letto dal sorgente di Hermes Agent (tools/mcp_tool_common.py e
+#: agent/tool_executor.py) il 17 novembre 2026: `mcp_servers.<nome>.timeout`
+#: 300 s, e la scadenza generica `timeouts.tools.sequential_call` 420 s, che
+#: vale anche per le chiamate MCP. Un tool che dura di più viene abbandonato
+#: dal client mentre qui continua a girare.
+_CLIENT_ATTESA_PREDEFINITA = 300
+
+#: Oltre questa durata dichiarata il preflight avvisa: decisione
+#: dell'operatore, «avviso a 30 minuti, stop a 60».
+_TIMEOUT_AVVISO = 1800
+
+
+def _tempo_dei_tool(referto: Referto, cfg: ServerConfig) -> None:
+    """I tempi dichiarati dai tool, contro il client e contro il wrapper.
+
+    Il gate concede a un tool il ``timeout_s`` che dichiara, fino a un'ora.
+    Due cose possono tagliarlo prima, e nessuna delle due si vede dal lato
+    del server: il client MCP che smette di aspettare, e un wrapper installato
+    con un tetto più basso — che riduce il tempo in silenzio.
+    """
+    dichiarati = {
+        str(t.get("tool_id", "?")): t.get("timeout_s")
+        for t in cfg.tools
+        if isinstance(t.get("timeout_s"), int) and not isinstance(t.get("timeout_s"), bool)
+    }
+    if not dichiarati:
+        return
+
+    massimo = max(dichiarati.values())
+    if cfg.tool_runner is not None:
+        tetto = _costante_del_wrapper(cfg.tool_runner, "RUNTIME_MAX_CEILING")
+        if tetto is not None and tetto.isdigit() and int(tetto) < massimo:
+            referto.aggiungi(
+                "tempo dei tool",
+                Esito.ERRORE,
+                f"il wrapper installato concede al massimo {tetto} s, e "
+                f"{', '.join(t for t, v in dichiarati.items() if v > int(tetto))} "
+                f"ne dichiarano di più: verrebbero fermati prima, in silenzio",
+                f"sudo install -m 755 -o root -g root bin/hermes-tool-run "
+                f"{cfg.tool_runner}",
+            )
+
+    lunghi = {t: v for t, v in dichiarati.items() if v > _CLIENT_ATTESA_PREDEFINITA}
+    if not lunghi:
+        referto.aggiungi(
+            "tempo dei tool",
+            Esito.OK,
+            "; ".join(f"{t} {v} s" for t, v in sorted(dichiarati.items())),
+        )
+        return
+    oltre = [t for t, v in lunghi.items() if v > _TIMEOUT_AVVISO]
+    referto.aggiungi(
+        "tempo dei tool",
+        Esito.AVVISO,
+        f"{'; '.join(f'{t} {v} s' for t, v in sorted(lunghi.items()))}: oltre "
+        f"i {_CLIENT_ATTESA_PREDEFINITA} s che Hermes aspetta per default. "
+        f"Se il client smette di aspettare, il tool continua a girare qui e "
+        f"l'esito non arriva a nessuno"
+        + (
+            f". {', '.join(sorted(oltre))} oltre i 30 minuti: verificare che "
+            f"l'analisi lo richieda davvero"
+            if oltre
+            else ""
+        ),
+        f"In config.yaml di Hermes, almeno {massimo + 60} s in:\n"
+        f"             mcp_servers.<nome>.timeout e "
+        f"timeouts.tools.sequential_call\n"
+        f"             Procedura in docs/integrazione-hermes.md.",
+    )
 
 
 def _handshake(referto: Referto, percorso_config: Path) -> None:
@@ -1642,7 +1929,9 @@ def esegui(percorso_config: str | Path) -> Referto:
     _scrivibilita(referto, cfg)
     _dipendenze(referto, cfg)
     _vault(referto, cfg)
-    _container(referto, cfg)
+    _isolamento_richiesto(referto, cfg)
+    _esiti(referto, cfg)
+    _tempo_dei_tool(referto, cfg)
     _tool(referto, cfg)
     _canale_ssh(referto, cfg)
     _ordine_dei_dropin(referto)
@@ -2074,7 +2363,7 @@ def _montaggio_dei_percorsi(referto: Referto, cfg: ServerConfig) -> None:
     # -- il wrapper installato conosce il montaggio, e legge lo stesso file -- #
 
     del_wrapper = _costante_del_wrapper(cfg.tool_runner, "SCOPE_FILE")
-    if del_wrapper is None:
+    if del_wrapper is None or _costante_del_wrapper(cfg.tool_runner, "ESITI_DIR") is None:
         referto.aggiungi(
             nome,
             Esito.ERRORE,
@@ -2341,6 +2630,7 @@ def _isolamento_dei_tool(referto: Referto, cfg: ServerConfig) -> None:
             # manda a cercare due guasti dove ce n'è uno.
             _accesso_agli_script(referto, cfg)
             _montaggio_dei_percorsi(referto, cfg)
+            _montaggio_isolato(referto, cfg)
         else:
             motivo = (esito.stderr or "").strip().splitlines()
             referto.aggiungi(
@@ -2494,7 +2784,11 @@ def _accesso_agli_script(referto: Referto, cfg: ServerConfig) -> None:
 
 
 def _prova_lettura(
-    cfg: ServerConfig, script: Path, *, ristretto: bool = False
+    cfg: ServerConfig,
+    script: Path,
+    *,
+    ristretto: bool = False,
+    opzione: str = OPZIONE_PERCORSI,
 ) -> tuple[int, str]:
     """``(esito, motivo)`` dell'apertura di ``script`` come utente dei tool.
 
@@ -2512,7 +2806,7 @@ def _prova_lettura(
         str(cfg.tool_runner),
         f"{PREFISSO_UNITA}-{uuid.uuid4()}",
         str(_TEMPO_SONDA_LETTURA),
-        *((OPZIONE_PERCORSI,) if ristretto else ()),
+        *((opzione,) if ristretto else ()),
         "--",
         str(cfg.tool_python),
         *cfg.tool_python_flags,
