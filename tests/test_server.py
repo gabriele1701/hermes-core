@@ -444,7 +444,10 @@ def test_elenco_tool(server: HermesServer):
     risposta = server._list_available_tools()
     assert risposta["agent"] == "echo_dummy"
     assert risposta["vault_is_stub"] is True
-    assert risposta["container_available"] is False
+    # Era `container_available`, la dichiarazione dell'operatore. Ora è
+    # l'isolamento misurato: senza wrapper, non c'è.
+    assert "container_available" not in risposta
+    assert risposta["isolamento_disponibile"] is False
     assert [t["tool_id"] for t in risposta["tools"]] == ["echo.ping"]
 
     tool = risposta["tools"][0]

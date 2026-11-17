@@ -28,6 +28,7 @@ from mcp_server.audit import LogAction
 from mcp_server.contracts import CallOutcome, OwnerAgent, RiskTier, TargetKind
 from mcp_server.doctor import ESITO_SONDA_NON_LEGGIBILE, Esito, esegui
 from mcp_server.executor import (
+    OPZIONE_ISOLATO,
     OPZIONE_PERCORSI,
     ConfirmationRequired,
     TargetOutOfScope,
@@ -98,9 +99,22 @@ def _perimetro(lab: Path, *prefissi: str) -> ScopeAllowlist:
 
 
 def test_un_tool_con_bersaglio_di_tipo_percorso_e_registrabile(repo, registry):
-    spec = _spec(repo, target_kind=TargetKind.PATH)
+    spec = _spec(repo, target_kind=TargetKind.PATH, requires_container=True)
     registry.register(spec)
     assert registry.tools["echo.ping"].target_kind is TargetKind.PATH
+
+
+def test_un_tool_di_tipo_percorso_deve_dichiarare_l_isolamento(repo):
+    """La stessa regola del pannello (`tools_bersaglio_isolato`).
+
+    Il gate lo isolerebbe comunque; ma una dichiarazione che dice «senza
+    isolamento» per un tool che gira isolato non dice il vero, e un tool che
+    il server accetta e il pannello rifiuta rompe l'integrazione.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="requires_container = true"):
+        _spec(repo, target_kind=TargetKind.PATH, requires_container=False)
 
 
 def test_il_valore_sul_filo_e_path():
@@ -385,7 +399,14 @@ def test_un_percorso_non_passa_per_un_tool_di_tipo_host(lab: Path):
 
 
 def _gate(repo, registry, audit, lab, **kw):
-    registry.register(_spec(repo, target_kind=TargetKind.PATH, **kw.pop("spec", {})))
+    registry.register(
+        _spec(
+            repo,
+            target_kind=TargetKind.PATH,
+            requires_container=True,
+            **kw.pop("spec", {}),
+        )
+    )
     kw.setdefault("tool_runner", WRAPPER_FINTO)
     kw.setdefault("scope", _perimetro(lab))
     return _executor(registry, audit, repo, **kw)
@@ -590,11 +611,23 @@ def test_un_tool_senza_bersaglio_non_chiede_il_montaggio(repo, registry, audit, 
 
 UNITA = "hermes-tool-00000000-0000-4000-8000-000000000001"
 
+def _esiste_l_utente_dei_tool() -> bool:
+    import pwd
+
+    try:
+        pwd.getpwnam("hermes-tool")
+    except KeyError:
+        return False
+    return True
+
+
 solo_da_root = pytest.mark.skipif(
-    os.geteuid() != 0,
+    os.geteuid() != 0 or not _esiste_l_utente_dei_tool(),
     reason=(
-        "il wrapper pretende un perimetro di root, e non si finge: senza "
-        "root si prova solo il rifiuto. Il resto lo copre il collaudo."
+        "il wrapper pretende un perimetro di root e crea la directory degli "
+        "esiti per hermes-tool, e non si finge nessuna delle due: senza root "
+        "e senza quell'utente si prova solo il rifiuto. Il resto lo copre il "
+        "collaudo."
     ),
 )
 
@@ -610,13 +643,35 @@ class WrapperDiProva:
         self.lab = self.base / "lab"
         self.lab.mkdir()
 
+        self.esiti = self.base / "esiti"
+        self.esiti.mkdir(mode=0o750)
+
+        # Il finto systemd-run registra come è stato chiamato e, se il test
+        # lo chiede con FINTO_TOOL, fa la parte del tool: esegue quel comando
+        # di shell con la directory degli esiti come argomento — la sorgente
+        # di BindPaths, cioè ciò che il tool vedrebbe come /esiti.
         finto = self.base / "systemd-run"
         finto.write_text(
             "#!/bin/sh\n"
-            f"for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{self.registro}'\n",
+            f"for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{self.registro}'\n"
+            'if [ -n "${FINTO_TOOL:-}" ]; then\n'
+            '    for a in "$@"; do\n'
+            '        case "$a" in BindPaths=*:/esiti) d=${a#BindPaths=}; d=${d%:/esiti} ;; esac\n'
+            "    done\n"
+            '    sh -c "$FINTO_TOOL" finto "$d"\n'
+            "fi\n",
             encoding="utf-8",
         )
         finto.chmod(0o755)
+        import grp
+
+        # Un gruppo diverso da root quando si può: da root il gruppo corrente
+        # è root, e un sigillo che seguisse un link non si distinguerebbe da
+        # uno che non lo segue.
+        try:
+            self.gruppo = grp.getgrnam("hermes-tool").gr_name
+        except KeyError:
+            self.gruppo = grp.getgrgid(os.getgid()).gr_name
 
         testo = WRAPPER.read_text(encoding="utf-8")
         for nome, valore in (
@@ -625,6 +680,8 @@ class WrapperDiProva:
             ("SCOPE_FILE", self.scope),
             ("RADICE_SCRIPT_FILE", self.radice_script),
             ("PYTHON", sys.executable),
+            ("ESITI_DIR", self.esiti),
+            ("SERVICE_GID", self.gruppo),
         ):
             testo, n = re.subn(
                 rf"^{nome}=\S+$", f"{nome}={valore}", testo, flags=re.MULTILINE
@@ -641,15 +698,25 @@ class WrapperDiProva:
         self.scope.write_text(contenuto, encoding="utf-8")
         self.scope.chmod(0o644)
 
-    def esegui(self, *argomenti: str) -> subprocess.CompletedProcess:
+    def esegui(
+        self, *argomenti: str, unita: str = UNITA, tool: str | None = None
+    ) -> subprocess.CompletedProcess:
         self.registro.unlink(missing_ok=True)
+        ambiente = {k: v for k, v in os.environ.items() if k != "FINTO_TOOL"}
+        if tool is not None:
+            ambiente["FINTO_TOOL"] = tool
         return subprocess.run(
-            [str(self.percorso), UNITA, "30", *argomenti],
+            [str(self.percorso), unita, "30", *argomenti],
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
+            env=ambiente,
         )
+
+    @property
+    def dir_esiti(self) -> Path:
+        return self.esiti / UNITA.removeprefix("hermes-tool-")
 
     @property
     def avviato(self) -> bool:
@@ -847,7 +914,8 @@ def _assegnazione(testo: str, nome: str) -> str:
 
 def test_l_opzione_del_gate_e_quella_che_il_wrapper_riconosce():
     testo = WRAPPER.read_text(encoding="utf-8")
-    assert f'if [ "$1" = "{OPZIONE_PERCORSI}" ]; then' in testo
+    assert f"    {OPZIONE_PERCORSI}) MODO=percorsi; shift ;;" in testo
+    assert f"    {OPZIONE_ISOLATO})  MODO=isolato;  shift ;;" in testo
 
 
 def test_bootstrap_wrapper_e_collaudo_parlano_degli_stessi_file():
@@ -883,7 +951,12 @@ def test_il_collaudo_prova_la_rete_in_entrambe_le_unita():
     """Il rifiuto sulla rete ha il suo controllo, come quelli sui file."""
     collaudo = (RADICE / "bin" / "hermes-collauda-percorsi").read_text(encoding="utf-8")
     prove = re.findall(r'^prova (\S+) (si|no) "\$SONDA_RETE"', collaudo, re.MULTILINE)
-    assert sorted(prove) == [('"$NON_APRIBILE"', "no"), ("0", "si")]
+    # Normale: c'è. Percorsi: non c'è. Isolato: c'è di nuovo.
+    assert sorted(prove) == [
+        ('"$NON_APRIBILE"', "no"),
+        ('"$NON_APRIBILE"', "si"),
+        ("0", "si"),
+    ]
 
 
 def test_il_collaudo_non_mette_il_file_esterno_in_una_directory_privata():
@@ -1286,3 +1359,137 @@ def test_ogni_kind_con_un_bersaglio_ha_la_sua_etichetta_nel_log():
         else:
             assert nota_risolto(kind, "X").endswith(" risolto: X"), kind
         assert nota_risolto(kind, None) == ""
+
+
+# --------------------------------------------------------------------------- #
+# L'unità isolata e la directory degli esiti
+# --------------------------------------------------------------------------- #
+
+
+@solo_da_root
+def test_l_unita_isolata_monta_base_script_ed_esiti_e_lascia_la_rete(wrapper):
+    """`--isolato` è ciò che `requires_container` significa adesso.
+
+    Il perimetro dei percorsi non viene nemmeno letto — qui è rotto di
+    proposito — e la rete resta: un tool di rete senza rete non è un tool.
+    """
+    wrapper.scrivi_perimetro("questo non è TOML [[[")
+    esito = wrapper.esegui(OPZIONE_ISOLATO, "--", "/bin/echo", "ciao")
+    assert esito.returncode == 0, esito.stderr
+
+    assert wrapper.proprieta("TemporaryFileSystem") == ["/:ro"]
+    voci = wrapper.proprieta("BindReadOnlyPaths")[0].split()
+    assert str(wrapper.script) in voci
+    assert str(wrapper.lab) not in voci, "i prefissi sono solo per --percorsi"
+    assert wrapper.proprieta("BindPaths") == [f"{wrapper.dir_esiti}:/esiti"]
+    assert wrapper.proprieta("PrivateNetwork") == []
+    assert "HERMES_ESITI=/esiti" in wrapper.argv
+    assert wrapper.argv[-3:] == ["--", "/bin/echo", "ciao"]
+
+
+@solo_da_root
+def test_anche_l_unita_dei_percorsi_ha_la_sua_directory_di_esiti(wrapper):
+    assert wrapper.esegui(OPZIONE_PERCORSI, "--", "/bin/true").returncode == 0
+    assert wrapper.proprieta("BindPaths") == [f"{wrapper.dir_esiti}:/esiti"]
+    assert wrapper.proprieta("PrivateNetwork") == ["yes"]
+
+
+def test_l_unita_normale_non_ha_esiti(wrapper):
+    """Senza isolamento non c'è un /esiti coerente: il tool vede tutto."""
+    assert wrapper.esegui("--", "/bin/true").returncode == 0
+    assert wrapper.proprieta("BindPaths") == []
+    assert not any(wrapper.esiti.iterdir())
+
+
+@solo_da_root
+def test_un_invocazione_senza_esiti_non_lascia_directory(wrapper):
+    """Mille preflight non lasciano mille directory vuote."""
+    assert wrapper.esegui(OPZIONE_ISOLATO, "--", "/bin/true").returncode == 0
+    assert not wrapper.dir_esiti.exists()
+
+
+@solo_da_root
+def test_gli_esiti_restano_e_vengono_sigillati(wrapper):
+    import grp
+
+    esito = wrapper.esegui(
+        OPZIONE_ISOLATO,
+        "--",
+        "/bin/true",
+        tool='mkdir "$1/sotto" && echo dati > "$1/sotto/a.bin" && echo x > "$1/b.txt"',
+    )
+    assert esito.returncode == 0, esito.stderr
+    d = wrapper.dir_esiti
+    gid = grp.getgrnam(wrapper.gruppo).gr_gid
+    for percorso, modo in ((d, 0o750), (d / "sotto", 0o750), (d / "sotto" / "a.bin", 0o640), (d / "b.txt", 0o640)):
+        st = percorso.lstat()
+        assert (st.st_uid, st.st_gid, st.st_mode & 0o7777) == (0, gid, modo), percorso
+    assert (d / "sotto" / "a.bin").read_text() == "dati\n"
+
+
+@solo_da_root
+def test_il_sigillo_non_segue_un_link_lasciato_dal_tool(wrapper, tmp_path):
+    """La parte che gira da root su contenuto scritto dal tool.
+
+    Il tool lascia nella sua directory un link verso un file di root della
+    macchina. Un sigillo che seguisse il link regalerebbe quel file al gruppo
+    del servizio — `chown -R -L` lo fa, ed è il guasto che il collaudo
+    esercita; il sigillo deve cambiare il link, non il bersaglio.
+    """
+    import grp
+
+    bersaglio = tmp_path / "di-root.conf"
+    bersaglio.write_text("segreto\n", encoding="utf-8")
+    os.chown(bersaglio, 0, 0)
+    bersaglio.chmod(0o600)
+
+    esito = wrapper.esegui(
+        OPZIONE_ISOLATO,
+        "--",
+        "/bin/true",
+        tool=f'ln -s "{bersaglio}" "$1/trappola" && mkdir "$1/d" && ln -s / "$1/d/radice"',
+    )
+    assert esito.returncode == 0, esito.stderr
+
+    st = bersaglio.stat()
+    assert (st.st_uid, st.st_gid, st.st_mode & 0o7777) == (0, 0, 0o600)
+    link = wrapper.dir_esiti / "trappola"
+    assert link.is_symlink()
+    assert link.lstat().st_gid == grp.getgrnam(wrapper.gruppo).gr_gid
+    radice = Path("/").stat()
+    assert (radice.st_uid, radice.st_mode & 0o7777) == (0, 0o755)
+
+
+@solo_da_root
+def test_una_directory_di_esiti_gia_esistente_non_si_riusa(wrapper):
+    wrapper.dir_esiti.mkdir()
+    esito = wrapper.esegui(OPZIONE_ISOLATO, "--", "/bin/true")
+    assert esito.returncode == 64
+    assert "esiste già" in esito.stderr
+    assert not wrapper.avviato
+
+
+@solo_da_root
+def test_una_directory_degli_esiti_scrivibile_da_altri_ferma_il_wrapper(wrapper):
+    """Qui dentro il wrapper crea directory da root: chi potesse scriverci
+    potrebbe preparare un link al posto di quella che sta per nascere."""
+    wrapper.esiti.chmod(0o777)
+    esito = wrapper.esegui(OPZIONE_ISOLATO, "--", "/bin/true")
+    assert esito.returncode == 64
+    ultima = esito.stderr.strip().splitlines()[-1]
+    assert "deve essere di root e non scrivibile da altri" in ultima
+    assert not wrapper.avviato
+
+
+def test_la_directory_degli_esiti_e_la_stessa_per_wrapper_e_gate():
+    from mcp_server.esiti import DIR_ESITI
+
+    testo = WRAPPER.read_text(encoding="utf-8")
+    assert _assegnazione(testo, "ESITI_DIR") == str(DIR_ESITI)
+    bootstrap = (RADICE / "bin" / "hermes-bootstrap").read_text(encoding="utf-8")
+    assert _assegnazione(bootstrap, "DIR_ESITI").replace(
+        "$DIR_TOOL", _assegnazione(bootstrap, "DIR_TOOL")
+    ) == str(DIR_ESITI)
+    assert _assegnazione(testo, "SERVICE_GID") == _assegnazione(
+        bootstrap, "UTENTE_SERVIZIO"
+    )

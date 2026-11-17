@@ -72,6 +72,44 @@
 # proprio confine — la restrizione custodita da chi la subisce, un'altra
 # volta. Il percorso del file è una costante per lo stesso motivo dell'uid.
 #
+# Tre modi, e chi sceglie quale è il contratto del tool
+# -----------------------------------------------------
+#
+#   (nessuna opzione)  l'unità di sempre: uid separato, limiti di risorsa;
+#   --isolato          in più il filesystem ristretto: radice vuota in sola
+#                      lettura, il sistema di base, gli script, e la sola
+#                      directory dei propri esiti scrivibile. La rete resta:
+#                      un tool di rete senza rete non è un tool;
+#   --percorsi         come --isolato, più i prefissi del perimetro in sola
+#                      lettura, e senza rete.
+#
+# `--isolato` è ciò che `requires_container` significa adesso. Prima era la
+# promessa di un container che nessuno verificava; ora è un montaggio che o
+# c'è, o l'unità non parte.
+#
+# La directory degli esiti
+# ------------------------
+#
+# Nei due modi ristretti l'unità vede, scrivibile, solo `/esiti`: sulla
+# macchina è `$ESITI_DIR/<correlation_id>`, creata qui per quella sola
+# invocazione e di nessun'altra. Il tool non vede le directory degli altri.
+#
+# Quando l'unità finisce la directory RESTA, ed è il punto: un'analisi lunga
+# produce file che devono sopravvivere all'unità. Prima di uscire il wrapper
+# la sigilla — di root, leggibile dal gruppo del servizio, non più scrivibile
+# — perché il gate possa calcolarne il manifesto per il log, e nessun tool
+# possa cambiarla dopo. Se il tool non vi ha scritto niente, la toglie: mille
+# invocazioni senza esiti non lasciano mille directory vuote.
+#
+# Il sigillo gira da root su contenuto scritto dal tool, ed è la parte da
+# leggere con attenzione: un sigillo che seguisse un link lasciato dal tool
+# cambierebbe il proprietario di un file qualunque della macchina. `chown -R`
+# di GNU non li segue per default — misurato nel collaudo — ma li segue con
+# -L, o se è un link l'argomento stesso, e chmod su Linux segue sempre il
+# link che gli si passa. Una garanzia di sicurezza non si appoggia a un
+# default: si fa in Python, voce per voce, con lstat, senza mai seguire un
+# link. Il collaudo esercita il guasto con `chown -R -L` e lo vede.
+#
 # Senza rete. Un tool che lavora su un file non ha niente da raggiungere, e
 # `PrivateNetwork=yes` gli dà uno spazio dei nomi di rete con la sola
 # interfaccia di loopback: non c'è niente da filtrare perché non c'è niente
@@ -110,7 +148,12 @@ TASKS_MAX=128
 # e dichiarato è una misura onesta; un tetto stretto indovinato è il primo
 # nmap ucciso a metà, con un sintomo che non punta alla causa. Si stringono
 # quando c'è qualcosa da misurare — è una voce di debito aperta.
-RUNTIME_MAX_CEILING=600
+#
+# 3600 s è lo stop deciso dall'operatore: un tool che dichiara di più non è
+# registrabile (`timeout_s` nel contratto), e il preflight avvisa oltre i 30
+# minuti. Il valore che il gate chiede oltre il tetto non viene rifiutato ma
+# ridotto: il tetto lo applica chi lo custodisce.
+RUNTIME_MAX_CEILING=3600
 
 # Il montaggio ristretto. Tre costanti, nessuna negoziabile dal chiamante.
 #
@@ -124,6 +167,13 @@ RUNTIME_MAX_CEILING=600
 SCOPE_FILE=/etc/hermes/scope.toml
 RADICE_SCRIPT_FILE=/etc/hermes/radice-script
 PYTHON=/usr/bin/python3
+
+# Gli esiti. ESITI_DIR deve esistere, essere di root e non scrivibile da
+# altri, perché qui dentro il wrapper crea directory da root; il gruppo è
+# quello del servizio, che dopo il sigillo ne legge il contenuto. Lo crea il
+# bootstrap; il filesystem dedicato è una scelta dell'operatore.
+ESITI_DIR=/var/lib/hermes-tool/esiti
+SERVICE_GID=hermes
 
 # Il sistema di base, in sola lettura. Il '-' davanti dice a systemd di
 # ignorare una sorgente che non esiste: /lib64 non c'è su ogni architettura,
@@ -157,17 +207,17 @@ fi
 
 # --- Verbo implicito: esegui ----------------------------------------------- #
 
-[ $# -ge 4 ] || muori "uso: hermes-tool-run <unita> <timeout> [--percorsi] -- <comando...>"
+[ $# -ge 4 ] || muori "uso: hermes-tool-run <unita> <timeout> [--isolato|--percorsi] -- <comando...>"
 
 UNITA="$1"
 shift
 TIMEOUT="$1"
 shift
-CON_PERCORSI=no
-if [ "$1" = "--percorsi" ]; then
-    CON_PERCORSI=si
-    shift
-fi
+MODO=normale
+case "$1" in
+    --isolato)  MODO=isolato;  shift ;;
+    --percorsi) MODO=percorsi; shift ;;
+esac
 [ "${1:-}" = "--" ] || muori "il comando deve essere introdotto da '--'"
 shift
 [ $# -ge 1 ] || muori "manca il comando da eseguire"
@@ -182,14 +232,15 @@ printf '%s' "$TIMEOUT" | grep -Eq '^[0-9]+$' || muori "timeout non numerico: $TI
 #
 # Qualunque cosa non torni, si muore PRIMA di avviare l'unità: un perimetro
 # promesso e non applicabile nega, non ricade sull'unità senza montaggio.
-if [ "$CON_PERCORSI" = si ]; then
+DIR_ESITI=""
+if [ "$MODO" != normale ]; then
     # Si legge con l'interprete di sistema, isolato (-I -S): il file è TOML e
     # interpretarlo con sed vorrebbe dire avere due parser dello stesso
     # perimetro, cioè prima o poi due perimetri. Le regole di forma sono
     # ricontrollate qui anche se il server le ha già applicate: questo è il
     # punto in cui i prefissi diventano mount, e gira da root.
     set +e
-    VOCI=$("$PYTHON" -I -S - "$SCOPE_FILE" "$RADICE_SCRIPT_FILE" <<'LEGGI'
+    VOCI=$("$PYTHON" -I -S - "$MODO" "$SCOPE_FILE" "$RADICE_SCRIPT_FILE" "$ESITI_DIR" "$SERVICE_GID" <<'LEGGI'
 import os
 import re
 import stat
@@ -247,20 +298,36 @@ def canonico(voce, cosa):
         fermo(f"{cosa} {voce} risolve in {reale}: va dichiarato il percorso reale")
 
 
-perimetro, radice = sys.argv[1], sys.argv[2]
+modo, perimetro, radice, esiti, gruppo = sys.argv[1:6]
 
-with apri(perimetro) as fh:
-    try:
-        dati = tomllib.load(fh)
-    except tomllib.TOMLDecodeError as err:
-        fermo(f"{perimetro} non parsabile: {err}")
-percorsi = dati.get("percorsi", [])
-if not isinstance(percorsi, list) or not percorsi:
-    fermo(f"{perimetro} non dichiara nessun prefisso in 'percorsi'")
-for voce in percorsi:
-    if not valido(voce):
-        fermo(f"{perimetro}: prefisso non valido {voce!r}")
-    canonico(voce, "il prefisso")
+percorsi = []
+if modo == "percorsi":
+    with apri(perimetro) as fh:
+        try:
+            dati = tomllib.load(fh)
+        except tomllib.TOMLDecodeError as err:
+            fermo(f"{perimetro} non parsabile: {err}")
+    percorsi = dati.get("percorsi", [])
+    if not isinstance(percorsi, list) or not percorsi:
+        fermo(f"{perimetro} non dichiara nessun prefisso in 'percorsi'")
+    for voce in percorsi:
+        if not valido(voce):
+            fermo(f"{perimetro}: prefisso non valido {voce!r}")
+        canonico(voce, "il prefisso")
+
+# La directory degli esiti: qui dentro si creano directory da root, quindi
+# chi potesse scriverci potrebbe preparare un link al posto di quella che
+# sta per nascere.
+canonico(esiti, "la directory degli esiti")
+st = os.stat(esiti)
+if not stat.S_ISDIR(st.st_mode):
+    fermo(f"{esiti} non è una directory")
+if st.st_uid != 0 or stat.S_IMODE(st.st_mode) & 0o022:
+    fermo(
+        f"{esiti} deve essere di root e non scrivibile da altri (uid "
+        f"{st.st_uid}, permessi {stat.S_IMODE(st.st_mode):04o}): ci si creano "
+        f"directory da root. sudo chown root:{gruppo} {esiti} && sudo chmod 750 {esiti}"
+    )
 
 with apri(radice) as fh:
     righe = fh.read().decode("utf-8", errors="replace").split("\n")
@@ -280,6 +347,16 @@ LEGGI
     [ "$ESITO_LETTURA" -eq 0 ] || \
         muori "montaggio ristretto non applicabile: ${VOCI:-motivo non riportato}; tool non avviato"
 
+    # La directory di questa invocazione. Il nome viene dall'unità, che è
+    # già stata validata come prefisso + UUID: nessun carattere arriva dal
+    # chiamante senza essere passato da quel controllo. Se esiste già, è un
+    # nome riusato, e due invocazioni non scrivono nella stessa directory.
+    DIR_ESITI="$ESITI_DIR/${UNITA#hermes-tool-}"
+    [ ! -e "$DIR_ESITI" ] && [ ! -L "$DIR_ESITI" ] || \
+        muori "montaggio ristretto non applicabile: $DIR_ESITI esiste già; tool non avviato"
+    install -d -o "$TOOL_UID" -g "$TOOL_GID" -m 0700 "$DIR_ESITI" || \
+        muori "montaggio ristretto non applicabile: $DIR_ESITI non creabile; tool non avviato"
+
     # Le voci non contengono spazi né caratteri di glob — la forma è appena
     # stata verificata — ma il glob si spegne comunque: un controllo che
     # dipende da un solo meccanismo non è un controllo.
@@ -294,13 +371,22 @@ LEGGI
     # tool ha bisogno almeno di /dev/null e di un posto dove scrivere un
     # temporaneo. Sono privati dell'unità e spariscono con lei.
     # PrivateNetwork: solo loopback. Vedere l'intestazione.
+    #
+    # Il primo blocco è comune ai due modi; il perimetro dei percorsi
+    # aggiunge solo la rete tolta, perché i prefissi sono già in MONTAGGI.
+    if [ "$MODO" = percorsi ]; then
+        set -- -p PrivateNetwork=yes -- "$@"
+    else
+        set -- -- "$@"
+    fi
     set -- \
         -p TemporaryFileSystem=/:ro \
         -p BindReadOnlyPaths="$MONTAGGI" \
+        -p BindPaths="$DIR_ESITI:/esiti" \
         -p PrivateTmp=yes \
         -p PrivateDevices=yes \
-        -p PrivateNetwork=yes \
-        -- "$@"
+        -E HERMES_ESITI=/esiti \
+        "$@"
 else
     set -- -- "$@"
 fi
@@ -323,6 +409,48 @@ set +e
     "$@"
 ESITO_RUN=$?
 set -e
+
+# --- Il sigillo sugli esiti ------------------------------------------------- #
+#
+# L'unità è finita: systemd-run --wait torna quando il cgroup è vuoto, anche
+# dopo un'uccisione per tempo o memoria. Da qui il contenuto non cambia più
+# per mano del tool. Un errore del sigillo non cambia l'esito del tool: lo si
+# dice su stderr, e il gate lo vedrà come esiti non leggibili.
+if [ -n "$DIR_ESITI" ]; then
+    "$PYTHON" -I -S - "$DIR_ESITI" "$SERVICE_GID" <<'SIGILLA' || \
+        printf 'hermes-tool-run: esiti in %s non sigillati\n' "$DIR_ESITI" >&2
+import grp
+import os
+import stat
+import sys
+
+cartella, gruppo = sys.argv[1], sys.argv[2]
+gid = grp.getgrnam(gruppo).gr_gid
+
+if not os.listdir(cartella):
+    os.rmdir(cartella)
+    sys.exit(0)
+
+
+def sigilla(percorso):
+    # Mai seguire un link. lchown cambia il link e non il file a cui punta.
+    # chmod invece su Linux segue sempre i link, quindi a un link non si
+    # applica affatto: lo si riconosce con lstat e lo si salta. Fra l'lstat e
+    # il chmod nessuno può sostituire la voce: il tool è finito, e gli altri
+    # tool non attraversano ESITI_DIR (root:hermes 0750).
+    st = os.lstat(percorso)
+    os.chown(percorso, 0, gid, follow_symlinks=False)
+    if stat.S_ISLNK(st.st_mode):
+        return
+    os.chmod(percorso, 0o750 if stat.S_ISDIR(st.st_mode) else 0o640)
+
+
+for radice, cartelle, file in os.walk(cartella, topdown=False, followlinks=False):
+    for nome in file + cartelle:
+        sigilla(os.path.join(radice, nome))
+sigilla(cartella)
+SIGILLA
+fi
 
 # --- Esito: il segnale, non un 1 generico ---------------------------------- #
 #

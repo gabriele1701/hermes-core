@@ -253,6 +253,20 @@ Entrambi chiudono con **due elenchi distinti**: ciò che hanno verificato e
 trovato mancante — che sparisce quando il lavoro è fatto, quindi la sua
 assenza è un'informazione — e ciò che non guardano affatto.
 
+### `bin/hermes-esiti`
+
+Un tool isolato scrive solo in `/esiti`, una directory per invocazione che
+resta sulla VM quando il tool finisce. Questo comando la porta via:
+
+```sh
+sudo bin/hermes-esiti                               # elenco
+sudo bin/hermes-esiti <correlation_id> ~            # archivio .tar.gz
+```
+
+Ricalcola il manifesto dei file con lo stesso codice del gate e lo confronta
+con quello scritto nella riga di audit: dice se ciò che si porta via è ciò
+che il tool ha lasciato. Dettagli in `docs/setup-vm-hermes.md` §6.
+
 ### `bin/hermes-collauda-percorsi`
 
 Serve solo se il perimetro dichiara dei `percorsi`, cioè se si registrano

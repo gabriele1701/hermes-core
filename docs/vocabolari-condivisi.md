@@ -153,6 +153,8 @@ Non sono vocabolari, ma sono ciò su cui l'ingestione inciampa per primo.
 | istante dell'evento | `LogRecord.ts` | `audit_events.occurred_at` | divergente per scelta |
 | tipo dell'evento | `LogRecord.action` | `audit_events.event_type` | divergente per scelta |
 | identificativo della riga | assente | `audit_events.id` | divergente per scelta |
+| isolamento del tool | `ToolSpec.requires_container`: l'unità ristretta del wrapper | `tools.requires_container`, obbligatorio per `path` e `process` | allineato |
+| tempo concesso al tool | `ToolSpec.timeout_s` | non modellato | divergente per scelta |
 | tutti gli altri campi del log | `correlation_id`, `peer_correlation_id`, `outcome`, `agent`, `tool_id`, `target`, `tier_effective`, `authorized_by`, `secret_name`, `detail` | identici | allineato |
 
 **`default_tier` / `declared_tier`.** Sul server il campo dice cosa succede in
@@ -166,6 +168,18 @@ accanto a `tool_id`, `occurred_at` come ogni timestamp di evento,
 `event_type` perché `action` è una parola riservata in più di un dialetto).
 Sono una mappa di quattro righe da scrivere nell'ingestione, **una volta e in
 un posto solo**.
+
+**`requires_container`.** Stesso nome e stesso valore, e dal 17 novembre
+stesso significato verificabile: sul server è l'unità ristretta del wrapper,
+non più un container dichiarato dall'operatore. Il pannello già pretendeva
+`true` per i tool di tipo percorso o processo (vincolo
+`tools_bersaglio_isolato`), e ora lo pretende anche il server per `path`:
+prima un tool registrato come il pannello voleva veniva negato dal server
+finché l'operatore non dichiarava un container che non c'era.
+
+**`timeout_s`** non è modellato nel pannello: il pannello non registra tool,
+li riceve, e il tempo è una proprietà dell'esecuzione. Va aggiunto quando la
+registrazione arriverà dal server, se il pannello deve mostrarlo.
 
 **`audit_events.id`** è la chiave del database. Il log JSONL non ha un
 identificativo di riga, e non deve acquistarne uno per questo: la posizione

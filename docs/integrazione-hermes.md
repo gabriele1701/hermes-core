@@ -220,6 +220,50 @@ file di configurazione e non alla directory corrente.
 Per applicare una modifica fatta a mano: `/reload-mcp` dentro una sessione —
 funziona anche nella chat del desktop — oppure aprirne una nuova.
 
+### Quanto aspetta Hermes una risposta
+
+Un tool che lavora a lungo — un'analisi con Ghidra, una sessione Frida —
+dichiara in `[[tool]]` il proprio `timeout_s`, fino a un'ora. Il server lo
+rispetta; il **client** no, se non glielo si dice: Hermes smette di
+aspettare prima, e a quel punto il tool continua a girare sulla VM mentre
+l'esito non arriva a nessuno.
+
+I due limiti, letti dal sorgente di Hermes Agent (`tools/mcp_tool_common.py`
+e `agent/tool_executor.py`, ramo principale al 17 novembre 2026):
+
+| Chiave in `config.yaml` | Predefinito | Cosa limita |
+|---|---|---|
+| `mcp_servers.<nome>.timeout` | 300 s | la singola chiamata MCP a questo server |
+| `timeouts.tools.sequential_call` | 420 s | **ogni** chiamata di tool, MCP comprese |
+
+Vanno alzati **tutti e due**: il secondo vale anche per le chiamate MCP, e
+alzare solo il primo lascerebbe Hermes ad abbandonare dopo 420 s. Il valore
+giusto è il `timeout_s` più alto fra i tool registrati, più un minuto di
+margine — il preflight lo calcola e lo scrive nel rimedio della voce `tempo
+dei tool`:
+
+```yaml
+mcp_servers:
+  hermes_core:
+    command: ssh
+    args: ["-T", "-q", "hermes@<IP-VM>"]
+    timeout: 3660
+
+timeouts:
+  tools:
+    sequential_call: 3660
+```
+
+Il secondo è globale: riguarda ogni tool di Hermes, non solo i nostri. È il
+prezzo di un'analisi sincrona da un'ora; l'alternativa — un tool che avvia e
+uno che legge l'esito — è un altro disegno, da fare se i tempi lunghi
+diventano la norma.
+
+Due guide trovate in rete parlano di un predefinito di 60 s. Il sorgente
+attuale dice 300 e 420; se la versione installata è più vecchia, il valore
+può essere diverso, e la verifica sta in `hermes --version` e nella
+documentazione di quella versione, alla pagina *MCP config reference*.
+
 ### Dal pannello del desktop
 
 In alternativa alla CLI: *Impostazioni → MCP Servers → aggiungi server
@@ -293,10 +337,10 @@ con la chiamata in `pending`. Il flusso di conferma non è ancora collegato, e
 un'autorizzazione che il chiamante concede a se stesso. Si chiude collegando
 l'*elicitation* di MCP — vedere [debito-sicurezza.md](debito-sicurezza.md).
 
-**Un tool che richiede il container viene negato.** Finché
-`container_available = false`, un tool con `requires_container = true` non
-viene eseguito sull'host: la ricaduta silenziosa sull'ambiente meno isolato è
-proprio ciò che si vuole impedire.
+**Un tool che richiede l'isolamento senza wrapper viene negato.** Un tool
+con `requires_container = true` gira nell'unità ristretta del wrapper
+(`server.tool_runner`): senza wrapper non viene eseguito, invece di ricadere
+sull'unità normale. `container_available` non ha più effetto.
 
 **Non esiste una funzione per ottenere un segreto.** Il vault è collegato ma
 non esposto: i segreti vanno usati lungo il percorso di esecuzione, non

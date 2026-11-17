@@ -232,9 +232,23 @@ class ToolSpec(_StrictModel):
     )
     requires_container: bool = Field(
         description=(
-            "Il tool deve essere eseguito nel container isolato, non sull'host "
-            "Hermes."
+            "Il tool gira nell'unità ristretta del wrapper: filesystem in sola "
+            "lettura ridotto al sistema di base, più la sola directory dei "
+            "propri esiti. Senza il wrapper il gate lo nega. Il nome viene da "
+            "quando l'isolamento previsto era un container; il significato è "
+            "quello che il sistema sa verificare."
         )
+    )
+    timeout_s: int | None = Field(
+        default=None,
+        ge=1,
+        le=3600,
+        description=(
+            "Secondi concessi a un'invocazione. Assente: il predefinito del "
+            "gate (300). Oltre 3600 la registrazione è rifiutata: è il tetto "
+            "del wrapper, e un valore che il wrapper taglierebbe in silenzio "
+            "sarebbe una promessa falsa."
+        ),
     )
     exec_path: str = Field(
         min_length=1,
@@ -272,6 +286,26 @@ class ToolSpec(_StrictModel):
         max_length=512,
         description="Cosa fa il tool, in una riga. Mostrato in fase di conferma.",
     )
+
+    @model_validator(mode="after")
+    def _percorso_isolato(self) -> ToolSpec:
+        """Un tool che punta a un file dichiara l'isolamento.
+
+        Il gate lo isolerebbe comunque — il perimetro dei percorsi è il
+        montaggio dell'unità ristretta — ma la dichiarazione deve dire il
+        vero: un tool registrato con ``requires_container = false`` e
+        ``target_kind = "path"`` dichiarerebbe di girare senza il confine che
+        invece gli viene applicato. Ed è la stessa regola del pannello
+        (vincolo ``tools_bersaglio_isolato``): un tool che uno dei due accetta
+        e l'altro rifiuta è un'integrazione che si rompe alla prima riga.
+        """
+        if self.target_kind is TargetKind.PATH and not self.requires_container:
+            raise ValueError(
+                "un tool con target_kind 'path' deve dichiarare "
+                "requires_container = true: il perimetro dei percorsi è "
+                "l'unità ristretta, e la dichiarazione deve dirlo"
+            )
+        return self
 
     @field_validator("exec_args")
     @classmethod

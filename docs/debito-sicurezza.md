@@ -35,6 +35,7 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | I figli di un'uscita pulita non venivano ripuliti | passo 9 | Il cgroup dell'unità muore con l'unità qualunque cosa contenga, quindi non serve che il gate distingua un figlio legittimo da un residuo — che era il motivo per cui non si poteva chiudere con un `killpg`. |
 | I bersagli di tipo percorso non avevano un perimetro | bersagli di tipo percorso | `TargetKind.PATH`, prefissi `percorsi` nel file di perimetro, e **due strati**: il gate risolve il percorso e confronta il risolto, e `bin/hermes-tool-run --percorsi` avvia il tool in un'unità con `TemporaryFileSystem=/:ro` e `BindReadOnlyPaths=` sui soli prefissi. Un percorso fuori perimetro non è vietato, non esiste; un symlink che esce non risolve. I prefissi li legge il wrapper dal file di root, non da argv. Senza wrapper un tool di tipo percorso è **negato**, non degradato alla sola risoluzione. Verificato leggendo, non ispezionando: `bin/hermes-collauda-percorsi` e la sonda del preflight. Residui nelle due voci qui sotto. |
 | Per i bersagli di rete l'indirizzo risolto non era nel log | indirizzo risolto | La documentazione diceva che per un alias «nel log restano entrambi», e restava solo il nome: l'indirizzo viveva in memoria e nell'`argv` del tool, quindi dal log non si ricavava dove fosse andata un'esecuzione senza rileggere il perimetro *com'era quel giorno*. Ora il `detail` della riga porta `indirizzo risolto: …`, sempre, come già `percorso risolto: …` per i percorsi; vale anche per le conferme in sospeso. Nel `detail` e non in un campo nuovo: un campo cambierebbe il formato di ogni riga, e va deciso con l'ingestione del pannello. Trovata scrivendo il perimetro dei percorsi, non cercandola. |
+| `requires_container` era una promessa che il sistema si faceva da solo | isolamento, timeout ed esiti | Il gate negava un tool che lo dichiarava se `container_available` era falso, ma quel booleano lo scriveva l'operatore e nessuno lo verificava: a true, il tool girava nell'unità di tutti gli altri. Ora `requires_container` significa l'unità ristretta del wrapper (`--isolato`), che o parte con il suo montaggio o non parte; senza wrapper il gate nega. `container_available` non ha più effetto. Decisione dell'operatore, strada A. Un tool di tipo percorso deve dichiararlo, come già pretendeva il pannello. Resta più debole di un container: non confina `/proc` né le chiamate di sistema. |
 | HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che è la protezione vera, è documentato in `docs/dipendenze.md` e resta da generare. |
 
 ---
@@ -259,48 +260,6 @@ sette in una sera. Quella sessione non è il collaudo, è la **scoperta**.
 
 ---
 
-## MEDIA — `requires_container` è una promessa che il sistema si fa da solo
-
-**Dove:** `mcp_server/contracts.py` (`requires_container`),
-`mcp_server/config.py` (`container_available`), `mcp_server/executor.py`.
-
-Un tool che dichiara `requires_container` viene negato se
-`server.container_available` è falso, ed è giusto: mai ricadere sull'host. Ma
-quel booleano **lo asserisce l'operatore e nessuno lo verifica**. Non esiste
-un runtime che il gate invochi, né un controllo che dica se l'esecuzione è
-avvenuta davvero in un ambiente isolato: messo a `true`, il tool gira
-nell'unità di ogni altro tool, e il log non ha modo di dire la differenza.
-
-È la stessa forma di tutto ciò che questa patch ha chiuso — una dichiarazione
-che vale come un fatto — solo che qui a dichiarare è la configurazione.
-
-**Cosa è cambiato con i bersagli di tipo percorso.** Per quei tool
-l'isolamento del filesystem non è più una dichiarazione: o l'unità transiente
-parte con il montaggio ristretto, o **non parte**. Non c'è un booleano da
-credere, e il preflight lo misura aprendo un file. È la prima forma di
-isolamento del progetto che è *verificabile* invece che *asserita*, e non ha
-richiesto un runtime di container: sono direttive di `systemd-run` sulla
-stessa unità di A1.
-
-**Cosa resta aperto.** La voce si chiude solo in parte:
-
-* `requires_container` e `container_available` sono ancora quelli di prima, e
-  per un tool che non ha un bersaglio di tipo percorso non c'è niente dietro;
-* il montaggio ristretto confina il **filesystem**, non la rete, non `/proc`
-  altrui, non le chiamate di sistema. Un container promette di più.
-
-**La direzione, non ancora una decisione:** far significare a
-`requires_container` «gira nell'unità ristretta» — cioè legare la
-dichiarazione al meccanismo che esiste — e togliere `container_available`,
-perché un isolamento che o c'è o impedisce l'avvio non ha bisogno di un
-interruttore. Va deciso col primo tool che lo dichiara, non prima: oggi non ce
-n'è nessuno, e scegliere ora vorrebbe dire scegliere senza un caso.
-
-**Condizione di chiusura:** nessun tool può risultare «eseguito in isolamento»
-sulla sola parola della configurazione.
-
----
-
 ## MEDIA — il perimetro dei percorsi confina la lettura, e solo quella
 
 **Dove:** `bin/hermes-tool-run` (ramo `--percorsi`), `mcp_server/scope.py`.
@@ -312,10 +271,10 @@ settimana sembrerebbe che le faccia:
   `PrivateNetwork=yes`, cioè la sola loopback. Decisione dell'operatore: un
   tool che lavora su file non ha bisogno della rete. Verificata dal collaudo
   contando le interfacce, con il controllo che l'unità normale ne veda una.
-* **Non dà dove scrivere.** I prefissi sono montati in sola lettura e l'unico
-  posto scrivibile è un `/tmp` privato che sparisce con l'unità. Ghidra vuole
-  una directory di progetto: servirà un secondo elenco, di prefissi
-  scrivibili, con le sue regole — non un `rw` aggiunto a quelli che ci sono.
+* ~~**Non dà dove scrivere.**~~ Chiusa: `/esiti`, una directory per
+  invocazione, che resta dopo l'unità e viene sigillata, con il manifesto
+  nella riga di audit e `bin/hermes-esiti` per portarla via. Non un `rw` sui
+  prefissi: il perimetro resta in sola lettura.
 * **Non dà `/proc`.** Voluto, ma GDB e Frida ne hanno bisogno. È il motivo per
   cui i processi sono un altro tipo di bersaglio e non un caso di questo.
 * **Lascia visibile `/usr`.** Un symlink dal perimetro verso `/usr` risolve.
@@ -329,8 +288,29 @@ settimana sembrerebbe che le faccia:
   controlla il bersaglio, il kernel controlla il perimetro: sono due domande
   diverse, e la seconda è più larga.
 
-**Condizione di chiusura:** le due aperte delle prime tre col primo tool
-reale che punta a un file, perché sono requisiti che oggi nessuno ha. Le ultime tre sono proprietà
+**Condizione di chiusura:** `/proc` col primo tool che ne ha bisogno, ed è
+il tipo di bersaglio `process`, non questo.
+
+---
+
+## MEDIA — lo spazio degli esiti non ha un tetto se non c'è un filesystem dedicato
+
+**Dove:** `/var/lib/hermes-tool/esiti`, `bin/hermes-tool-run`.
+
+Un tool isolato può scrivere in `/esiti` quanto vuole. Con un filesystem
+dedicato (guida §6) il tetto è la sua dimensione, e riempirlo ferma solo gli
+esiti; senza, è il disco della macchina, e riempirlo ferma anche il log
+d'audit. Il bootstrap non crea il filesystem perché la dimensione è una
+decisione dell'operatore e montare un file immagine non si collauda in un
+container.
+
+**Mitigazione:** il preflight mostra sempre lo spazio usato e libero, e
+avvisa sotto un decimo o sotto 1 GiB, e se la directory non è un filesystem
+dedicato. Gli esiti non si cancellano da soli: rimuoverli è un atto
+dell'operatore, dopo averli portati via.
+
+**Condizione di chiusura:** filesystem dedicato montato, oppure una quota
+per l'utente `hermes-tool`. Le ultime tre sono proprietà
 del disegno: restano scritte.
 
 ---

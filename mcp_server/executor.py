@@ -100,6 +100,7 @@ from mcp_server.config import (
     TOOL_PYTHON_DEFAULT,
     TOOL_PYTHON_FLAGS_DEFAULT,
 )
+from mcp_server.esiti import DIR_ESITI, nota_esiti
 from mcp_server.contracts import (
     AuthorizedBy,
     CallOutcome,
@@ -155,6 +156,12 @@ MARGINE_TEMPO_LIMITE = 5
 #: della suite verifica che la parola sia la stessa nei due file.
 OPZIONE_PERCORSI = "--percorsi"
 
+#: Opzione con cui il gate chiede l'unità ristretta senza prefissi: per un
+#: tool che dichiara ``requires_container`` e non punta a un file. Filesystem
+#: ridotto al sistema di base e alla directory dei propri esiti; la rete
+#: resta, perché un tool di rete senza rete non è un tool.
+OPZIONE_ISOLATO = "--isolato"
+
 
 # --------------------------------------------------------------------------- #
 # Errori
@@ -163,10 +170,6 @@ OPZIONE_PERCORSI = "--percorsi"
 
 class ExecutionError(Exception):
     """Base degli errori del gate."""
-
-
-class ContainerUnavailable(ExecutionError):
-    """Il tool richiede il container isolato, che non è disponibile."""
 
 
 class IntegrityMismatch(ExecutionError):
@@ -183,6 +186,15 @@ class ToolRunnerUnusable(ExecutionError):
     Non si ricade sull'identità del servizio: sarebbe l'isolamento promesso e
     non applicato, e nessuno saprebbe di averlo perso. Stessa regola del
     container assente e dei posti condivisi rotti.
+    """
+
+
+class ContainerUnavailable(ToolRunnerUnusable):
+    """Il tool dichiara l'isolamento, e l'isolamento non è applicabile.
+
+    Il nome è quello di quando l'isolamento previsto era un container. Ora è
+    l'unità ristretta del wrapper, e senza wrapper non c'è: sottoclasse di
+    :class:`ToolRunnerUnusable` perché la causa è quella.
     """
 
 
@@ -528,9 +540,10 @@ class ToolExecutor:
         Log su cui registrare ogni decisione, rifiuti compresi.
     repo_root:
         Radice entro cui gli script devono restare.
-    container_available:
-        Se il runtime isolato è disponibile. In Milestone 0 è ``False``: i
-        tool che lo richiedono vengono negati, non eseguiti sull'host.
+    tool_runner:
+        Il wrapper di root che esegue i tool sotto un'identità separata. È
+        anche ciò che applica l'isolamento: un tool che dichiara
+        ``requires_container`` senza wrapper viene negato.
     runner:
         Esecutore del processo. Sostituibile nei test.
     """
@@ -541,7 +554,6 @@ class ToolExecutor:
         audit: AuditLog,
         *,
         repo_root: Path,
-        container_available: bool = False,
         runner: Runner | None = None,
         tool_python: Path | str = TOOL_PYTHON_DEFAULT,
         tool_python_flags: Sequence[str] = TOOL_PYTHON_FLAGS_DEFAULT,
@@ -554,7 +566,6 @@ class ToolExecutor:
         self._registry = registry
         self._audit = audit
         self._repo_root = Path(repo_root)
-        self._container_available = container_available
         self._runner = runner or SubprocessRunner(max_output_bytes=max_output_bytes)
         self._tool_python = Path(tool_python)
         self._tool_python_flags = tuple(tool_python_flags)
@@ -578,8 +589,15 @@ class ToolExecutor:
         self._tool_runner = tool_runner
 
     @property
-    def container_available(self) -> bool:
-        return self._container_available
+    def isolamento_disponibile(self) -> bool:
+        """Se un tool che dichiara l'isolamento può essere eseguito.
+
+        È la risposta che prima dava ``container_available``, ma misurata
+        invece che dichiarata: l'isolamento è l'unità ristretta del wrapper,
+        e c'è se il wrapper c'è. Se il wrapper è configurato e rotto, il gate
+        lo scopre invocazione per invocazione e nega.
+        """
+        return self._tool_runner is not None
 
     @property
     def tool_python(self) -> Path:
@@ -733,39 +751,37 @@ class ToolExecutor:
                 )
                 self._nega(spec, agent, tier, correlation_id, target, motivo)
                 raise ToolRunnerUnusable(motivo)
-        elif spec.target_kind is TargetKind.PATH:
-            # Il perimetro dei percorsi ha due strati, e quello che chiude la
-            # finestra fra controllo e uso è il montaggio dell'unità, che
-            # esiste solo col wrapper. Senza, resterebbe la sola risoluzione
-            # fatta qui sopra: un controllo in userspace che un symlink
-            # sostituito al momento giusto supera. Stessa regola del
-            # container: un confine promesso dal tipo di bersaglio e non
-            # applicabile nega, non degrada.
+
+        # 5. Isolamento: l'unità ristretta, o niente.
+        #
+        # Prima qui c'era `container_available`, un booleano che scriveva
+        # l'operatore e nessuno verificava: messo a true, il tool girava
+        # nell'unità di tutti gli altri e il log non poteva accorgersene.
+        # Ora l'isolamento è l'unità ristretta del wrapper, che o parte con
+        # il suo montaggio o non parte. Senza wrapper non c'è, e si nega.
+        #
+        # Per un bersaglio di tipo percorso la ragione è doppia: il perimetro
+        # dei percorsi ha due strati, e quello che chiude la finestra fra
+        # controllo e uso è proprio questo montaggio. Senza, resterebbe la
+        # sola risoluzione fatta qui sopra, che un symlink sostituito al
+        # momento giusto supera.
+        if spec.requires_container and self._tool_runner is None:
+            perche = (
+                "senza il montaggio ristretto il perimetro dei percorsi "
+                "sarebbe solo un controllo prima dell'uso"
+                if spec.target_kind is TargetKind.PATH
+                else "ricadere sull'unità normale vorrebbe dire eseguire "
+                "senza l'isolamento dichiarato"
+            )
             motivo = (
-                "il tool ha un bersaglio di tipo percorso, e il confinamento "
-                "dei percorsi lo applica il wrapper dei tool: "
-                "server.tool_runner non è configurato. Invocazione rifiutata, "
-                "non eseguita: senza il montaggio ristretto il perimetro "
-                "sarebbe solo un controllo prima dell'uso. Riprovare non "
-                "cambia l'esito."
+                f"il tool dichiara requires_container, cioè l'unità "
+                f"ristretta, e l'unità ristretta la applica il wrapper dei "
+                f"tool: server.tool_runner non è configurato. Invocazione "
+                f"rifiutata, non eseguita: {perche}. Riprovare non cambia "
+                f"l'esito."
             )
             self._nega(spec, agent, tier, correlation_id, target, motivo)
-            raise ToolRunnerUnusable(motivo)
-
-        # 5. Isolamento nel container: mai degradare silenziosamente verso l'host.
-        if spec.requires_container and not self._container_available:
-            self._nega(
-                spec,
-                agent,
-                tier,
-                correlation_id,
-                target,
-                "il tool richiede il container isolato, non disponibile: "
-                "esecuzione negata invece di ricadere sull'host",
-            )
-            raise ContainerUnavailable(
-                f"{tool_id!r} richiede il container isolato, non disponibile"
-            )
+            raise ContainerUnavailable(motivo)
 
         # 6. Integrità, dopo il perimetro: rifiutare fuori confine è più
         #    economico e più indipendente dal tool che hashare uno script.
@@ -841,7 +857,7 @@ class ToolExecutor:
         correlation_id: uuid.UUID,
         confirmed: bool = False,
         target: str | None = None,
-        timeout: int = TIMEOUT_DEFAULT,
+        timeout: int | None = None,
     ) -> tuple[ToolCall, RunResult]:
         """Prepara ed esegue, restituendo la traccia e l'esito grezzo.
 
@@ -871,6 +887,12 @@ class ToolExecutor:
             confirmed=confirmed,
             target=target,
         )
+        # Il tempo concesso lo dichiara il tool, entro il tetto del contratto
+        # (3600 s). Chi chiama può chiederne uno esplicito — i test lo fanno —
+        # ma il server non lo fa: un modello che potesse allungarsi il tempo
+        # di un tool si sceglierebbe il proprio limite.
+        if timeout is None:
+            timeout = pronta.spec.timeout_s or TIMEOUT_DEFAULT
 
         # Posto libero, o rifiuto tracciato. Il gate è l'unico punto in cui
         # passano le esecuzioni, quindi è il punto in cui si contano.
@@ -981,11 +1003,7 @@ class ToolExecutor:
                 # Solo per i bersagli di tipo percorso: l'unità parte con il
                 # filesystem ridotto ai prefissi del perimetro. Per ogni
                 # altro tool la riga di comando è quella di prima.
-                *(
-                    (OPZIONE_PERCORSI,)
-                    if pronta.spec.target_kind is TargetKind.PATH
-                    else ()
-                ),
+                *self._modo_unita(pronta.spec),
                 "--",
                 *argv,
             ]
@@ -1029,11 +1047,32 @@ class ToolExecutor:
         if esito.truncated:
             detail += f"; output troncato a {self._max_output_bytes} byte per stream"
         detail += pronta.nota_risolto
+        if self._tool_runner is not None and self._modo_unita(pronta.spec):
+            # Cosa ha lasciato il tool nella sua directory, con l'impronta:
+            # la riga di audit lega gli esiti all'invocazione, e chi li porta
+            # altrove può verificare che siano quelli.
+            detail += nota_esiti(DIR_ESITI / str(correlation_id))
         call = self._traccia(pronta, outcome, detail)
         self._log_call(call, pronta)
         return call, esito
 
     # -- interno ------------------------------------------------------------- #
+
+    @staticmethod
+    def _modo_unita(spec: ToolSpec) -> tuple[str, ...]:
+        """L'opzione con cui chiedere l'unità al wrapper, o nessuna.
+
+        Un tool di tipo percorso dichiara sempre l'isolamento (lo impone il
+        contratto) e riceve in più i prefissi e nessuna rete. Un tool che
+        dichiara l'isolamento e non punta a un file riceve l'unità ristretta
+        con la rete. Tutti gli altri l'unità di prima.
+        """
+        if spec.target_kind is TargetKind.PATH:
+            return (OPZIONE_PERCORSI,)
+        if spec.requires_container:
+            return (OPZIONE_ISOLATO,)
+        return ()
+
 
     def _esito_non_riuscito(
         self, pronta: PreparedExecution, detail: str, stderr: str
@@ -1098,6 +1137,7 @@ __all__ = [
     "ConcurrencyLimitReached",
     "ConfirmationRequired",
     "ContainerUnavailable",
+    "OPZIONE_ISOLATO",
     "OPZIONE_PERCORSI",
     "ExecutionError",
     "IntegrityMismatch",

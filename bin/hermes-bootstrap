@@ -65,6 +65,11 @@ FILE_OVERRIDES=$DIR_STATO/overrides.jsonl
 DIR_SPEDIZIONE=/var/lib/hermes-ship
 DIR_STATO_SPEDIZIONE=$DIR_SPEDIZIONE/stato
 DIR_CONFIG=/etc/hermes
+# Gli esiti dei tool isolati: una directory per invocazione, creata dal
+# wrapper. Deve coincidere con ESITI_DIR nel wrapper e con DIR_ESITI in
+# mcp_server/esiti.py: un test confronta i tre.
+DIR_TOOL=/var/lib/hermes-tool
+DIR_ESITI=$DIR_TOOL/esiti
 SCOPE=$DIR_CONFIG/scope.toml
 # La directory degli script dei tool, scritta dove il wrapper la legge per
 # montarla nell'unità ristretta dei bersagli di tipo percorso. Deve
@@ -235,6 +240,31 @@ crea_dir "$DIR_STATO" 700 "$UTENTE_SERVIZIO"
 crea_dir "$DIR_SPEDIZIONE" 750 "$UTENTE_SPEDIZIONE"
 crea_dir "$DIR_STATO_SPEDIZIONE" 755 "$UTENTE_SPEDIZIONE"
 crea_dir "$DIR_CONFIG" 755 root
+crea_dir "$DIR_TOOL" 755 root
+
+# La directory degli esiti ha un proprietario e un gruppo diversi, e i suoi
+# permessi si RIAPPLICANO ogni volta invece di essere lasciati com'erano. Il
+# wrapper la rifiuta se non è di root e non scrivibile da altri, e il caso
+# tipico in cui lo diventa è proprio quello consigliato: un filesystem
+# dedicato montato lì sopra nasce di root:root 0755, e il servizio non
+# potrebbe leggere gli esiti né gli altri tool restarne fuori.
+if [ -d "$DIR_ESITI" ]; then
+    if [ "$(stat -c '%U:%G %a' "$DIR_ESITI")" = "root:$UTENTE_SERVIZIO 750" ]; then
+        invariato "directory degli esiti $DIR_ESITI"
+    else
+        chown "root:$UTENTE_SERVIZIO" "$DIR_ESITI"
+        chmod 750 "$DIR_ESITI"
+        riapplicato "directory degli esiti $DIR_ESITI (root:$UTENTE_SERVIZIO 750)"
+    fi
+else
+    install -d -m 750 -o root -g "$UTENTE_SERVIZIO" "$DIR_ESITI"
+    fatto "directory degli esiti $DIR_ESITI (750, root:$UTENTE_SERVIZIO)"
+fi
+if ! mountpoint -q "$DIR_ESITI" 2>/dev/null; then
+    promemoria "gli esiti dei tool stanno sul filesystem di sistema: per un
+      filesystem dedicato vedere docs/setup-vm-hermes.md §6, «La directory
+      degli esiti». Il preflight mostra lo spazio usato e libero."
+fi
 
 # --- 3. Permessi del repo ------------------------------------------------- #
 #

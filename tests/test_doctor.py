@@ -117,6 +117,7 @@ def scrivi_config(
     target_kind: str | None = None,
     tool_runner: Path | str | None = None,
     repo_root: Path | None = None,
+    timeout_s: int | None = None,
 ) -> Path:
     riga_stato = f'state_dir = "{state_dir}"\n' if state_dir is not None else ""
     if scope_file is not None:
@@ -128,6 +129,8 @@ def scrivi_config(
         if target_kind is not None
         else ""
     )
+    if timeout_s is not None:
+        riga_bersaglio += f"timeout_s = {timeout_s}\n            "
     radice_cfg = repo_root if repo_root is not None else radice
     sha = sha if sha is not None else sha256_file(radice / SCRIPT)
     blocco_tool = (
@@ -515,10 +518,18 @@ def test_dati_personali_segnalati_anche_su_verde(tmp_path: Path, radice: Path):
 
 
 def test_container_richiesto_e_assente_segnalato(tmp_path: Path, radice: Path):
+    """`requires_container` senza wrapper: il gate nega, e il preflight lo dice.
+
+    Prima era un avviso, perché l'isolamento era un container futuro e
+    negarlo era «comportamento voluto». Ora l'isolamento è l'unità ristretta
+    del wrapper, che c'è: un tool che la dichiara su una macchina senza
+    wrapper è un tool non invocabile, ed è un errore di configurazione.
+    """
     referto = esegui(scrivi_config(tmp_path, radice, requires_container=True))
-    c = _controllo(referto, "container")
-    assert c.esito is Esito.AVVISO
-    assert "negati" in c.messaggio
+    c = _controllo(referto, "isolamento richiesto")
+    assert c.esito is Esito.ERRORE
+    assert "nega" in c.messaggio
+    assert "tool_runner" in c.messaggio
 
 
 def test_vault_stub_segnalato(tmp_path: Path, radice: Path):
@@ -2214,3 +2225,181 @@ def test_il_preflight_gira_anche_lanciato_come_programma(tmp_path: Path, radice:
     assert any(
         r.startswith(("PRONTO", "NON PRONTO")) for r in righe
     ), esito.stdout[-500:]
+
+
+# --------------------------------------------------------------------------- #
+# Isolamento richiesto, esiti, tempi dei tool
+# --------------------------------------------------------------------------- #
+
+
+def test_container_available_true_non_ha_piu_effetto(tmp_path: Path, radice: Path):
+    """La chiave resta accettata, ma dire true è dire il falso: si avvisa."""
+    config = scrivi_config(tmp_path, radice)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "container_available = false", "container_available = true"
+        ),
+        encoding="utf-8",
+    )
+    c = _controllo(esegui(config), "container_available")
+    assert c.esito is Esito.AVVISO
+    assert "non ha più effetto" in c.messaggio
+
+
+def test_isolamento_richiesto_con_wrapper_e_ok(tmp_path: Path, radice: Path, monkeypatch):
+    _sonda_ok(monkeypatch)
+    referto = esegui(
+        scrivi_config(
+            tmp_path, radice, requires_container=True, tool_runner=WRAPPER_FINTO
+        )
+    )
+    c = _controllo(referto, "isolamento richiesto")
+    assert c.esito is Esito.OK
+    assert "echo.ping" in c.messaggio
+
+
+def _esiti_in(monkeypatch, cartella: Path) -> None:
+    """La directory degli esiti in tmp, di proprietà di chi gira la suite."""
+    from mcp_server import doctor as mod
+
+    monkeypatch.setattr(mod, "DIR_ESITI", cartella)
+    monkeypatch.setattr(mod, "_PROPRIETARIO_ESITI", os.geteuid())
+
+
+def test_esiti_mancanti_con_tool_isolati_e_errore(tmp_path: Path, radice: Path, monkeypatch):
+    _sonda_ok(monkeypatch)
+    _esiti_in(monkeypatch, tmp_path / "mai-creata")
+    referto = esegui(
+        scrivi_config(
+            tmp_path, radice, requires_container=True, tool_runner=WRAPPER_FINTO
+        )
+    )
+    c = _controllo(referto, "esiti")
+    assert c.esito is Esito.ERRORE
+    assert "hermes-bootstrap" in c.rimedio
+
+
+def test_esiti_mancanti_senza_tool_isolati_non_dice_niente(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Additività: chi non ha tool isolati ha il referto di prima."""
+    _sonda_ok(monkeypatch)
+    _esiti_in(monkeypatch, tmp_path / "mai-creata")
+    referto = esegui(scrivi_config(tmp_path, radice, tool_runner=WRAPPER_FINTO))
+    assert not [c for c in referto.controlli if c.nome.startswith("esiti")]
+
+
+def test_esiti_scrivibili_da_altri_sono_un_errore(tmp_path: Path, radice: Path, monkeypatch):
+    _sonda_ok(monkeypatch)
+    esiti = tmp_path / "esiti"
+    esiti.mkdir()
+    esiti.chmod(0o777)
+    _esiti_in(monkeypatch, esiti)
+    referto = esegui(
+        scrivi_config(
+            tmp_path, radice, requires_container=True, tool_runner=WRAPPER_FINTO
+        )
+    )
+    c = _controllo(referto, "esiti")
+    assert c.esito is Esito.ERRORE
+    assert "chmod 750" in c.rimedio
+
+
+def test_esiti_mostrano_lo_spazio_e_se_il_filesystem_e_dedicato(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    _sonda_ok(monkeypatch)
+    esiti = tmp_path / "esiti"
+    esiti.mkdir()
+    esiti.chmod(0o750)
+    _esiti_in(monkeypatch, esiti)
+    referto = esegui(
+        scrivi_config(
+            tmp_path, radice, requires_container=True, tool_runner=WRAPPER_FINTO
+        )
+    )
+    fs = _controllo(referto, "esiti · filesystem")
+    assert fs.esito is Esito.AVVISO, "una directory in tmp non è un mount"
+    assert "§6" in fs.rimedio
+    spazio = _controllo(referto, "esiti · spazio")
+    assert "usati" in spazio.messaggio and "liberi" in spazio.messaggio
+
+
+def test_poco_spazio_negli_esiti_e_un_avviso(tmp_path: Path, radice: Path, monkeypatch):
+    import collections
+
+    _sonda_ok(monkeypatch)
+    esiti = tmp_path / "esiti"
+    esiti.mkdir()
+    esiti.chmod(0o750)
+    _esiti_in(monkeypatch, esiti)
+    Fs = collections.namedtuple("Fs", "f_blocks f_frsize f_bavail f_bfree")
+    # 10 GiB, mezzo libero: sotto la soglia del gigabyte.
+    monkeypatch.setattr(
+        os, "statvfs", lambda _: Fs(10 * 1024**2, 1024, 512 * 1024, 512 * 1024)
+    )
+    referto = esegui(
+        scrivi_config(
+            tmp_path, radice, requires_container=True, tool_runner=WRAPPER_FINTO
+        )
+    )
+    c = _controllo(referto, "esiti · spazio")
+    assert c.esito is Esito.AVVISO
+    assert "sotto la soglia" in c.messaggio
+    assert "hermes-esiti" in c.rimedio
+
+
+def test_un_tool_oltre_l_attesa_del_client_e_un_avviso(tmp_path: Path, radice: Path):
+    referto = esegui(scrivi_config(tmp_path, radice, timeout_s=900))
+    c = _controllo(referto, "tempo dei tool")
+    assert c.esito is Esito.AVVISO
+    assert "echo.ping 900 s" in c.messaggio
+    assert "timeouts.tools.sequential_call" in c.rimedio
+    assert "960 s" in c.rimedio, "il client deve aspettare più del tool"
+    assert "30 minuti" not in c.messaggio
+
+
+def test_un_tool_oltre_i_30_minuti_lo_dice(tmp_path: Path, radice: Path):
+    c = _controllo(esegui(scrivi_config(tmp_path, radice, timeout_s=2400)), "tempo dei tool")
+    assert c.esito is Esito.AVVISO
+    assert "oltre i 30 minuti" in c.messaggio
+
+
+def test_un_tool_entro_l_attesa_del_client_e_ok(tmp_path: Path, radice: Path):
+    c = _controllo(esegui(scrivi_config(tmp_path, radice, timeout_s=120)), "tempo dei tool")
+    assert c.esito is Esito.OK
+
+
+def test_un_wrapper_con_un_tetto_piu_basso_taglia_in_silenzio(
+    tmp_path: Path, radice: Path, monkeypatch
+):
+    """Il wrapper riduce il tempo chiesto al proprio tetto senza dirlo."""
+    from mcp_server import doctor as mod
+
+    _sonda_ok(monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "_costante_del_wrapper",
+        lambda percorso, nome: "600" if nome == "RUNTIME_MAX_CEILING" else "/x",
+    )
+    referto = esegui(
+        scrivi_config(tmp_path, radice, timeout_s=1200, tool_runner=WRAPPER_FINTO)
+    )
+    errori = [c for c in referto.controlli if c.nome == "tempo dei tool" and c.esito is Esito.ERRORE]
+    assert errori and "600 s" in errori[0].messaggio
+
+
+def test_senza_timeout_dichiarati_il_referto_e_quello_di_prima(tmp_path: Path, radice: Path):
+    referto = esegui(scrivi_config(tmp_path, radice))
+    assert not [c for c in referto.controlli if c.nome.startswith("tempo dei tool")]
+
+
+def test_il_tetto_del_wrapper_e_quello_del_contratto(radice: Path):
+    """Lo stop a 60 minuti sta in due posti: devono dire lo stesso numero."""
+    from mcp_server.contracts import ToolSpec
+    from mcp_server.doctor import _costante_del_wrapper
+
+    tetto = ToolSpec.model_fields["timeout_s"].metadata
+    massimo = next(m.le for m in tetto if hasattr(m, "le"))
+    assert _costante_del_wrapper(radice / "bin" / "hermes-tool-run", "RUNTIME_MAX_CEILING") == str(massimo)
+    assert massimo == 3600

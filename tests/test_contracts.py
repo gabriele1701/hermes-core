@@ -406,3 +406,19 @@ def test_ogni_status_ha_un_esito_nel_log():
 
     for status in AgentStatus:
         assert isinstance(esito_da_status(status), CallOutcome)
+
+
+@pytest.mark.parametrize("valore", [0, -1, 3601])
+def test_timeout_fuori_dai_limiti_rifiutato(valore):
+    """Oltre 3600 s il wrapper taglierebbe in silenzio: si rifiuta prima."""
+    with pytest.raises(ValidationError):
+        ToolSpec(**_tool_spec(timeout_s=valore))
+
+
+@pytest.mark.parametrize("valore", [1, 300, 3600])
+def test_timeout_nei_limiti_accettato(valore):
+    assert ToolSpec(**_tool_spec(timeout_s=valore)).timeout_s == valore
+
+
+def test_timeout_assente_vale_none():
+    assert ToolSpec(**_tool_spec()).timeout_s is None

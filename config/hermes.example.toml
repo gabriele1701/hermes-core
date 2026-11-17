@@ -120,8 +120,12 @@ log_path = "../logs/hermes-audit.jsonl"
 #
 # log_shipping = "/etc/hermes/log-shipping.conf"
 
-# Disponibilità del runtime isolato. A false, i tool che dichiarano
-# requires_container vengono NEGATI, non eseguiti sull'host.
+# NON HA PIÙ EFFETTO, e resta solo perché le configurazioni esistenti la
+# contengono. Era la dichiarazione che un runtime isolato esistesse, che
+# nessuno verificava: messa a true, un tool «isolato» girava nell'unità di
+# tutti gli altri. L'isolamento ora è l'unità ristretta del wrapper
+# (tool_runner, qui sotto): o c'è, o il gate nega. Il preflight avvisa se
+# qui c'è scritto true. Si può togliere.
 container_available = false
 
 # Interprete con cui vengono eseguiti i tool. PERCORSO ASSOLUTO obbligatorio:
@@ -221,6 +225,18 @@ description = "Agente dummy: restituisce un risultato conforme al contratto."
 #   "host" — un indirizzo IP dentro le reti del perimetro, o un alias
 #           dichiarato. Richiede scope_file.
 #
+# requires_container: il tool gira nell'UNITÀ RISTRETTA del wrapper —
+# filesystem in sola lettura ridotto al sistema di base e agli script, più
+# una sola directory scrivibile, /esiti, sua e di quell'invocazione. La rete
+# resta, a meno che il tool punti a un file (target_kind = "path"), che la
+# perde ed è obbligato a dichiarare true. Senza tool_runner il gate nega.
+# Il nome viene da quando l'isolamento previsto era un container.
+#
+# timeout_s: secondi concessi a un'invocazione (predefinito 300, massimo
+# 3600). Oltre i 300 il client MCP va configurato per aspettare altrettanto
+# — Hermes per default smette prima: vedere docs/integrazione-hermes.md. Il
+# preflight avvisa oltre i 300 s e oltre i 30 minuti.
+#
 # exec_args: argomenti FISSI dello script, parte dell'identità di ciò che
 # viene eseguito — `(exec_path, exec_sha256, exec_args)`. Servono a
 # distinguere due sottocomandi dello stesso script a rischio diverso (uno
@@ -262,7 +278,7 @@ description = "Agente dummy: restituisce un risultato conforme al contratto."
 # owner_agent = "echo_dummy"
 # default_tier = "verde"
 # personal_data = false
-# requires_container = false
+# requires_container = true
 # exec_path = "agents/echo_agent/run.py"
 # exec_sha256 = "<lo stesso SHA di sopra>"
 # target_kind = "path"
