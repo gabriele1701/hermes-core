@@ -1186,7 +1186,30 @@ portano via con `bin/hermes-esiti`.
 sudo ls -A /var/lib/hermes-tool/esiti
 ```
 
-Poi, dalla radice del repo:
+**Volume logico o file immagine.** Se la VM usa LVM — l'installatore di
+Ubuntu Server lo fa per default, e spesso lascia libera parte del gruppo di
+volumi — un volume logico è meglio di un file immagine: niente loop, e lo
+spazio non si prende dal filesystem di sistema. Si guarda la colonna `VFree`:
+
+```sh
+sudo vgs
+```
+
+Se c'è spazio (5 GiB qui; nome del gruppo come lo mostra `vgs`):
+
+```sh
+sudo lvcreate -L 5G -n esiti ubuntu-vg
+sudo mkfs.ext4 -q /dev/ubuntu-vg/esiti
+echo '/dev/ubuntu-vg/esiti /var/lib/hermes-tool/esiti ext4 nodev,nosuid,noexec,nofail 0 2' | sudo tee -a /etc/fstab
+sudo findmnt --verify
+sudo mount /var/lib/hermes-tool/esiti
+sudo bin/hermes-bootstrap
+```
+
+Se `VFree` è zero, o la VM non usa LVM, il file immagine. Lo spazio lo
+prende dal filesystem di sistema: dimensionarlo lasciando margine al sistema
+e al log d'audit, non tutto quello che `df` dice libero. Dalla radice del
+repo:
 
 ```sh
 sudo fallocate -l 20G /var/lib/hermes-tool/esiti.img
