@@ -1170,21 +1170,58 @@ Ghidra pesa centinaia di MB.
 **Un filesystem dedicato.** Il bootstrap crea la directory sul filesystem di
 sistema. Per tenere gli esiti separati dal resto — ordine, e un tetto
 naturale allo spazio — si monta lì sopra un filesystem a sé. Con un file
-immagine, senza ripartizionare (la dimensione è una scelta: 20 GiB qui):
+immagine, senza ripartizionare (la dimensione è una scelta: 20 GiB qui).
+
+Prima, due controlli. Lo spazio, perché l'immagine lo occupa subito tutto:
+
+```sh
+df -h /var/lib
+```
+
+E che la directory sia vuota: un filesystem montato sopra **nasconde** ciò
+che c'era, senza cancellarlo e senza dirlo. Se ci sono esiti, prima si
+portano via con `bin/hermes-esiti`.
+
+```sh
+sudo ls -A /var/lib/hermes-tool/esiti
+```
+
+Poi, dalla radice del repo:
 
 ```sh
 sudo fallocate -l 20G /var/lib/hermes-tool/esiti.img
 sudo mkfs.ext4 -q /var/lib/hermes-tool/esiti.img
-echo '/var/lib/hermes-tool/esiti.img /var/lib/hermes-tool/esiti ext4 loop,nodev,nosuid,noexec 0 2' | sudo tee -a /etc/fstab
+echo '/var/lib/hermes-tool/esiti.img /var/lib/hermes-tool/esiti ext4 loop,nodev,nosuid,noexec,nofail 0 2' | sudo tee -a /etc/fstab
+sudo findmnt --verify
 sudo mount /var/lib/hermes-tool/esiti
 sudo bin/hermes-bootstrap
 ```
 
 `noexec`, `nosuid`, `nodev`: gli esiti sono dati, e niente di ciò che un tool
-lascia lì deve poter diventare un eseguibile. L'ultimo comando serve: un
-filesystem appena creato ha la radice di `root:root 755`, e il bootstrap
-riporta la directory a `root:hermes 750` — il wrapper rifiuta di crearci
-directory altrimenti.
+lascia lì deve poter diventare un eseguibile.
+
+`nofail` non è cosmetico. Senza, un montaggio che fallisce all'avvio — un
+file immagine spostato, un errore di battitura nella riga — ferma la VM in
+modalità di emergenza, e una VM che non parte non si ripara via SSH. Con
+`nofail` parte lo stesso, e gli esiti finiscono sulla directory sottostante:
+il preflight se ne accorge, perché dice di nuovo «non è un filesystem
+dedicato». `findmnt --verify` controlla la riga **prima** del riavvio, che è
+il momento in cui un errore costa poco.
+
+L'ultimo comando serve: un filesystem appena creato ha la radice di
+`root:root 755`, e il bootstrap riporta la directory a `root:hermes 750` — il
+wrapper rifiuta di crearci directory altrimenti.
+
+La verifica, che riproduce ciò che conta — il montaggio è lì e ha le opzioni
+giuste:
+
+```sh
+findmnt /var/lib/hermes-tool/esiti
+```
+
+Deve mostrare `ext4` e, fra le opzioni, `nosuid,nodev,noexec`. Poi il
+preflight deve dare `esiti · filesystem` verde, e il collaudo le stesse prove
+di prima.
 
 Il preflight mostra sempre lo spazio, in numeri, e avvisa sotto un decimo
 libero o sotto 1 GiB; avvisa anche se la directory non è un filesystem
