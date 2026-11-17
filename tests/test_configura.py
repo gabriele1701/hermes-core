@@ -549,3 +549,30 @@ def test_i_percorsi_coincidono_con_quelli_del_bootstrap():
     for atteso in ("09-hermes-allowusers.conf", "10-hermes.conf", "scope.toml", "DA_COMPILARE"):
         assert atteso in configura, atteso
         assert atteso in bootstrap, atteso
+
+
+def test_riscrivere_il_perimetro_conserva_i_prefissi_di_percorso(
+    radice_finta: Path, chiavi: Chiavi
+):
+    """I prefissi non li chiede questo script, ma riscrivendo li perdeva.
+
+    Il perimetro si riscrive per cambiare le reti; i `percorsi` li aggiunge
+    l'operatore a mano. Perderli in silenzio darebbe a un tool di tipo
+    percorso un perimetro che nessuno ha deciso di restringere, scoperto al
+    primo uso. E il riepilogo di ciò che c'era prima mostrava i prefissi come
+    se fossero reti.
+    """
+    (radice_finta / "hermes" / "scope.toml").write_text(
+        'reti = [\n    "198.51.100.0/24",\n]\n'
+        'percorsi = [\n    "/srv/lab/campioni",\n    "/srv/lab/esiti",\n]\n\n[alias]\n',
+        encoding="utf-8",
+    )
+    esito = esegui(radice_finta, *completo(chiavi), "--forza")
+    testo = uscita(esito)
+    assert esito.returncode == 0, testo
+    generato = testo[testo.index("scope.toml (modo"):]
+    generato = generato[: generato.index("--->8---")]
+    assert '"/srv/lab/campioni",' in generato
+    assert '"/srv/lab/esiti",' in generato
+    assert generato.index("percorsi = [") < generato.index("[alias]")
+    assert '"192.0.2.0/24",' in generato

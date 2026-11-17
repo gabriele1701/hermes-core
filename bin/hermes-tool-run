@@ -72,6 +72,13 @@
 # proprio confine — la restrizione custodita da chi la subisce, un'altra
 # volta. Il percorso del file è una costante per lo stesso motivo dell'uid.
 #
+# Senza rete. Un tool che lavora su un file non ha niente da raggiungere, e
+# `PrivateNetwork=yes` gli dà uno spazio dei nomi di rete con la sola
+# interfaccia di loopback: non c'è niente da filtrare perché non c'è niente
+# da cui uscire. Per i tool di rete il confine resta da fare (nftables con
+# `meta skuid`), ed è una voce aperta del debito; per questi no, perché la
+# rete non gli serve affatto.
+#
 # Cosa resta visibile oltre ai prefissi, da sapere: /usr e i suoi alias
 # (/bin, /sbin, /lib, /lib64), /etc/ld.so.cache e /etc/alternatives — senza,
 # l'interprete non parte — e la directory degli script. Un symlink dal
@@ -193,7 +200,12 @@ FORMA = re.compile(r"(/[A-Za-z0-9._-]+)+")
 
 
 def fermo(motivo):
-    sys.stderr.write(motivo + "\n")
+    # Su stdout e su una riga sola: lo raccoglie la shell e lo mette nel
+    # messaggio con cui il wrapper si ferma. Prima andava su stderr, su una
+    # riga sua, e chi leggeva solo l'ultima — il preflight — riportava
+    # «montaggio ristretto non applicabile» senza il perché. Visto al primo
+    # preflight dopo il collaudo: la causa c'era, una riga più su.
+    print(" ".join(str(motivo).split()))
     sys.exit(1)
 
 
@@ -265,7 +277,8 @@ LEGGI
     )
     ESITO_LETTURA=$?
     set -e
-    [ "$ESITO_LETTURA" -eq 0 ] || muori "montaggio ristretto non applicabile: tool non avviato"
+    [ "$ESITO_LETTURA" -eq 0 ] || \
+        muori "montaggio ristretto non applicabile: ${VOCI:-motivo non riportato}; tool non avviato"
 
     # Le voci non contengono spazi né caratteri di glob — la forma è appena
     # stata verificata — ma il glob si spegne comunque: un controllo che
@@ -280,11 +293,13 @@ LEGGI
     # PrivateTmp e PrivateDevices: la radice è un tmpfs in sola lettura, e un
     # tool ha bisogno almeno di /dev/null e di un posto dove scrivere un
     # temporaneo. Sono privati dell'unità e spariscono con lei.
+    # PrivateNetwork: solo loopback. Vedere l'intestazione.
     set -- \
         -p TemporaryFileSystem=/:ro \
         -p BindReadOnlyPaths="$MONTAGGI" \
         -p PrivateTmp=yes \
         -p PrivateDevices=yes \
+        -p PrivateNetwork=yes \
         -- "$@"
 else
     set -- -- "$@"

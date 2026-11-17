@@ -2053,6 +2053,16 @@ def _montaggio_dei_percorsi(referto: Referto, cfg: ServerConfig) -> None:
         return  # già riportato da _perimetro, con il suo rimedio
     if not perimetro.percorsi:
         return
+    if _prefissi_non_utilizzabili(perimetro.percorsi):
+        # Già riportato da `perimetro dei percorsi`, con il suo rimedio. Il
+        # wrapper si rifiuterebbe di montare per la stessa causa, e un
+        # secondo errore — che per giunta arrivava senza il motivo — manda a
+        # cercare due guasti dove ce n'è uno. Peggio: senza tool di tipo
+        # percorso quel prefisso è un avviso, e questo controllo lo faceva
+        # diventare un errore che toglieva il PRONTO a un server che non ha
+        # niente di rotto. Visto al primo preflight dopo il collaudo, con il
+        # prefisso di prova rimosso dal disco e non dal perimetro.
+        return
 
     nome = "montaggio ristretto dei percorsi"
     reinstalla = (

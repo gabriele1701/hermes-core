@@ -308,11 +308,10 @@ sulla sola parola della configurazione.
 Cose che il montaggio ristretto **non** fa, scritte perché dopo qualche
 settimana sembrerebbe che le faccia:
 
-* **Non confina la rete.** Un tool di tipo percorso può aprire connessioni
-  come ogni altro tool: è la voce sul traffico qui sotto, e vale anche per
-  lui. Per un tool che analizza un binario la rete non serve affatto, e
-  `PrivateNetwork=yes` nella stessa unità la toglierebbe: non è stato fatto
-  qui perché cambierebbe cosa può fare un tool senza un tool su cui provarlo.
+* ~~**Non confina la rete.**~~ Chiusa: l'unità ristretta ha
+  `PrivateNetwork=yes`, cioè la sola loopback. Decisione dell'operatore: un
+  tool che lavora su file non ha bisogno della rete. Verificata dal collaudo
+  contando le interfacce, con il controllo che l'unità normale ne veda una.
 * **Non dà dove scrivere.** I prefissi sono montati in sola lettura e l'unico
   posto scrivibile è un `/tmp` privato che sparisce con l'unità. Ghidra vuole
   una directory di progetto: servirà un secondo elenco, di prefissi
@@ -330,8 +329,8 @@ settimana sembrerebbe che le faccia:
   controlla il bersaglio, il kernel controlla il perimetro: sono due domande
   diverse, e la seconda è più larga.
 
-**Condizione di chiusura:** le prime tre col primo tool reale che punta a un
-file, perché sono requisiti che oggi nessuno ha. Le ultime tre sono proprietà
+**Condizione di chiusura:** le due aperte delle prime tre col primo tool
+reale che punta a un file, perché sono requisiti che oggi nessuno ha. Le ultime tre sono proprietà
 del disegno: restano scritte.
 
 ---

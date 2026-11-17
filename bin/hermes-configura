@@ -693,7 +693,10 @@ fi
 
 ATTUALE=""
 if ! grep -q "$NON_COMPILATO" "$SCOPE"; then
-    ATTUALE=$(sed -n 's/^ *"\(.*\)",$/\1/p' "$SCOPE" | tr '\n' ' ')
+    # Le sole reti: le righe `"…",` di un elenco su più righe possono essere
+    # anche prefissi di percorso, e mostrarli come reti direbbe all'operatore
+    # un perimetro che non è il suo.
+    ATTUALE=$(sed -n '/^reti *= *\[/,/^\]/s/^ *"\(.*\)",$/\1/p' "$SCOPE" | tr '\n' ' ')
     [ -n "$ATTUALE" ] || ATTUALE="un perimetro senza reti"
 fi
 
@@ -725,6 +728,25 @@ if da_compilare "Il perimetro dei bersagli" "$ATTUALE"; then
         chiedi ALIAS "  alias:" valida_alias --alias
     fi
 
+    # I prefissi di percorso non li chiede questo script: si aggiungono a
+    # mano, servono solo a chi registra tool che puntano a un file. Ma
+    # riscrivendo il file li perderebbe in silenzio, e un tool di tipo
+    # percorso scoprirebbe al primo uso un perimetro che nessuno ha deciso di
+    # restringere. Si conservano come sono.
+    PERCORSI_ESISTENTI=$("$PY" -I -S - "$SCOPE" <<'PYEOF' 2>/dev/null || true
+import sys
+import tomllib
+try:
+    with open(sys.argv[1], "rb") as fh:
+        voci = tomllib.load(fh).get("percorsi", [])
+except (OSError, tomllib.TOMLDecodeError):
+    voci = []
+for voce in voci if isinstance(voci, list) else []:
+    if isinstance(voce, str):
+        print(voce)
+PYEOF
+    )
+
     tmp=$(mktemp)
     {
         printf '# Perimetro dei bersagli ammessi (A2).\n'
@@ -740,6 +762,14 @@ if da_compilare "Il perimetro dei bersagli" "$ATTUALE"; then
             [ -n "$rete" ] && printf '    "%s",\n' "$rete"
         done
         printf ']\n\n'
+        if [ -n "$PERCORSI_ESISTENTI" ]; then
+            printf '# Prefissi di percorso: conservati dal perimetro precedente.\n'
+            printf 'percorsi = [\n'
+            printf '%s\n' "$PERCORSI_ESISTENTI" | while read -r prefisso; do
+                [ -n "$prefisso" ] && printf '    "%s",\n' "$prefisso"
+            done
+            printf ']\n\n'
+        fi
         printf '# Nessuna risoluzione DNS, per scelta: una tabella dichiarata non\n'
         printf '# cambia sotto i piedi fra il controllo e l'\''uso.\n'
         printf '[alias]\n'
