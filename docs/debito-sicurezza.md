@@ -34,6 +34,7 @@ qualcosa di reale. **MEDIA** = da chiudere prima di un uso continuativo.
 | Il tetto di concorrenza era per agente, non per macchina | passo 9 | `MemoryMax` + `MemorySwapMax=0` + `TasksMax` nel cgroup dell'unità: il tetto ora misura risorse reali e non esecuzioni, che era la condizione di chiusura registrata. Valori provvisori, vedere la voce aperta qui sotto. |
 | I figli di un'uscita pulita non venivano ripuliti | passo 9 | Il cgroup dell'unità muore con l'unità qualunque cosa contenga, quindi non serve che il gate distingua un figlio legittimo da un residuo — che era il motivo per cui non si poteva chiudere con un `killpg`. |
 | I bersagli di tipo percorso non avevano un perimetro | bersagli di tipo percorso | `TargetKind.PATH`, prefissi `percorsi` nel file di perimetro, e **due strati**: il gate risolve il percorso e confronta il risolto, e `bin/hermes-tool-run --percorsi` avvia il tool in un'unità con `TemporaryFileSystem=/:ro` e `BindReadOnlyPaths=` sui soli prefissi. Un percorso fuori perimetro non è vietato, non esiste; un symlink che esce non risolve. I prefissi li legge il wrapper dal file di root, non da argv. Senza wrapper un tool di tipo percorso è **negato**, non degradato alla sola risoluzione. Verificato leggendo, non ispezionando: `bin/hermes-collauda-percorsi` e la sonda del preflight. Residui nelle due voci qui sotto. |
+| Per i bersagli di rete l'indirizzo risolto non era nel log | indirizzo risolto | La documentazione diceva che per un alias «nel log restano entrambi», e restava solo il nome: l'indirizzo viveva in memoria e nell'`argv` del tool, quindi dal log non si ricavava dove fosse andata un'esecuzione senza rileggere il perimetro *com'era quel giorno*. Ora il `detail` della riga porta `indirizzo risolto: …`, sempre, come già `percorso risolto: …` per i percorsi; vale anche per le conferme in sospeso. Nel `detail` e non in un campo nuovo: un campo cambierebbe il formato di ogni riga, e va deciso con l'ingestione del pannello. Trovata scrivendo il perimetro dei percorsi, non cercandola. |
 | HC-05 — minimo di dipendenza falso | patch sic. 4 | `mcp>=2.3,<3` e `pydantic>=2.12,<3`. Il lockfile con hash, che è la protezione vera, è documentato in `docs/dipendenze.md` e resta da generare. |
 
 ---
@@ -332,31 +333,6 @@ settimana sembrerebbe che le faccia:
 **Condizione di chiusura:** le prime tre col primo tool reale che punta a un
 file, perché sono requisiti che oggi nessuno ha. Le ultime tre sono proprietà
 del disegno: restano scritte.
-
----
-
-## MEDIA — per i bersagli di rete l'indirizzo risolto non è nel log
-
-**Dove:** `mcp_server/executor.py` (`PreparedExecution.target_risolto`),
-`config/scope.example.toml`, `docs/setup-vm-hermes.md` §5.
-
-Trovato scrivendo il perimetro dei percorsi, non cercandolo. La
-documentazione dice due volte che per un alias «nel log restano entrambi — il
-nome chiesto dal modello e l'indirizzo raggiunto». **Non è così:** la riga di
-audit porta nel campo `target` ciò che è stato chiesto (`lab-kali`), e
-l'indirizzo risolto esiste solo in memoria e nell'`argv` del tool. Dal log
-non si ricava dove è andata l'esecuzione senza rileggere il file di perimetro
-*com'era in quel momento*.
-
-Per i percorsi il risolto è nel `detail` della riga, sempre. Per gli host non
-è stato toccato: il vincolo sotto cui è nata quell'estensione era che il
-comportamento sui bersagli di rete non cambiasse di una riga, mentre il
-collaudo del perimetro di rete è in corso.
-
-**Condizione di chiusura:** la stessa coda nel `detail` (`indirizzo risolto:
-…`) per i tool di tipo host, oppure un campo dedicato nel record — che però
-cambia il formato del log e va deciso insieme all'ingestione del pannello.
-Fino ad allora, le due frasi nella documentazione descrivono un'intenzione.
 
 ---
 

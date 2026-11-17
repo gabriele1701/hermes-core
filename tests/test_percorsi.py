@@ -541,12 +541,16 @@ def test_una_conferma_in_sospeso_registra_il_percorso_risolto(
     assert f"percorso risolto: {reale}" in sospesa.detail
 
 
-def test_un_tool_di_tipo_host_non_cambia_di_una_riga(repo, registry, audit, lab):
-    """Il vincolo di additività, misurato dove potrebbe rompersi.
+def test_un_tool_di_tipo_host_non_chiede_il_montaggio(repo, registry, audit, lab):
+    """Il perimetro dei percorsi non tocca i tool di rete.
 
     Stesso gate, stesso wrapper, perimetro che dichiara ANCHE dei percorsi:
-    un tool di tipo host non chiede il montaggio e il suo `detail` è quello
-    di prima.
+    un tool di tipo host non chiede il montaggio, e riceve l'indirizzo.
+
+    Questo test pretendeva anche `detail == "exit=0"`, quando il vincolo era
+    che i bersagli di rete non cambiassero di una riga. Quel vincolo è caduto
+    con la voce del debito che ne era la conseguenza: ora la riga porta
+    l'indirizzo risolto, e lo verificano i test qui sotto.
     """
     import ipaddress
 
@@ -563,7 +567,7 @@ def test_un_tool_di_tipo_host_non_cambia_di_una_riga(repo, registry, audit, lab)
     argv = ex._runner.chiamate[0]["argv"]
     assert OPZIONE_PERCORSI not in argv
     assert argv[-2:] == ["--", "10.10.0.5"]
-    assert call.detail == "exit=0"
+    assert call.detail == "exit=0; indirizzo risolto: 10.10.0.5"
 
 
 def test_un_tool_senza_bersaglio_non_chiede_il_montaggio(repo, registry, audit, lab):
@@ -1157,3 +1161,79 @@ def test_il_wrapper_del_repo_dichiara_il_perimetro_che_il_preflight_cerca():
         == "/etc/hermes/radice-script"
     )
     assert _costante_del_wrapper(Path("/bin/true"), "SCOPE_FILE") is None
+
+
+# --------------------------------------------------------------------------- #
+# L'indirizzo risolto, per i bersagli di rete
+#
+# La documentazione diceva che per un alias «nel log restano entrambi». Non
+# era vero: restava il nome. Trovato scrivendo il perimetro dei percorsi.
+# --------------------------------------------------------------------------- #
+
+
+def _gate_di_rete(repo, registry, audit, **spec):
+    import ipaddress
+
+    registry.register(_spec(repo, target_kind=TargetKind.HOST, **spec))
+    perimetro = ScopeAllowlist(
+        (ipaddress.ip_network("10.10.0.0/16"),),
+        {"lab-kali": ipaddress.ip_address("10.10.0.5")},
+    )
+    return _executor(registry, audit, repo, scope=perimetro)
+
+
+def test_per_un_alias_il_log_dice_anche_dove_e_andata_l_esecuzione(
+    repo, registry, audit
+):
+    """Dal log, senza rileggere il perimetro com'era quel giorno."""
+    ex = _gate_di_rete(repo, registry, audit)
+    cid = uuid.uuid4()
+    call, _ = ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=cid, target="lab-kali"
+    )
+    riga = [
+        r
+        for r in audit.read_all()
+        if r.action is LogAction.TOOL_CALL and r.outcome is CallOutcome.OK
+    ][-1]
+    assert riga.correlation_id == cid
+    assert riga.target == "lab-kali", "nel campo resta ciò che è stato CHIESTO"
+    assert "indirizzo risolto: 10.10.0.5" in riga.detail
+    assert call.detail == riga.detail
+
+
+def test_per_un_indirizzo_il_risolto_c_e_anche_se_coincide(repo, registry, audit):
+    ex = _gate_di_rete(repo, registry, audit)
+    ex.execute(
+        "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4(), target="10.10.3.7"
+    )
+    riga = [r for r in audit.read_all() if r.outcome is CallOutcome.OK][-1]
+    assert riga.target == "10.10.3.7"
+    assert riga.detail == "exit=0; indirizzo risolto: 10.10.3.7"
+
+
+def test_una_conferma_in_sospeso_su_un_alias_registra_l_indirizzo(
+    repo, registry, audit
+):
+    """Una conferma si chiede su un bersaglio: chi la concede deve poter
+    leggere quale, non solo come l'ha chiamato il modello."""
+    ex = _gate_di_rete(repo, registry, audit, default_tier=RiskTier.ROSSO)
+    with pytest.raises(ConfirmationRequired):
+        ex.execute(
+            "echo.ping", OwnerAgent.ECHO_DUMMY, correlation_id=uuid.uuid4(), target="lab-kali"
+        )
+    sospesa = [r for r in audit.read_all() if r.outcome is CallOutcome.PENDING][-1]
+    assert sospesa.target == "lab-kali"
+    assert "indirizzo risolto: 10.10.0.5" in sospesa.detail
+
+
+def test_ogni_kind_con_un_bersaglio_ha_la_sua_etichetta_nel_log():
+    """Un kind nuovo senza etichetta registrerebbe solo ciò che è stato chiesto."""
+    from mcp_server.executor import nota_risolto
+
+    for kind in TargetKind:
+        if kind is TargetKind.NONE:
+            assert nota_risolto(kind, "qualcosa") == ""
+        else:
+            assert nota_risolto(kind, "X").endswith(" risolto: X"), kind
+        assert nota_risolto(kind, None) == ""

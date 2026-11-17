@@ -447,17 +447,38 @@ class PreparedExecution:
 
     @property
     def nota_risolto(self) -> str:
-        """Coda per il ``detail`` del log: il percorso risolto, se è un percorso.
+        """Coda per il ``detail`` del log: il bersaglio risolto."""
+        return nota_risolto(self.spec.target_kind, self.target_risolto)
 
-        Per un bersaglio di tipo percorso la riga di audit porta il valore
-        chiesto nel campo ``target`` e quello risolto qui, sempre e non solo
-        quando differiscono: una riga che lo omette quando coincidono non si
-        distingue da una riga che non l'ha registrato. Per gli altri kind è
-        vuota — il loro ``detail`` non cambia.
-        """
-        if self.spec.target_kind is TargetKind.PATH and self.target_risolto:
-            return f"; percorso risolto: {self.target_risolto}"
+
+#: Come si chiama, nel log, il bersaglio risolto di ciascun kind. Un kind
+#: nuovo con un bersaglio va aggiunto qui: senza, la riga direbbe cosa è
+#: stato chiesto e non cosa è stato toccato.
+_ETICHETTA_RISOLTO = {
+    TargetKind.HOST: "indirizzo risolto",
+    TargetKind.PATH: "percorso risolto",
+}
+
+
+def nota_risolto(kind: TargetKind, risolto: str | None) -> str:
+    """Coda per il ``detail``: cosa è stato toccato, accanto a cosa è stato chiesto.
+
+    La riga di audit porta nel campo ``target`` il valore **chiesto** — un
+    alias come l'ha scritto il modello, un percorso che può passare da un
+    symlink — e qui quello **risolto**, che è ciò che il tool ha ricevuto.
+    Sempre, e non solo quando differiscono: una riga che lo omette quando
+    coincidono non si distingue da una riga che non l'ha registrato.
+
+    Per gli alias di rete la documentazione lo prometteva da prima che fosse
+    vero: l'indirizzo risolto esisteva in memoria e nell'``argv`` del tool, e
+    dal log non si ricavava dove fosse andata un'esecuzione senza rileggere il
+    file di perimetro *com'era in quel momento* — cioè un file che l'operatore
+    può avere cambiato da allora.
+    """
+    etichetta = _ETICHETTA_RISOLTO.get(kind)
+    if etichetta is None or not risolto:
         return ""
+    return f"; {etichetta}: {risolto}"
 
 
 # --------------------------------------------------------------------------- #
@@ -788,11 +809,7 @@ class ToolExecutor:
                 detail=(
                     f"conferma richiesta e non fornita: tecnica="
                     f"{policy.technical}, dedicata={policy.personal}"
-                    + (
-                        f"; percorso risolto: {target_risolto}"
-                        if spec.target_kind is TargetKind.PATH and target_risolto
-                        else ""
-                    )
+                    + nota_risolto(spec.target_kind, target_risolto)
                 ),
             )
             raise ConfirmationRequired(
