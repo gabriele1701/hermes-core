@@ -284,3 +284,47 @@ description = "Agente dummy: restituisce un risultato conforme al contratto."
 # target_kind = "path"
 # exec_args = ["--percorso"]
 # description = "Dummy che accetta un percorso: serve a verificare il perimetro dei percorsi."
+
+# --------------------------------------------------------------------------- #
+# Canary di hermes-assess (docs/assess.md).
+#
+# Non fanno niente: leggono il proprio ambiente e lo stampano, senza aprire
+# connessioni né toccare il bersaglio. hermes-assess li invoca lungo la catena
+# vera per verificare che la traccia sia completa e che il perimetro rifiuti
+# ciò che deve rifiutare. Non vanno mai sostituiti con un tool reale: se il
+# gate cedesse, a partire deve essere uno script innocuo.
+#
+# owner_agent deve essere l'agente di QUESTA istanza (server.agent).
+#
+# Su una macchina già installata il bootstrap non tocca hermes.toml: il blocco
+# si copia a mano e lo SHA si scrive a mano, come per ogni tool aggiunto dopo:
+#     sha256sum agents/assess_canary/run.py
+# --------------------------------------------------------------------------- #
+
+[[tool]]
+tool_id = "assess.canary"
+owner_agent = "echo_dummy"
+default_tier = "verde"
+personal_data = false
+requires_container = false
+exec_path = "agents/assess_canary/run.py"
+exec_sha256 = "73975edbc217c06f05452a1dde69e2224e1930479e8a4c0aef2cb4d3c4c7b4fb"
+description = "Canary di hermes-assess: riporta il proprio ambiente, non tocca niente."
+
+# Lo stesso canary con un bersaglio di rete: esercita il perimetro (AS-06).
+# Commentato per la stessa ragione di echo.bersaglio: un tool con bersaglio
+# richiede scope_file, e senza il preflight lo segnala come errore. Si attiva
+# quando il perimetro c'è, con almeno un alias; da quel momento è il collaudo
+# stabile del perimetro, anche dopo che echo.bersaglio sarà rimosso.
+
+# [[tool]]
+# tool_id = "assess.canary_host"
+# owner_agent = "echo_dummy"
+# default_tier = "verde"
+# personal_data = false
+# requires_container = false
+# exec_path = "agents/assess_canary/run.py"
+# exec_sha256 = "<lo stesso SHA di assess.canary>"
+# target_kind = "host"
+# exec_args = ["--bersaglio"]
+# description = "Canary di hermes-assess con bersaglio: verifica il perimetro."

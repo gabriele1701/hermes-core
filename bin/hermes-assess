@@ -1,0 +1,96 @@
+#!/bin/sh
+# Verifica che le difese del server reggano. Vedere docs/assess.md.
+#
+#   sudo bin/hermes-assess config/hermes.toml [--json] [--solo AS-03,AS-05]
+#
+# Perché un'unità, e perché senza rete
+# ------------------------------------
+#
+# Il giro gira in un'unità transiente con IPAddressDeny=any e il solo
+# loopback ammesso. «Da questo server non esce nulla» è un vincolo del
+# progetto, e un vincolo scritto in un documento è una promessa: qui è il
+# kernel a farlo valere, anche per un errore di programmazione o per un
+# modulo importato che decidesse di telefonare a casa. Il loopback resta
+# perché alcune prove (AS-09) vi aprono un listener.
+#
+# Le unità dei tool che il server avvia lungo la catena sono unità sorelle,
+# lanciate da PID 1 tramite il wrapper: questo limite non le riguarda, e non
+# deve — il loro confinamento è affare del wrapper, ed è ciò che si misura.
+#
+# Niente NoNewPrivileges: il server, lanciato come utente di servizio, deve
+# poter chiamare sudo per il wrapper. Le sonde se lo mettono da sole.
+#
+# Perché il codice d'uscita si legge dall'unità
+# ----------------------------------------------
+#
+# systemd-run --wait torna 1 per qualunque fallimento dell'unità, e i codici
+# di hermes-assess (1 cedimenti, 2 alte non verificabili, 3 non eseguito)
+# dicono cose diverse. Come in bin/hermes-tool-run: niente --collect,
+# ExecMainStatus letto prima di rimuovere l'unità.
+
+set -eu
+
+SYSTEMD_RUN=/usr/bin/systemd-run
+SYSTEMCTL=/usr/bin/systemctl
+NON_ESEGUITO=3
+
+muori() {
+    printf 'hermes-assess: %s\n' "$1" >&2
+    if [ $# -gt 1 ]; then
+        printf '  rimedio: %s\n' "$2" >&2
+    fi
+    exit "$NON_ESEGUITO"
+}
+
+SCRIPT_PATH=$(readlink -f "$0")
+PROGETTO=$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)
+PYTHON="$PROGETTO/.venv/bin/python"
+
+[ "$(id -u)" -eq 0 ] || muori "va lanciato da root: le prove scendono a ciascuna identità di servizio" \
+    "sudo $0 $*"
+[ $# -ge 1 ] || muori "uso: hermes-assess <config/hermes.toml> [--json] [--solo AS-xx,...]"
+[ -x "$PYTHON" ] || muori "interprete del virtualenv assente: $PYTHON" \
+    "docs/setup-vm-hermes.md §3"
+[ -x "$SYSTEMD_RUN" ] || muori "systemd-run assente: senza unità il limite di rete non si applica, e il giro non parte senza"
+
+CONFIG=$(readlink -f "$1") || muori "configurazione non trovata: $1"
+shift
+[ -f "$CONFIG" ] || muori "configurazione non trovata: $CONFIG"
+
+UNITA="hermes-assess-$(cat /proc/sys/kernel/random/uuid)"
+
+set +e
+"$SYSTEMD_RUN" \
+    --pipe --wait --quiet \
+    --unit="$UNITA" \
+    --working-directory="$PROGETTO" \
+    -p IPAddressDeny=any \
+    -p IPAddressAllow=localhost \
+    -- "$PYTHON" -I -m mcp_server.assess "$CONFIG" "$@"
+ESITO_RUN=$?
+set -e
+
+PROPRIETA=$("$SYSTEMCTL" show "$UNITA.service" \
+    --property=ExecMainCode --property=ExecMainStatus 2>/dev/null || true)
+CODICE=$(printf '%s\n' "$PROPRIETA" | sed -n 's/^ExecMainCode=//p')
+STATO=$(printf '%s\n' "$PROPRIETA" | sed -n 's/^ExecMainStatus=//p')
+"$SYSTEMCTL" reset-failed "$UNITA.service" >/dev/null 2>&1 || true
+
+# Un'unità conclusa con successo può essere già raccolta: campi vuoti ed
+# esito 0, che è giusto. Campi vuoti ed esito diverso da 0 vuol dire che
+# l'unità non è mai partita (systemd assente, bus irraggiungibile, rifiuto):
+# nessuna prova è stata eseguita, e riportare l'1 di systemd-run farebbe
+# leggere «cedimenti» a un giro che non c'è stato. Trovato provandolo su una
+# macchina senza systemd come PID 1.
+case "$CODICE" in
+    1) exit "${STATO:-$NON_ESEGUITO}" ;;
+    2|3|4) exit "$NON_ESEGUITO" ;;  # ucciso: il giro non è arrivato in fondo
+    *)
+        if [ "$ESITO_RUN" -eq 0 ]; then
+            exit 0
+        fi
+        printf 'hermes-assess: l'\''unità %s non è partita o non è interrogabile (systemd-run: %s)\n' \
+            "$UNITA" "$ESITO_RUN" >&2
+        exit "$NON_ESEGUITO"
+        ;;
+esac

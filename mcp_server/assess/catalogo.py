@@ -147,16 +147,19 @@ CATALOGO: tuple[Minaccia, ...] = (
         "scrive righe false nella traccia che lo registra",
         origine=("A1",),
         natura=Natura.TENTATIVO,
-        prova="Dal canary, nell'unità del wrapper: lettura della "
-        "configurazione, dello store degli override e del vault; apertura in "
-        "scrittura del log d'audit e di state_dir.",
+        prova="Dal wrapper installato, nell'unità normale (la meno ristretta "
+        "in cui un tool può girare), come utente dei tool: lettura della "
+        "configurazione e dello store degli override, apertura in scrittura "
+        "del log d'audit, creabilità in state_dir. Non dal canary: per sapere "
+        "dove stanno quei file dovrebbe leggere la configurazione, cioè fare "
+        "ciò che la prova deve dimostrare impossibile.",
         controllo_positivo="Le stesse operazioni come utente di servizio "
         "riescono.",
         perche_misura=None,
-        applicabile_se="server.tool_runner configurato",
+        applicabile_se="server.tool_runner configurato, esecuzione da root",
         gravita=Severity.HIGH,
-        effetti="un'invocazione del canary, registrata nel log come "
-        "qualunque invocazione; le aperture non scrivono",
+        effetti="due unità transienti per file, terminate e rimosse; le "
+        "aperture non scrivono",
         rimedio="Permessi di log e state_dir come in docs/setup-vm-hermes.md "
         "§3, «Le directory scrivibili dal servizio»; il preflight nomina il "
         "comando.",
@@ -193,7 +196,7 @@ CATALOGO: tuple[Minaccia, ...] = (
         perche_misura="La prova è positiva: si esegue un'invocazione "
         "legittima e si misura la traccia che lascia. Non c'è un'operazione "
         "vietata da tentare.",
-        applicabile_se=SEMPRE,
+        applicabile_se="assess.canary registrato per l'agente dell'istanza",
         gravita=Severity.MEDIUM,
         effetti="un'invocazione del canary: righe nel log e una directory di "
         "esiti, come qualunque invocazione",
@@ -212,9 +215,11 @@ CATALOGO: tuple[Minaccia, ...] = (
         "perimetro → denied. Il canary non apre connessioni: se il gate "
         "cedesse, partirebbe uno script che stampa il bersaglio.",
         controllo_positivo="assess.canary_host invocato su un alias dentro il "
-        "perimetro → ok.",
+        "perimetro, o sul primo indirizzo della prima rete se non ci sono "
+        "alias → ok.",
         perche_misura=None,
-        applicabile_se="server.scope_file configurato, con almeno un alias",
+        applicabile_se="server.scope_file configurato, assess.canary e "
+        "assess.canary_host registrati per l'agente dell'istanza",
         gravita=Severity.HIGH,
         effetti="tre invocazioni dei canary, registrate nel log",
         rimedio="Un cedimento qui è un difetto del gate: va aperta una issue. "

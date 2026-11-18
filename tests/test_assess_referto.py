@@ -114,7 +114,7 @@ def test_conta_la_gravita_nel_contesto_non_quella_di_base():
 def test_il_json_e_ascii_e_porta_lo_schema():
     referto = Referto(
         generato="2026-11-18T14:00:00+01:00",
-        host="hermesmcp",
+        host="server-di-prova",
         config="/opt/hermes-core/config/hermes.toml",
         commit="72019a6",
         albero_pulito=True,
@@ -134,3 +134,10 @@ def test_il_json_e_ascii_e_porta_lo_schema():
     assert dati["schema"] == SCHEMA
     assert dati["voci"][0]["esito"] == "tiene"
     assert dati["voci"][0]["evidenze"][0]["oggetto"] == "/etc/hermes/città"
+
+
+def test_anche_la_nota_della_voce_si_ripulisce():
+    """La nota può portare il summary arrivato dal server."""
+    v = Voce("AS-05", EsitoProva.NON_VERIFICABILE, Severity.MEDIUM, Severity.MEDIUM,
+             nota="riga\nfalsa\x1b[2J")
+    assert "\n" not in v.nota and "\x1b" not in v.nota
