@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import datetime as _dt
 from collections.abc import Mapping
+from pathlib import Path
 
 from mcp_server.assess import contesto as _contesto
+from mcp_server.assess import lynis as _lynis
 from mcp_server.assess.catalogo import CATALOGO, Minaccia
 from mcp_server.assess.contesto import Contesto
 from mcp_server.assess.prove import Prova, Risultato, registro
@@ -57,7 +59,9 @@ def esegui(
     *,
     solo: frozenset[str] | None = None,
     prove: Mapping[str, Prova] | None = None,
+    referto_lynis: Path | None = _lynis.PREDEFINITO,
 ) -> Referto:
+    """``referto_lynis`` ``None`` = fonte esterna non letta."""
     prove = registro() if prove is None else prove
     voci, non_implementate = [], []
     for minaccia in CATALOGO:
@@ -81,6 +85,12 @@ def esegui(
     if non_implementate:
         limiti.append("prove non ancora implementate: " + ", ".join(non_implementate))
 
+    esterne: tuple = ()
+    if referto_lynis is not None:
+        lettura = _lynis.leggi(referto_lynis)
+        esterne = lettura.voci
+        limiti.extend(lettura.limiti)
+
     commit, pulito = _contesto.stato_del_repo(ctx.repo)
     if not pulito:
         limiti.append(
@@ -95,6 +105,7 @@ def esegui(
         albero_pulito=pulito,
         voci=tuple(voci),
         limiti=tuple(limiti),
+        esterne=esterne,
     )
 
 

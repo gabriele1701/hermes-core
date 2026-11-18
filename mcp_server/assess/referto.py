@@ -149,6 +149,31 @@ class Voce:
 
 
 @dataclass(frozen=True, slots=True)
+class VoceEsterna:
+    """Una voce letta dal referto di uno strumento esterno (M1.5).
+
+    Non è l'esito di una prova del catalogo: dice «lo strumento X segnala
+    questo», non «questa difesa cede». Per questo sta in un elenco a parte e
+    non entra nel codice d'uscita. Tutto ciò che viene dal file dello
+    strumento è dato non fidato: il file sta sull'host sorvegliato.
+    """
+
+    #: Strumento e versione dichiarata nel suo referto, es. ``lynis 3.1.1``.
+    origine: str
+    #: Codice del test nello strumento, es. ``SSH-7408``.
+    test: str
+    #: ``avviso`` o ``suggerimento``, nella classificazione dello strumento.
+    tipo: str
+    messaggio: str
+    dettaglio: str = ""
+    soluzione: str = ""
+
+    def __post_init__(self) -> None:
+        for nome in ("origine", "test", "tipo", "messaggio", "dettaglio", "soluzione"):
+            object.__setattr__(self, nome, dato_non_fidato(getattr(self, nome)))
+
+
+@dataclass(frozen=True, slots=True)
 class Referto:
     generato: str
     host: str
@@ -159,6 +184,9 @@ class Referto:
     #: Limiti del giro, in testa al referto: per esempio che ogni prova
     #: locale è falsificabile da root compromesso.
     limiti: tuple[str, ...] = ()
+    #: Voci di strumenti esterni, separate dalle prove e fuori dal codice
+    #: d'uscita.
+    esterne: tuple[VoceEsterna, ...] = ()
     schema: str = field(default=SCHEMA)
 
 
@@ -194,6 +222,7 @@ __all__ = [
     "Evidenza",
     "Referto",
     "Voce",
+    "VoceEsterna",
     "codice_uscita",
     "dato_non_fidato",
     "gravita_almeno",

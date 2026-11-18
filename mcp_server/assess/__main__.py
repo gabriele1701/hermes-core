@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
-from mcp_server.assess import giro
+from mcp_server.assess import giro, lynis
 from mcp_server.assess.catalogo import Natura, per_id
 from mcp_server.assess.contesto import costruisci
 from mcp_server.assess.referto import (
@@ -55,6 +56,15 @@ def stampa(referto: Referto, destinazione=sys.stdout) -> None:
             scrivi(f"      {segno}: {e.operazione} {e.oggetto} come {e.identita}: {stato}{dettaglio}")
         if v.esito in (EsitoProva.CEDE, EsitoProva.ACCETTATO):
             scrivi(f"    rimedio: {catalogo[v.minaccia].rimedio}")
+    if referto.esterne:
+        scrivi()
+        scrivi("fonti esterne — segnalazioni, non esiti di prova; non entrano nell'esito")
+        for e in referto.esterne:
+            scrivi(f"  [{e.origine} {e.test}] {e.tipo}: {e.messaggio}")
+            if e.dettaglio:
+                scrivi(f"      dettaglio: {e.dettaglio}")
+            if e.soluzione:
+                scrivi(f"      soluzione indicata da lynis: {e.soluzione}")
     scrivi()
     scrivi(f"esito: {codice_uscita(referto.voci).name.lower().replace('_', ' ')}")
 
@@ -69,6 +79,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--solo", default="", help="solo queste minacce, separate da virgole (AS-03,AS-05)"
     )
+    parser.add_argument(
+        "--lynis",
+        default=str(lynis.PREDEFINITO),
+        help="referto di lynis da leggere (predefinito: %(default)s)",
+    )
+    parser.add_argument(
+        "--senza-lynis", action="store_true", help="non leggere il referto di lynis"
+    )
     args = parser.parse_args(argv)
 
     solo = frozenset(x.strip() for x in args.solo.split(",") if x.strip()) or None
@@ -82,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"hermes-assess: configurazione non caricabile: {err}", file=sys.stderr)
         return CodiceUscita.NON_ESEGUITO
 
-    referto = giro.esegui(ctx, solo=solo)
+    referto_lynis = None if args.senza_lynis else Path(args.lynis)
+    referto = giro.esegui(ctx, solo=solo, referto_lynis=referto_lynis)
     try:
         if args.json:
             print(in_json(referto))
