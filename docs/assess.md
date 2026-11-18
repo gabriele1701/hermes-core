@@ -1,6 +1,6 @@
 # `hermes-assess` — verificare che le difese reggano
 
-**Stato:** M0. Contratto e catalogo presenti; le prove arrivano in M1.
+**Stato:** M1.1. Catalogo, referto, lanciatore e tre prove: AS-03 (confine dei tool), AS-05 (traccia), AS-06 (perimetro di rete). Le altre risultano «non ancora implementate» nel referto.
 
 ## Cosa è
 
@@ -59,6 +59,48 @@ Schema in [`mcp_server/assess/referto.py`](../mcp_server/assess/referto.py), ver
 | 3 | `hermes-assess` non ha potuto girare |
 
 Un cedimento contro una voce **ACCETTATA** del registro del debito è *accettato* e non conta. Uno contro una voce **aperta** resta un cedimento, con il rimando alla voce.
+
+## Uso
+
+```sh
+cd /opt/hermes-core
+sudo bin/hermes-assess config/hermes.toml           # referto leggibile
+sudo bin/hermes-assess config/hermes.toml --json    # referto JSON
+sudo bin/hermes-assess config/hermes.toml --solo AS-03,AS-06
+```
+
+Il lanciatore rifiuta di partire senza root e senza systemd: senza unità il limite di rete non si applicherebbe. Il codice d'uscita è quello della tabella sopra, letto dall'unità: `systemd-run --wait` restituirebbe 1 per qualunque fallimento, e un giro mai partito sembrerebbe un giro con cedimenti.
+
+`python -m mcp_server.assess` esegue il giro senza unità e senza discesa di identità. Serve ai test; il referto lo dichiara.
+
+### Registrare i canary su una macchina già installata
+
+Il bootstrap non tocca un `hermes.toml` esistente, e lo SHA di un tool aggiunto dopo si scrive a mano. Si copiano i blocchi `assess.canary` (e `assess.canary_host` se il perimetro ha almeno un alias) da `config/hermes.example.toml`, con `owner_agent` uguale a `server.agent`, e:
+
+```sh
+sha256sum agents/assess_canary/run.py
+```
+
+La lettura dello script da parte di `hermes-tool` non richiede niente: `agents/` ha un'ACL di default, che la directory nuova eredita al `git pull`. Il preflight lo verifica per ogni tool registrato.
+
+### Collaudo sulla VM: vedere ogni prova cedere
+
+Prima del merge ogni prova si vede **dire no**. Su `hermesmcp`, dopo aver registrato i canary:
+
+1. `sudo bin/hermes-assess config/hermes.toml --solo AS-03,AS-05,AS-06`: le tre voci *tiene*.
+2. **AS-03 cede.** Si apre `state_dir` all'utente dei tool, con due voci ACL e senza toccare i bit:
+   ```sh
+   sudo setfacl -m u:hermes-tool:--x /var/lib/hermes
+   sudo setfacl -m u:hermes-tool:rwx /var/lib/hermes/state
+   sudo bin/hermes-assess config/hermes.toml --solo AS-03      # atteso: CEDE su state_dir, uscita 1
+   sudo setfacl -x u:hermes-tool /var/lib/hermes/state
+   sudo setfacl -x u:hermes-tool /var/lib/hermes
+   sudo bin/hermes-assess config/hermes.toml --solo AS-03      # di nuovo TIENE
+   ```
+3. **AS-06 senza controllo positivo.** Si registra `assess.canary_host` con un `exec_sha256` sbagliato: il gate rifiuta anche il bersaglio dentro il perimetro, e la voce deve dire *non verificabile*, non *tiene*. Poi si rimette lo SHA giusto.
+4. **Il giro mai partito.** `sudo bin/hermes-assess /tmp/non-esiste.toml; echo $?` deve stampare 3, non 1. Il ramo in cui `systemd-run` stesso fallisce è stato visto su una macchina senza systemd come PID 1: anche lì 3.
+
+AS-05 cede solo con un difetto del server (una riga di traccia che manca): sulla macchina non lo si provoca, e la suite lo esercita con righe costruite.
 
 ## Architettura (M1)
 

@@ -134,3 +134,10 @@ def test_il_json_e_ascii_e_porta_lo_schema():
     assert dati["schema"] == SCHEMA
     assert dati["voci"][0]["esito"] == "tiene"
     assert dati["voci"][0]["evidenze"][0]["oggetto"] == "/etc/hermes/città"
+
+
+def test_anche_la_nota_della_voce_si_ripulisce():
+    """La nota può portare il summary arrivato dal server."""
+    v = Voce("AS-05", EsitoProva.NON_VERIFICABILE, Severity.MEDIUM, Severity.MEDIUM,
+             nota="riga\nfalsa\x1b[2J")
+    assert "\n" not in v.nota and "\x1b" not in v.nota

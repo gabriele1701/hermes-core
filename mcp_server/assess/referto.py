@@ -116,6 +116,11 @@ class Evidenza:
     controllo_positivo: bool = False
     #: errno, messaggio, riga di log. Dato non fidato.
     dettaglio: str = ""
+    #: ``False`` se la sonda non ha risposto: wrapper che rifiuta, timeout,
+    #: output illeggibile. Allora ``riuscita`` è falso ma **non** è un
+    #: rifiuto dell'operazione, e una prova che lo contasse come tale
+    #: direbbe *tiene* su una difesa che nessuno ha messo alla prova.
+    eseguita: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "oggetto", dato_non_fidato(self.oggetto))
@@ -134,8 +139,13 @@ class Voce:
     #: Un modificatore applicato è sempre scritto, con il motivo.
     modificatori: tuple[str, ...] = ()
     evidenze: tuple[Evidenza, ...] = ()
-    #: Perché non applicabile, perché non verificabile, quale debito.
+    #: Perché non applicabile, perché non verificabile, quale debito. Può
+    #: riportare testo arrivato dalla catena — il ``summary`` di un risultato,
+    #: il messaggio di un'eccezione — quindi è dato non fidato anche lei.
     nota: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "nota", dato_non_fidato(self.nota, 2 * TETTO_NON_FIDATO))
 
 
 @dataclass(frozen=True, slots=True)
