@@ -81,6 +81,7 @@ va davvero a finire.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import signal
@@ -519,8 +520,29 @@ def risolvi_script(repo_root: Path, exec_path: str) -> Path:
         raise IntegrityMismatch(
             f"lo script esce dalla radice del repo: {exec_path!r} -> {candidato}"
         )
-    if not candidato.is_file():
-        raise IntegrityMismatch(f"script assente o non regolare: {candidato}")
+    # os.stat e non is_file(): is_file() risponde False anche quando il
+    # servizio non ha il permesso di attraversare la directory, e il messaggio
+    # diceva «assente» per un file presente. Trovato al collaudo di
+    # hermes-assess, dopo un checkout che aveva creato la directory con il
+    # gruppo di chi aggiornava. Ogni ramo nega: cambia solo cosa si dice.
+    try:
+        st = candidato.stat()
+    except FileNotFoundError:
+        raise IntegrityMismatch(f"script assente: {candidato}") from None
+    except PermissionError as err:
+        raise IntegrityMismatch(
+            f"script non raggiungibile dal servizio "
+            f"({errno.errorcode.get(err.errno, err.errno)}): {candidato} — il "
+            f"repo si legge tramite il gruppo del servizio; dopo un "
+            f"aggiornamento rilanciare bin/hermes-bootstrap"
+        ) from None
+    except OSError as err:
+        raise IntegrityMismatch(
+            f"script non verificabile "
+            f"({errno.errorcode.get(err.errno, err.errno)}): {candidato}"
+        ) from None
+    if not stat.S_ISREG(st.st_mode):
+        raise IntegrityMismatch(f"script non regolare: {candidato}")
     return candidato
 
 
