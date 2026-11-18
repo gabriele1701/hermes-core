@@ -114,7 +114,7 @@ def test_conta_la_gravita_nel_contesto_non_quella_di_base():
 def test_il_json_e_ascii_e_porta_lo_schema():
     referto = Referto(
         generato="2026-11-18T14:00:00+01:00",
-        host="hermesmcp",
+        host="server-di-prova",
         config="/opt/hermes-core/config/hermes.toml",
         commit="72019a6",
         albero_pulito=True,

@@ -85,7 +85,7 @@ La lettura dello script da parte di `hermes-tool` non richiede niente: `agents/`
 
 ### Collaudo sulla VM: vedere ogni prova cedere
 
-Prima del merge ogni prova si vede **dire no**. Su `hermesmcp`, dopo aver registrato i canary:
+Prima del merge ogni prova si vede **dire no**. Sulla VM del server, dopo aver registrato i canary:
 
 1. `sudo bin/hermes-assess config/hermes.toml --solo AS-03,AS-05,AS-06`: le tre voci *tiene*.
 2. **AS-03 cede.** Si apre `state_dir` all'utente dei tool, con due voci ACL e senza toccare i bit:
