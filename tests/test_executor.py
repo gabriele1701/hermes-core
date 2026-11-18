@@ -8,6 +8,8 @@ cosa ferma, non da cosa lascia passare.
 
 from __future__ import annotations
 
+import os
+
 import subprocess
 import time
 import uuid
@@ -153,8 +155,26 @@ def test_script_assente_rifiutato(repo: Path):
 
 
 def test_directory_non_e_uno_script(repo: Path):
-    with pytest.raises(IntegrityMismatch):
+    with pytest.raises(IntegrityMismatch, match="non regolare"):
         risolvi_script(repo, "tools")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root attraversa comunque")
+def test_uno_script_irraggiungibile_non_e_dichiarato_assente(repo: Path):
+    """Il file c'è, il servizio non può attraversare la directory.
+
+    Prima il messaggio diceva «assente», e mandava a cercare un file che
+    esisteva. L'esecuzione resta negata: cambia solo la causa detta.
+    """
+    cartella = (repo / SCRIPT).parent
+    cartella.chmod(0)
+    try:
+        with pytest.raises(IntegrityMismatch, match="non raggiungibile.*EACCES") as err:
+            risolvi_script(repo, SCRIPT)
+        assert "assente" not in str(err.value)
+        assert "hermes-bootstrap" in str(err.value)
+    finally:
+        cartella.chmod(0o755)
 
 
 # --------------------------------------------------------------------------- #
