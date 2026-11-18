@@ -30,9 +30,9 @@ from mcp_server.contracts import Severity
     [
         ("riga\nfalsa", "riga\\u000afalsa"),
         ("\x1b[31mrosso", "\\u001b[31mrosso"),
-        ("a‮b", "a\\u202eb"),  # override destra-sinistra
-        ("a​b", "a\\u200bb"),  # spazio a larghezza zero
-        ("a b", "a\\u2028b"),  # separatore di riga Unicode
+        ("a\u202eb", "a\\u202eb"),  # override destra-sinistra
+        ("a\u200bb", "a\\u200bb"),  # spazio a larghezza zero
+        ("a\u2028b", "a\\u2028b"),  # separatore di riga Unicode
         ("città/é", "città/é"),  # testo normale non si tocca
     ],
 )
