@@ -81,7 +81,7 @@ Il bootstrap non tocca un `hermes.toml` esistente, e lo SHA di un tool aggiunto 
 sha256sum agents/assess_canary/run.py
 ```
 
-La lettura dello script da parte di `hermes-tool` non richiede niente: `agents/` ha un'ACL di default, che la directory nuova eredita al `git pull`. Il preflight lo verifica per ogni tool registrato.
+Dopo l'aggiornamento del repo va rilanciato `sudo bin/hermes-bootstrap`, come per ogni aggiornamento. Il servizio legge il repo **solo tramite il gruppo**, e `git` crea `agents/assess_canary/` con il gruppo primario di chi aggiorna: senza il bootstrap il gate non raggiunge lo script e lo dichiara assente. L'ACL di default di `agents/` copre `hermes-tool`, che esegue lo script, non il gruppo del servizio, che ne verifica lo SHA. Trovato al primo collaudo. Il preflight segnala il caso per ogni tool registrato.
 
 ### Collaudo sulla VM: vedere ogni prova cedere
 
