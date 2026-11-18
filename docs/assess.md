@@ -128,7 +128,7 @@ operatore ──sudo──► bin/hermes-assess   (unità transiente, IPAddressD
 | M1.2 | prove sotto le identità di servizio: SSH, interprete, log, sudoers, codice privilegiato, utenti |
 | M1.3 | unità, rete, superficie, coerenza del log, orologio, tier; valutazione, modificatori, `--prova` |
 | M1.4 | inventario e `bin/hermes-assess-vuln` sul PC |
-| M1.5 | adattatori per strumenti esterni che girano offline (lynis, trivy con database copiato) |
+| M1.5 | adattatori per strumenti esterni che girano offline: **lynis fatto** (gruppi SSH e AUTH); trivy con database copiato |
 | M2 | baseline e scostamento, referto spedito al collector |
 | M3 | prove dal collector: superficie vista dall'esterno, confronto della copia del log |
 | M4 | skill `/assess-review` di Hermes sul PC |
@@ -137,7 +137,20 @@ operatore ──sudo──► bin/hermes-assess   (unità transiente, IPAddressD
 
 ### Strumenti esterni (M1.5)
 
-Un adattatore dichiara il binario, la versione minima e se gli serve la rete, e se gli serve sul server non gira. Le sue voci portano l'origine (`lynis 3.x`) e restano distinte dalle prove: uno strumento esterno dice *è configurato male*, una prova dice *la difesa cede*. Se lo strumento non è installato la voce è *non applicabile*: `hermes-assess` non installa niente.
+Un adattatore dichiara lo strumento e se gli serve la rete; se gli serve, sul server non gira. Le sue voci portano l'origine e il codice del test e stanno in un elenco a parte del referto, `esterne`: uno strumento esterno dice *questo è segnalato*, una prova dice *la difesa cede*. **Le voci esterne non entrano nel codice d'uscita.** `hermes-assess` non lancia gli strumenti e non li installa.
+
+**lynis (anticipato).** Si legge il referto che lynis scrive alla fine di un audit:
+
+```sh
+sudo lynis audit system                       # dell'operatore, quando vuole
+sudo bin/hermes-assess config/hermes.toml     # legge /var/log/lynis-report.dat
+sudo bin/hermes-assess config/hermes.toml --lynis /percorso/lynis-report.dat
+sudo bin/hermes-assess config/hermes.toml --senza-lynis
+```
+
+- Solo i gruppi **SSH** (`SSH-*`) e **autenticazione e account** (`AUTH-*`). Il resto del referto di lynis non entra.
+- Ogni campo è dato non fidato: il file sta sull'host sorvegliato. Le righe senza la forma attesa si contano e si dichiarano, non si interpretano.
+- Referto assente: nessuna voce, e i limiti lo dicono. Audit più vecchio di sette giorni: le voci restano, con la data nei limiti.
 
 ### Strato agentico (M4)
 
