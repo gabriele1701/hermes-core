@@ -1186,13 +1186,38 @@ portano via con `bin/hermes-esiti`.
 sudo ls -A /var/lib/hermes-tool/esiti
 ```
 
-Poi, dalla radice del repo:
+**Volume logico o file immagine.** Se la VM usa LVM — l'installatore di
+Ubuntu Server lo fa per default, e spesso lascia libera parte del gruppo di
+volumi — un volume logico è meglio di un file immagine: niente loop, e lo
+spazio non si prende dal filesystem di sistema. Si guarda la colonna `VFree`:
+
+```sh
+sudo vgs
+```
+
+Se c'è spazio (5 GiB qui; nome del gruppo come lo mostra `vgs`):
+
+```sh
+sudo lvcreate -L 5G -n esiti ubuntu-vg
+sudo mkfs.ext4 -q /dev/ubuntu-vg/esiti
+echo '/dev/ubuntu-vg/esiti /var/lib/hermes-tool/esiti ext4 nodev,nosuid,noexec,nofail 0 2' | sudo tee -a /etc/fstab
+sudo findmnt --verify
+sudo systemctl daemon-reload
+sudo mount /var/lib/hermes-tool/esiti
+sudo bin/hermes-bootstrap
+```
+
+Se `VFree` è zero, o la VM non usa LVM, il file immagine. Lo spazio lo
+prende dal filesystem di sistema: dimensionarlo lasciando margine al sistema
+e al log d'audit, non tutto quello che `df` dice libero. Dalla radice del
+repo:
 
 ```sh
 sudo fallocate -l 20G /var/lib/hermes-tool/esiti.img
 sudo mkfs.ext4 -q /var/lib/hermes-tool/esiti.img
 echo '/var/lib/hermes-tool/esiti.img /var/lib/hermes-tool/esiti ext4 loop,nodev,nosuid,noexec,nofail 0 2' | sudo tee -a /etc/fstab
 sudo findmnt --verify
+sudo systemctl daemon-reload
 sudo mount /var/lib/hermes-tool/esiti
 sudo bin/hermes-bootstrap
 ```
@@ -1206,7 +1231,9 @@ modalità di emergenza, e una VM che non parte non si ripara via SSH. Con
 `nofail` parte lo stesso, e gli esiti finiscono sulla directory sottostante:
 il preflight se ne accorge, perché dice di nuovo «non è un filesystem
 dedicato». `findmnt --verify` controlla la riga **prima** del riavvio, che è
-il momento in cui un errore costa poco.
+il momento in cui un errore costa poco. `systemctl daemon-reload` fa leggere a systemd il
+`fstab` nuovo, da cui genera l'unità di montaggio: senza, `findmnt` e `mount`
+avvisano che systemd usa ancora la versione precedente.
 
 L'ultimo comando serve: un filesystem appena creato ha la radice di
 `root:root 755`, e il bootstrap riporta la directory a `root:hermes 750` — il
